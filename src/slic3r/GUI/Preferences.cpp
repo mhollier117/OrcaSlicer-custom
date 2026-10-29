@@ -348,7 +348,7 @@ std::tuple<wxBoxSizer*, ComboBox*> PreferencesDialog::create_item_combobox_base(
     auto combobox = new ::ComboBox(m_parent, wxID_ANY, wxEmptyString, wxDefaultPosition, DESIGN_LARGE_COMBOBOX_SIZE, 0, nullptr, wxCB_READONLY);
     combobox->GetDropDown().SetUseContentWidth(true);
     combobox->SetToolTip(tip);
-    combobox->SetName(param);   // select_tab() finds the row by this name
+    combobox->SetName(param);   // select_tab() and automation find the control by its AppConfig key
 
     std::vector<wxString>::iterator iter;
     for (iter = vlist.begin(); iter != vlist.end(); iter++) {
@@ -465,6 +465,7 @@ wxBoxSizer *PreferencesDialog::create_item_language_combobox(wxString title, wxS
     auto combobox = new ::ComboBox(m_parent, wxID_ANY, wxEmptyString, wxDefaultPosition, DESIGN_LARGE_COMBOBOX_SIZE, 0, nullptr, wxCB_READONLY);
     combobox->GetDropDown().SetUseContentWidth(true);
     combobox->SetToolTip(tip);
+    combobox->SetName(param);
 
     auto language = app_config->get(param);
     m_current_language_selected = -1;
@@ -616,6 +617,7 @@ wxBoxSizer *PreferencesDialog::create_item_region_combobox(wxString title, wxStr
     auto combobox = new ::ComboBox(m_parent, wxID_ANY, wxEmptyString, wxDefaultPosition, DESIGN_LARGE_COMBOBOX_SIZE, 0, nullptr, wxCB_READONLY);
     combobox->GetDropDown().SetUseContentWidth(true);
     combobox->SetToolTip(tip);
+    combobox->SetName("region");
 
     m_sizer->Add(combobox, 0, wxALIGN_CENTER);
 
@@ -690,6 +692,7 @@ wxBoxSizer *PreferencesDialog::create_item_loglevel_combobox(wxString title, wxS
     auto combobox = new ::ComboBox(m_parent, wxID_ANY, wxEmptyString, wxDefaultPosition, DESIGN_COMBOBOX_SIZE, 0, nullptr, wxCB_READONLY);
     combobox->GetDropDown().SetUseContentWidth(true);
     combobox->SetToolTip(tip);
+    combobox->SetName("log_severity_level");
 
     std::vector<wxString>::iterator iter;
     for (iter = vlist.begin(); iter != vlist.end(); iter++) { combobox->Append(*iter); }
@@ -722,6 +725,7 @@ wxBoxSizer *PreferencesDialog::create_item_input(wxString title, wxString title2
     wxTextValidator validator(wxFILTER_DIGITS);
     input->SetToolTip(tip);
     input->GetTextCtrl()->SetValidator(validator);
+    input->SetName(param);
 
     auto second_title = new wxStaticText(m_parent, wxID_ANY, title2, wxDefaultPosition, wxDefaultSize, 0);
     second_title->SetForegroundColour(DESIGN_GRAY900_COLOR);
@@ -758,6 +762,7 @@ wxBoxSizer *PreferencesDialog::create_item_spinctrl(wxString title, wxString tit
 
     auto input = new SpinInput(m_parent, wxEmptyString, side_label, wxDefaultPosition, DESIGN_INPUT_SIZE, wxSP_ARROW_KEYS, min, max, stoi(app_config->get(param)));
     input->SetToolTip(tip);
+    input->SetName(param);
 
     // ORCA: this one is only meaningful while the dimming it controls is enabled
     if (param == "preview_dim_previous_layers_brightness") {
@@ -816,6 +821,7 @@ wxBoxSizer *PreferencesDialog::create_camera_orbit_mult_input(wxString title, wx
     wxTextValidator validator(wxFILTER_NUMERIC);
     input->SetToolTip(tip);
     input->GetTextCtrl()->SetValidator(validator);
+    input->SetName(param);
 
     m_sizer->Add(input, 0, wxALIGN_CENTER_VERTICAL);
 
@@ -863,6 +869,7 @@ wxBoxSizer *PreferencesDialog::create_item_decimal_input(wxString title, wxStrin
     wxTextValidator validator(wxFILTER_NUMERIC);
     input->SetToolTip(tooltip);
     input->GetTextCtrl()->SetValidator(validator);
+    input->SetName(param);
 
     m_sizer->Add(input, 0, wxALIGN_CENTER_VERTICAL);
 
@@ -900,6 +907,7 @@ wxBoxSizer *PreferencesDialog::create_item_backup(wxString title, wxString toolt
     auto checkbox = new ::CheckBox(m_parent);
     checkbox->SetValue(app_config->get_bool("backup_switch"));
     checkbox->SetToolTip(tip);
+    checkbox->SetName("backup_switch");
 
     checkbox->Bind(wxEVT_TOGGLEBUTTON, [this, checkbox](wxCommandEvent &e) {
         app_config->set_bool("backup_switch", checkbox->GetValue());
@@ -921,6 +929,7 @@ wxBoxSizer *PreferencesDialog::create_item_backup(wxString title, wxString toolt
     wxTextValidator validator(wxFILTER_DIGITS);
     input->SetToolTip(_L("The period of backup in seconds."));
     input->GetTextCtrl()->SetValidator(validator);
+    input->SetName("backup_interval");
 
     m_sizer->Add(checkbox, 0, wxALIGN_CENTER);
     m_sizer->Add(input   , 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(5));
@@ -963,6 +972,7 @@ wxBoxSizer *PreferencesDialog::create_item_auto_reslice(wxString title, wxString
     auto checkbox = new ::CheckBox(m_parent);
     checkbox->SetValue(app_config->get_bool("auto_slice_after_change"));
     checkbox->SetToolTip(checkbox_tooltip);
+    checkbox->SetName("auto_slice_after_change");
 
     wxString delay_value = app_config->get("auto_slice_change_delay_seconds");
     if (delay_value.empty())
@@ -975,6 +985,7 @@ wxBoxSizer *PreferencesDialog::create_item_auto_reslice(wxString title, wxString
     wxTextValidator validator(wxFILTER_DIGITS);
     input->SetToolTip(delay_tooltip);
     input->GetTextCtrl()->SetValidator(validator);
+    input->SetName("auto_slice_change_delay_seconds");
 
     m_sizer->Add(checkbox, 0, wxALIGN_CENTER);
     m_sizer->Add(input   , 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(5));
@@ -1024,6 +1035,7 @@ wxBoxSizer* PreferencesDialog::create_item_darkmode(wxString title,wxString tool
     auto checkbox = new ::CheckBox(m_parent);
     checkbox->SetValue((app_config->get(param) == "1") ? true : false);
     checkbox->SetToolTip(tip);
+    checkbox->SetName(param);
     m_dark_mode_ckeckbox = checkbox;
 
     m_sizer->Add(checkbox, 0, wxALIGN_CENTER);
@@ -1071,6 +1083,7 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxString too
     auto checkbox = new ::CheckBox(m_parent);
     checkbox->SetValue(app_config->get_bool(param));
     checkbox->SetToolTip(tip);
+    checkbox->SetName(param);
 
     if (param == "sync_user_preset") { m_sync_user_preset_checkbox = checkbox; }
     if (param == SETTING_OPENGL_SKIP_IDENTICAL_FRAMES) { m_skip_identical_frames_checkbox = checkbox; }
@@ -1383,6 +1396,7 @@ wxBoxSizer *PreferencesDialog::create_item_mcp_server(wxString title, wxString t
     auto checkbox = new ::CheckBox(m_parent);
     checkbox->SetValue(app_config->get_bool("mcp_enabled") || (mcp != nullptr && mcp->serving()));
     checkbox->SetToolTip(tooltip);
+    checkbox->SetName("mcp_enabled");
 
     // The dot sits on the first line, so a reason that wraps reads as one block beside it.
     m_mcp_status_dot  = new ::Label(m_parent, wxString(wxUniChar(0x25CF)));
@@ -1625,6 +1639,7 @@ wxBoxSizer *PreferencesDialog::create_item_network_plugin_version(wxString title
     m_network_version_combo = new ::ComboBox(m_parent, wxID_ANY, wxEmptyString, wxDefaultPosition, DESIGN_LARGE_COMBOBOX_SIZE, 0, nullptr, wxCB_READONLY);
     m_network_version_combo->GetDropDown().SetUseContentWidth(true);
     m_network_version_combo->SetToolTip(tooltip);
+    m_network_version_combo->SetName(SETTING_NETWORK_PLUGIN_VERSION);
 
     std::string current_version = app_config->get_network_plugin_version();
     if (current_version.empty()) {
@@ -1887,6 +1902,10 @@ void PreferencesDialog::select_tab(PreferencesTab tab, const std::string& option
     wxWindow* control = option.empty() ? nullptr : m_parent->FindWindow(wxString(option));
     if (control == nullptr)
         return;
+    // An option on another tab than the one asked for is shown on its own tab, where it can be seen and used.
+    for (size_t i = 0; i < f_sizers.size(); ++i)
+        if (int(i) != m_pref_tabs->GetSelection() && f_sizers[i]->GetItem(control, true) != nullptr)
+            m_pref_tabs->SelectItem(int(i));
     int unit = 1;
     m_parent->GetScrollPixelsPerUnit(nullptr, &unit);
     m_parent->Scroll(wxDefaultCoord, (m_parent->CalcUnscrolledPosition(control->GetPosition()).y - FromDIP(10)) / unit);
@@ -2684,7 +2703,7 @@ void PreferencesDialog::create_items()
     //////////////////////////
     //// DEVELOPER TAB
     /////////////////////////////////////
-    m_pref_tabs->AppendItem(_L("Developer"));
+    m_tab_index[PreferencesTab::Developer] = m_pref_tabs->AppendItem(_L("Developer"));
     f_sizers.push_back(new wxFlexGridSizer(1, 1, v_gap, 0));
     g_sizer = f_sizers.back();
     g_sizer->AddGrowableCol(0, 1);
