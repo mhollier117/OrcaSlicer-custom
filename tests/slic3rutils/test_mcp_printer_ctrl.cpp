@@ -349,6 +349,10 @@ TEST_CASE("printer_ams set_tray writes the slot's filament settings", "[McpPrint
     // no edits during a print unless the firmware allows it
     r.obj.print_status = "RUNNING";
     REFUSED(dispatch_ams(r.obj, args));
+    // override_print_lock sends it anyway, for testing what the firmware does
+    r.agent->messages.clear();
+    CHECK(dispatch_ams(r.obj, with("override_print_lock", true)) == 0);
+    CHECK(r.print().at("command") == "ams_filament_setting");
     r.obj.is_support_filament_setting_inprinting = true;
     r.agent->messages.clear();
     CHECK(dispatch_ams(r.obj, args) == 0);

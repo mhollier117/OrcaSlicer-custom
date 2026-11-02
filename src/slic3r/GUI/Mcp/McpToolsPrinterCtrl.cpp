@@ -448,8 +448,11 @@ int ams_set_tray(MachineObject& m, const json& args, json* info)
     if (!m.is_fdm_type())
         fail("Filament slots cannot be edited in this printer mode");
     if (m.is_in_printing() || m.can_resume()) {
-        if (!m.is_support_filament_setting_inprinting)
-            fail(std::string(ref.virt ? "Setting external spool information" : "Setting AMS slot information") + " while printing is not supported");
+        // override_print_lock (fork, experimental): send although the printer does not advertise in-print edits
+        // (print.flag3 bit 3), to find out whether the firmware itself refuses them.
+        if (!m.is_support_filament_setting_inprinting && !opt_bool(args, "override_print_lock").value_or(false))
+            fail(std::string(ref.virt ? "Setting external spool information" : "Setting AMS slot information") +
+                 " while printing is not supported by this printer (override_print_lock sends it anyway)");
     }
     if (DevFilaSystem::IsBBL_Filament(ref.tray->tag_uid))
         fail("This slot holds a Bambu Lab RFID spool; its information is read only");
@@ -533,8 +536,8 @@ int ams_reset_tray(MachineObject& m, const json& args, json* info)
     if (!m.is_fdm_type())
         fail("Filament slots cannot be edited in this printer mode");
     if (m.is_in_printing() || m.can_resume()) {
-        if (!m.is_support_filament_setting_inprinting)
-            fail("Clearing a slot while printing is not supported");
+        if (!m.is_support_filament_setting_inprinting && !opt_bool(args, "override_print_lock").value_or(false))
+            fail("Clearing a slot while printing is not supported by this printer (override_print_lock sends it anyway)");
     }
     int rc = 0;
     // AMSMaterialsSetting.cpp:682 on_select_reset: a third-party tray is cleared (empty ids, white, 0 temperatures)...
@@ -1266,7 +1269,8 @@ void register_printer_ctrl_tools(McpService& service)
                        {"cooling_temp", prop("integer", "dry_start: C, default 50.")},
                        {"rotate_tray", prop("boolean", "dry_start: rotate the spools.")},
                        {"cmd", enum_prop({"resume", "reset", "pause", "done", "abort"}, "control: AMS command.")},
-                       {"confirm", prop("boolean", "reset: confirm.")}},
+                       {"confirm", prop("boolean", "reset: confirm.")},
+                       {"override_print_lock", prop("boolean", "set_tray / reset_tray: send during a print even though the printer does not advertise in-print slot edits (experimental).")}},
                       {"action"}),
         [](const json& args, ToolContext& ctx) { return run_action(args, ctx, "printer_ams", &dispatch_ams, true); }, /*destructive*/ true));
 
