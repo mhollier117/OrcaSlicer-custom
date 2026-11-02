@@ -995,6 +995,8 @@ if (APPLE)
             GUI/MacIME.mm
             GUI/MacIME.hpp
             GUI/Mcp/ScreenCapture_mac.mm
+            GUI/CameraFullscreenMac.mm
+            GUI/CameraFullscreenMac.hpp
         )
     FIND_LIBRARY(DISKARBITRATION_LIBRARY DiskArbitration)
 endif ()
