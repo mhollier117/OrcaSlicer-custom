@@ -397,6 +397,7 @@ json section_capabilities(MachineObject& m)
     j["ams_humidity"]                 = m.is_support_ams_humidity;
     // print.flag3 bit 3: the printer accepts AMS slot edits during a print (AMSMaterialsSetting gates on it)
     j["filament_setting_in_print"]    = m.is_support_filament_setting_inprinting;
+    j["filament_setting_in_print_allowed"] = m.can_edit_filament_while_printing(); // advertised, or allowed by the app config
     j["send_to_sdcard"]               = m.is_support_send_to_sdcard;
     j["skip_objects"]                 = m.is_support_partskip;
     j["remote_drying"]                = m.is_support_remote_dry;

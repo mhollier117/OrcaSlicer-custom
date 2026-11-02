@@ -138,6 +138,10 @@ void AppConfig::set_defaults()
         if (get("camera_fullscreen_active_monitor_only").empty())
             set_bool("camera_fullscreen_active_monitor_only", true);
 
+        // Fork: allow AMS slot edits during a print even when the printer does not advertise it.
+        if (get("allow_ams_edit_while_printing").empty())
+            set_bool("allow_ams_edit_while_printing", true);
+
 #ifdef SUPPORT_BACKGROUND_PROCESSING
         // Disable background processing by default as it is not stable.
         if (get("background_processing").empty())

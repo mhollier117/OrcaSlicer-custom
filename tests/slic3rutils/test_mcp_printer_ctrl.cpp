@@ -346,13 +346,21 @@ TEST_CASE("printer_ams set_tray writes the slot's filament settings", "[McpPrint
     r.obj.GetFilaSystem()->GetAmsTray("0", "1")->tag_uid = "0123456789ABCDEF";
     REFUSED(dispatch_ams(r.obj, args));
     r.obj.GetFilaSystem()->GetAmsTray("0", "1")->tag_uid = "";
-    // no edits during a print unless the firmware allows it
+    // no edits during a print unless the printer advertises it or the app config allows it
     r.obj.print_status = "RUNNING";
+    r.config.set_bool("allow_ams_edit_while_printing", false);
+    CHECK_FALSE(r.obj.can_edit_filament_while_printing());
     REFUSED(dispatch_ams(r.obj, args));
     // override_print_lock sends it anyway, for testing what the firmware does
     r.agent->messages.clear();
     CHECK(dispatch_ams(r.obj, with("override_print_lock", true)) == 0);
     CHECK(r.print().at("command") == "ams_filament_setting");
+    // the fork default: allowed by the app config although the printer does not advertise it
+    r.config.set_bool("allow_ams_edit_while_printing", true);
+    CHECK(r.obj.can_edit_filament_while_printing());
+    r.agent->messages.clear();
+    CHECK(dispatch_ams(r.obj, args) == 0);
+    r.config.set_bool("allow_ams_edit_while_printing", false);
     r.obj.is_support_filament_setting_inprinting = true;
     r.agent->messages.clear();
     CHECK(dispatch_ams(r.obj, args) == 0);

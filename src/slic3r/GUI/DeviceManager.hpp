@@ -649,6 +649,10 @@ public:
     bool is_support_agora{false};
     bool is_support_upgrade_kit{false};
     bool is_support_filament_setting_inprinting{false};
+    // Fork: AMS / external slot settings may be edited during a print when the printer advertises it
+    // (print.flag3 bit 3) or the app config "allow_ams_edit_while_printing" is on (default). Firmware tested
+    // on an H2D (ahb 02.04.11.98) accepts ams_filament_setting mid-print although it advertises 0.
+    bool can_edit_filament_while_printing() const;
     bool is_support_internal_timelapse { false };// fun[28], support timelapse without SD card
     bool m_support_mqtt_homing { false };// fun[32]
     bool is_support_brtc{false};                 // fun[31], support tcp and upload protocol
