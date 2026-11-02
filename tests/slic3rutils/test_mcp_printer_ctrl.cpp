@@ -603,6 +603,7 @@ TEST_CASE("printer_calibration pa_set, pa_select and pa_delete send the profile 
     old.name = "fast";
     old.filament_id = "GFA00";
     old.cali_idx = 4;
+    old.nozzle_volume_type = nvtStandard; // PACalibResult leaves it uninitialized; the reply parser always sets it
     r.obj.pa_calib_tab.push_back(old);
     r.obj.has_get_pa_calib_tab = true;
     REFUSED(dispatch_calibration(r.obj, set));
