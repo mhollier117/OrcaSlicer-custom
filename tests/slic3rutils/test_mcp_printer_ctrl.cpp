@@ -656,3 +656,75 @@ TEST_CASE("printer_calibration requests results and refuses to start a calibrati
     REFUSED(dispatch_calibration(r.obj, {{"action", "flow_start"}}));
     CHECK(r.agent->messages.empty());
 }
+
+// ---- Dry runs on the real Bambu agent path (orchestrator) ------------------------------------------
+// The tests above use an OrcaPrinterAgent subclass, which records messages itself. These use the real
+// BBLPrinterAgent with no network plugin loaded: a message that escaped the capture would reach
+// BBLPrinterAgent's plugin path and fail, so a zero result plus a captured message proves the dry run
+// stopped it, including the gcode-style commands BBLPrinterAgent builds itself.
+#include "slic3r/Utils/BBLPrinterAgent.hpp"
+
+namespace {
+struct BblRig
+{
+    AppConfig                        config;
+    std::shared_ptr<BBLPrinterAgent> agent{std::make_shared<BBLPrinterAgent>()};
+    NetworkAgent                     network{nullptr, agent};
+    DeviceManager                    manager{&network, false, &config};
+    MachineObject                    obj{&manager, &network, "Bambu test printer", "bbl-device", "192.0.2.20"};
+};
+} // namespace
+
+TEST_CASE("Dry runs capture Bambu commands instead of sending them", "[McpPrinterCtrl][DryRun]")
+{
+    BblRig rig;
+    rig.obj.dev_connection_type = GENERATE("lan", "cloud");
+
+    const std::vector<json> calls = {
+        {{"action", "light"}, {"on", true}},
+        {{"action", "set_temp"}, {"target", "bed"}, {"value", 0}},
+        {{"action", "home"}},
+    };
+    for (const json& args : calls) {
+        DYNAMIC_SECTION(args.at("action").get<std::string>() << " over " << rig.obj.dev_connection_type)
+        {
+            ScopedPublishCapture capture;
+            int                  rc = -99;
+            try {
+                rc = dispatch_control(rig.obj, args);
+            } catch (const ToolFailure& e) {
+                // A precondition refusal is fine for this printer state; it must not have sent anything.
+                INFO("refused: " << e.what());
+                CHECK(capture.messages().empty());
+                continue;
+            }
+            CHECK(rc == 0);
+            REQUIRE_FALSE(capture.messages().empty());
+            for (const PublishCapture::Message& m : capture.messages())
+                CHECK(m.dev_id == "bbl-device");
+        }
+    }
+}
+
+TEST_CASE("Printing cannot start while a dry run captures", "[McpPrinterCtrl][DryRun]")
+{
+    BblRig            rig;
+    ScopedPublishCapture capture;
+    PrintParams       params;
+    params.dev_id = "bbl-device";
+    CHECK(rig.network.start_local_print(params, nullptr, nullptr) == -1);
+    CHECK(rig.network.start_print(params, nullptr, nullptr, nullptr) == -1);
+    CHECK(rig.network.start_sdcard_print(params, nullptr, nullptr) == -1);
+    CHECK(capture.messages().empty());
+}
+
+TEST_CASE("Without a capture the Bambu agent tries to send", "[McpPrinterCtrl][DryRun]")
+{
+    // Control: with no plugin loaded and no capture, the same command does not report success, which
+    // is what makes the zero result inside a capture meaningful.
+    BblRig rig;
+    rig.obj.dev_connection_type = "lan";
+    REQUIRE(PublishCapture::current() == nullptr);
+    // (light is not usable here: DevLamp::CtrlSetChamberLight returns void, so it always reports 0.)
+    CHECK(dispatch_control(rig.obj, {{"action", "set_temp"}, {"target", "bed"}, {"value", 0}}) != 0);
+}
