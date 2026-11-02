@@ -201,6 +201,51 @@ std::string media_storage_arg(const std::string& storage)
     throw ToolFailure("storage must be \"sd\", \"internal\" or a storage name the printer reports");
 }
 
+namespace {
+
+bool is_sd_storage_name(std::string name)
+{
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    return name.find("sd") != std::string::npos || name.find("external") != std::string::npos;
+}
+
+} // namespace
+
+std::string choose_media_storage(const std::vector<std::string>& listed, bool sd_inserted, const std::string& requested, std::string& label)
+{
+    auto first = [&](bool sd) -> const std::string* {
+        for (const std::string& n : listed)
+            if (is_sd_storage_name(n) == sd)
+                return &n;
+        return nullptr;
+    };
+    const std::string* sd    = first(true);
+    const std::string* other = first(false);
+    auto pick = [&](const std::string* name, const std::string& fallback_label, const std::string& fallback_arg) {
+        label = name ? (is_sd_storage_name(*name) ? "sd" : *name) : fallback_label;
+        return name ? *name : fallback_arg;
+    };
+    if (requested.empty()) {
+        if (sd_inserted && sd)
+            return pick(sd, "sd", "");
+        if (other)
+            return pick(other, "internal", "internal");
+        if (sd)
+            return pick(sd, "sd", "");
+        return sd_inserted ? pick(nullptr, "sd", "") : pick(nullptr, "internal", "internal");
+    }
+    if (requested == "sd" || requested == "external")
+        return pick(sd, "sd", "");
+    if (requested == "internal") {
+        for (const std::string& n : listed)
+            if (n == "internal")
+                return pick(&n, "internal", "internal");
+        return pick(other, "internal", "internal");
+    }
+    label = requested;
+    return media_storage_arg(requested);
+}
+
 bool is_plain_file_name(const std::string& name)
 {
     return !name.empty() && name != "." && name != ".." && name.find_first_of("/\\") == std::string::npos && name.find('\0') == std::string::npos;
@@ -547,6 +592,14 @@ struct FilesSession
     std::string download_error;
     wxBitmap    thumbnail_before;
     std::vector<std::string> secrets;
+    // Storage choice (see choose_media_storage): resolved once the printer has listed its storages.
+    std::string request;            // what the call asked for: "", "sd", "internal" or a name
+    bool        sd_inserted = false;
+    PrinterFileSystem::FileType type = PrinterFileSystem::F_MODEL;
+    std::string current_storage;    // the tunnel storage the file system is set to
+    std::string storage_label;      // reported
+    std::vector<std::string> storages; // the printer's own list (empty when it did not answer)
+    bool        ability_requested = false;
 };
 
 struct SessionGuard
@@ -586,8 +639,11 @@ void wait_session(ToolContext& ctx, const std::shared_ptr<FilesSession>& s, std:
     for (;;) {
         const json r = ctx.observe_ui([&]() -> json {
             if (s->failed)
-                throw ToolFailure("Could not " + what + ": " + scrub_secrets(media_error_text(s->error), s->secrets),
-                                  {{"code", s->error}});
+                throw ToolFailure("Could not " + what + ": " + scrub_secrets(media_error_text(s->error), s->secrets) +
+                                      (s->error == 17 ? "; storage tried: \"" + s->storage_label + "\", the printer lists: " +
+                                                            (s->storages.empty() ? std::string("(nothing)") : json(s->storages).dump())
+                                                      : std::string()),
+                                  {{"code", s->error}, {"storage", s->storage_label}, {"storages", s->storages}});
             if (s->download_failed)
                 throw ToolFailure("Could not " + what + ": " + scrub_secrets(s->download_error, s->secrets));
             return done(*s) ? json(true) : json(false);
@@ -607,8 +663,8 @@ struct FilesRequest
 {
     std::string                    dev_id;
     bool                           selected_now = false;
-    std::string                    storage_label; // "sd" | "internal" | other
-    std::string                    storage_arg;   // as the tunnel takes it
+    std::string                    storage_request; // "" (choose), "sd", "internal" or a name
+    bool                           sd_inserted = false;
     PrinterFileSystem::FileType    type = PrinterFileSystem::F_MODEL;
     std::string                    url;
     std::vector<std::string>       secrets;
@@ -635,7 +691,8 @@ FilesRequest files_request(const json& args, ToolContext& ctx)
     json              probe      = ctx.run_ui([&]() -> json {
         const PrinterAccess a = ui_printer_access(target.dev_id);
         if (a.file_local == FL_None)
-            throw ToolFailure("The printer does not offer LAN file browsing (firmware too old, or it has not reported yet)",
+            throw ToolFailure("The printer does not offer LAN file browsing: it has not reported it yet, or its firmware only offers "
+                              "cloud file browsing, which this OrcaSlicer build cannot reach (the Device tab cannot either)",
                               {{"dev_id", target.dev_id}});
         if (a.camera_busy)
             throw ToolFailure("The printer is busy (preparing or upgrading); try again shortly", {{"dev_id", target.dev_id}});
@@ -643,15 +700,10 @@ FilesRequest files_request(const json& args, ToolContext& ctx)
         req.secrets = {a.endpoint.access_code};
         return {{"sdcard", a.sdcard_state}};
     });
-    // Like the Device tab: the SD card when one is inserted, else the printer's own storage.
-    std::string label = storage_in;
-    if (label.empty())
-        label = probe["sdcard"].get<int>() == 1 ? "sd" : "internal";
-    req.storage_label = (label == "external" || label.empty()) ? "sd" : label;
-    req.storage_arg   = media_storage_arg(label);
-    if (req.storage_label == "sd" && probe["sdcard"].get<int>() == 0)
-        throw ToolFailure("The printer reports no SD card; use storage \"internal\" (models only)", {{"dev_id", target.dev_id}});
-    if (req.storage_arg == "internal" && req.type != PrinterFileSystem::F_MODEL)
+    req.sd_inserted = probe["sdcard"].get<int>() == 1;
+    req.storage_request = storage_in == "external" ? "sd" : storage_in;
+    media_storage_arg(req.storage_request); // validates the name
+    if (req.storage_request == "internal" && req.type != PrinterFileSystem::F_MODEL)
         throw ToolFailure("The printer's internal storage holds models only; use type \"model\" or storage \"sd\"");
     return req;
 }
@@ -662,11 +714,17 @@ FilesRequest files_request(const json& args, ToolContext& ctx)
 std::vector<MediaFileEntry> start_and_list(ToolContext& ctx, const std::shared_ptr<FilesSession>& s, const FilesRequest& req)
 {
     s->secrets = req.secrets;
+    s->request = req.storage_request;
+    s->sd_inserted = req.sd_inserted;
+    s->type = req.type;
+    // Until the printer has listed its storages: the SD card when one is inserted, else the internal storage.
+    s->current_storage = media_storage_arg(req.storage_request.empty() ? (req.sd_inserted ? "sd" : "internal") : req.storage_request);
+    s->storage_label = req.storage_request.empty() ? (req.sd_inserted ? "sd" : "internal") : req.storage_request;
     ctx.run_ui([&]() -> json {
         boost::shared_ptr<PrinterFileSystem> fs(new PrinterFileSystem);
         s->fs = fs;
         fs->Attached();
-        fs->SetFileType(req.type, req.storage_arg);
+        fs->SetFileType(req.type, s->current_storage);
         boost::weak_ptr<PrinterFileSystem> wfs(fs);
         std::weak_ptr<FilesSession>        ws(s);
         const std::string                  url = req.url;
@@ -679,13 +737,39 @@ std::vector<MediaFileEntry> start_and_list(ToolContext& ctx, const std::shared_p
             st->status = e.GetInt();
             switch (st->status) {
             case PrinterFileSystem::Initializing: f->SetUrl(url); break;
-            case PrinterFileSystem::ListSyncing: f->ListAllFiles(); break;
+            case PrinterFileSystem::ListSyncing:
+                // Connected: ask which storages the printer has (its names differ between models) before listing.
+                if (!st->ability_requested) {
+                    st->ability_requested = true;
+                    f->RequestMediaAbility(1);
+                } else {
+                    f->ListAllFiles();
+                }
+                break;
             case PrinterFileSystem::ListReady: ++st->ready_count; break;
             case PrinterFileSystem::Failed:
                 st->failed = true;
                 st->error  = int(e.GetExtraLong());
                 break;
             default: break;
+            }
+        });
+        fs->Bind(EVT_MEDIA_ABILITY_CHANGED, [wfs, ws](wxCommandEvent& e) {
+            e.Skip();
+            auto f  = wfs.lock();
+            auto st = ws.lock();
+            if (!f || !st)
+                return;
+            // On a failed or unsupported request the list stays empty and the first guess stands.
+            st->storages = e.GetInt() == PrinterFileSystem::S_SUCCESS ? f->GetMediaAbilityList() : std::vector<std::string>();
+            std::string label;
+            const std::string chosen = choose_media_storage(st->storages, st->sd_inserted, st->request, label);
+            st->storage_label = label;
+            if (chosen == st->current_storage) {
+                f->ListAllFiles();
+            } else {
+                st->current_storage = chosen;
+                f->SetFileType(st->type, chosen); // reports ListSyncing again, which lists
             }
         });
         fs->Bind(EVT_DOWNLOAD, [ws](wxCommandEvent& e) {
@@ -713,22 +797,23 @@ std::vector<MediaFileEntry> start_and_list(ToolContext& ctx, const std::shared_p
     return entries;
 }
 
-json file_list_json(const std::vector<MediaFileEntry>& entries, const FilesRequest& req)
+json file_list_json(const std::vector<MediaFileEntry>& entries, const FilesRequest& req, const std::string& storage)
 {
     json items = json::array();
     const char* type = kTypeNames[req.type];
     for (const MediaFileEntry& e : entries)
-        items.push_back(media_file_json(e, type, req.storage_label, true));
+        items.push_back(media_file_json(e, type, storage, true));
     return items;
 }
 
 ToolResult files_list(const json& args, ToolContext& ctx, const FilesRequest& req, const std::shared_ptr<FilesSession>& s)
 {
     const auto entries = start_and_list(ctx, s, req);
-    json       data    = page(file_list_json(entries, req), args, 100);
+    json       data    = page(file_list_json(entries, req, s->storage_label), args, 100);
     data["dev_id"]     = req.dev_id;
-    data["storage"]    = req.storage_label;
+    data["storage"]    = s->storage_label;
     data["type"]       = kTypeNames[req.type];
+    data["storages"]   = s->storages;
     if (req.selected_now)
         data["selected_now"] = true;
     return ToolResult::ok(redact(std::move(data)));
@@ -789,7 +874,7 @@ ToolResult files_download(const json& args, ToolContext& ctx, const FilesRequest
               {"name", entry.name},
               {"path", entry.path.empty() ? entry.name : entry.path},
               {"size", entry.size},
-              {"storage", req.storage_label},
+              {"storage", s->storage_label},
               {"type", kTypeNames[req.type]},
               {"dest", path_to_utf8(target)}};
     if (arg_bool(args, "dry_run", false)) {
@@ -868,7 +953,7 @@ ToolResult files_delete(const json& args, ToolContext& ctx, const FilesRequest& 
               {"name", entry.name},
               {"path", entry.path.empty() ? entry.name : entry.path},
               {"size", entry.size},
-              {"storage", req.storage_label},
+              {"storage", s->storage_label},
               {"type", kTypeNames[req.type]}};
     if (arg_bool(args, "dry_run", false)) {
         data["dry_run"]      = true;

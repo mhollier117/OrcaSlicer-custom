@@ -188,3 +188,32 @@ TEST_CASE("Tunnel result codes have readable texts", "[McpPrinterMedia]")
     CHECK_THAT(media_error_text(5), ContainsSubstring("busy"));
     CHECK_THAT(media_error_text(9999), ContainsSubstring("9999"));
 }
+
+TEST_CASE("Storage is chosen from the names the printer lists", "[McpPrinterMedia]")
+{
+    std::string label;
+
+    SECTION("no SD card: the first non-SD storage the printer lists")
+    {
+        CHECK(choose_media_storage({"emmc"}, false, "", label) == "emmc");
+        CHECK(label == "emmc");
+    }
+    SECTION("SD card inserted and listed")
+    {
+        CHECK(choose_media_storage({"sdcard", "emmc"}, true, "", label) == "sdcard");
+        CHECK(label == "sd");
+    }
+    SECTION("explicit names map onto the list")
+    {
+        CHECK(choose_media_storage({"sdcard", "emmc"}, true, "sd", label) == "sdcard");
+        CHECK(choose_media_storage({"sdcard", "emmc"}, true, "internal", label) == "emmc");
+        CHECK(choose_media_storage({"sdcard", "internal"}, false, "internal", label) == "internal");
+    }
+    SECTION("no answer from the printer keeps the old guess")
+    {
+        CHECK(choose_media_storage({}, true, "", label).empty());
+        CHECK(label == "sd");
+        CHECK(choose_media_storage({}, false, "", label) == "internal");
+        CHECK(label == "internal");
+    }
+}

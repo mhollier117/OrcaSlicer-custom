@@ -72,6 +72,13 @@ std::size_t find_media_file(const std::vector<MediaFileEntry>& entries, const st
 // Throws ToolFailure otherwise.
 std::string media_storage_arg(const std::string& storage);
 
+// Which storage to browse, given the storage names the printer listed (REQUEST_MEDIA_ABILITY; empty when it
+// did not answer). `requested`: "" chooses (the SD card when `sd_inserted` and listed, else the first listed
+// storage that is not the SD card), "sd", "internal", or a name. Returns the name for the tunnel ("" is the
+// SD card on printers that list no names) and sets `label` ("sd", or the storage's name). Throws ToolFailure
+// for an invalid name.
+std::string choose_media_storage(const std::vector<std::string>& listed, bool sd_inserted, const std::string& requested, std::string& label);
+
 // A file name from the printer that is safe to use as a local file name (no separators or "..").
 bool is_plain_file_name(const std::string& name);
 
