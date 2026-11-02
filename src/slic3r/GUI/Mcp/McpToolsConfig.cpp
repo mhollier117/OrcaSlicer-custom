@@ -1895,9 +1895,10 @@ void register_config_tools(McpService& service)
                     resolve_target({{"scope", "filament"}, {"filament_slot", arg_int(args, "filament_slot", 1)}}, true);
                 PresetCollection& presets        = collection(type);
                 const bool        inside_project = save_preset_inside_project(presets, name, args);
-                // With the name given, the tab saves without opening the dialog.
-                if (!tab->save_preset(name, detach, inside_project))
-                    throw ToolFailure("Saving was cancelled");
+                // With the name given, the tab saves without opening the dialog. On v2.5.0-rc
+                // Tab::save_preset returns void (main's bool return came with #16929), so a
+                // cancelled save shows up as the preset missing below.
+                tab->save_preset(name, detach, inside_project);
                 // After the save, so a cancelled save leaves the physical printer alone.
                 if (type == Preset::TYPE_PRINTER)
                     SavePresetDialog::update_physical_printers(SavePresetDialog::ChangePreset, name);
