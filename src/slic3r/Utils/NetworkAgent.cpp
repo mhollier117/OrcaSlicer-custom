@@ -19,6 +19,7 @@
 #include "IPrinterAgent.hpp"
 #include "BBLNetworkPlugin.hpp"
 #include "bambu_networking.hpp"
+#include "PublishCapture.hpp"
 
 namespace Slic3r {
 
@@ -824,6 +825,8 @@ int NetworkAgent::set_server_callback(OnServerErrFn fn)
 
 int NetworkAgent::send_message(std::string dev_id, std::string json_str, int qos, int flag)
 {
+    if (PublishCapture::intercept(dev_id, json_str, false)) // MCP dry run (fork)
+        return 0;
     if (m_printer_agent)
         return m_printer_agent->send_message(dev_id, json_str, qos, flag);
     return -1;
@@ -916,6 +919,8 @@ int NetworkAgent::disconnect_printer()
 
 int NetworkAgent::send_message_to_printer(std::string dev_id, std::string json_str, int qos, int flag)
 {
+    if (PublishCapture::intercept(dev_id, json_str, true)) // MCP dry run (fork)
+        return 0;
     if (m_printer_agent)
         return m_printer_agent->send_message_to_printer(dev_id, json_str, qos, flag);
     return -1;
@@ -1039,6 +1044,8 @@ int NetworkAgent::del_subscribe(std::vector<std::string> dev_list)
 
 int NetworkAgent::start_print(PrintParams params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn, OnWaitFn wait_fn)
 {
+    if (PublishCapture::current() != nullptr) // an MCP dry run never starts a print (fork)
+        return -1;
     if (m_printer_agent)
         return m_printer_agent->start_print(params, update_fn, cancel_fn, wait_fn);
     return -1;
@@ -1046,6 +1053,8 @@ int NetworkAgent::start_print(PrintParams params, OnUpdateStatusFn update_fn, Wa
 
 int NetworkAgent::start_local_print_with_record(PrintParams params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn, OnWaitFn wait_fn)
 {
+    if (PublishCapture::current() != nullptr) // an MCP dry run never starts a print (fork)
+        return -1;
     if (m_printer_agent)
         return m_printer_agent->start_local_print_with_record(params, update_fn, cancel_fn, wait_fn);
     return -1;
@@ -1053,6 +1062,8 @@ int NetworkAgent::start_local_print_with_record(PrintParams params, OnUpdateStat
 
 int NetworkAgent::start_send_gcode_to_sdcard(PrintParams params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn, OnWaitFn wait_fn)
 {
+    if (PublishCapture::current() != nullptr) // an MCP dry run never starts a print (fork)
+        return -1;
     if (m_printer_agent)
         return m_printer_agent->start_send_gcode_to_sdcard(params, update_fn, cancel_fn, wait_fn);
     return -1;
@@ -1060,6 +1071,8 @@ int NetworkAgent::start_send_gcode_to_sdcard(PrintParams params, OnUpdateStatusF
 
 int NetworkAgent::start_local_print(PrintParams params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn)
 {
+    if (PublishCapture::current() != nullptr) // an MCP dry run never starts a print (fork)
+        return -1;
     if (m_printer_agent)
         return m_printer_agent->start_local_print(params, update_fn, cancel_fn);
     return -1;
@@ -1067,6 +1080,8 @@ int NetworkAgent::start_local_print(PrintParams params, OnUpdateStatusFn update_
 
 int NetworkAgent::start_sdcard_print(PrintParams params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn)
 {
+    if (PublishCapture::current() != nullptr) // an MCP dry run never starts a print (fork)
+        return -1;
     if (m_printer_agent)
         return m_printer_agent->start_sdcard_print(params, update_fn, cancel_fn);
     return -1;

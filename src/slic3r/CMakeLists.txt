@@ -192,6 +192,9 @@ set(SLIC3R_GUI_SOURCES
     GUI/Mcp/McpToolsView.cpp
     GUI/Mcp/McpPrinterCommon.cpp
     GUI/Mcp/McpPrinterCommon.hpp
+    GUI/Mcp/McpPrinterStatus.hpp
+    GUI/Mcp/McpPrinterCtrl.hpp
+    GUI/Mcp/McpPrinterMedia.hpp
     GUI/Mcp/McpPrintPlanner.cpp
     GUI/Mcp/McpPrintPlanner.hpp
     GUI/Mcp/McpToolsPrinter.cpp
@@ -875,6 +878,7 @@ set(SLIC3R_GUI_SOURCES
     Utils/MKS.hpp
     Utils/NetworkAgent.cpp
     Utils/NetworkAgent.hpp
+    Utils/PublishCapture.hpp
     Utils/NetworkAgentFactory.hpp
     Utils/NetworkAgentFactory.cpp
     Utils/ICloudServiceAgent.hpp

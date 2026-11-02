@@ -1,4 +1,5 @@
 #include "BBLPrinterAgent.hpp"
+#include "PublishCapture.hpp"
 #include "BBLNetworkPlugin.hpp"
 #include "IPrinterAgent.hpp"
 #include "NetworkAgentFactory.hpp"
@@ -258,6 +259,8 @@ int BBLPrinterAgent::publish(const std::string& dev_id, const nlohmann::json& j,
 
 int BBLPrinterAgent::send_message(std::string dev_id, std::string json_str, int qos, int flag)
 {
+    if (PublishCapture::intercept(dev_id, json_str, false)) // MCP dry run (fork)
+        return 0;
     json_str = from_orca_payload(std::move(json_str));
     auto& plugin = BBLNetworkPlugin::instance();
     auto agent = plugin.get_agent();
@@ -314,6 +317,8 @@ int BBLPrinterAgent::disconnect_printer()
 
 int BBLPrinterAgent::send_message_to_printer(std::string dev_id, std::string json_str, int qos, int flag)
 {
+    if (PublishCapture::intercept(dev_id, json_str, true)) // MCP dry run (fork)
+        return 0;
     json_str = from_orca_payload(std::move(json_str));
     auto& plugin = BBLNetworkPlugin::instance();
     auto agent = plugin.get_agent();
