@@ -569,6 +569,10 @@ void McpService::register_tools()
     register_ui_tools(*this);
     register_script_tools(*this);
     register_record_tools(*this);
+    register_printer_tools(*this);
+    register_print_tools(*this);
+    register_printer_ctrl_tools(*this);
+    register_printer_media_tools(*this);
 #ifdef SLIC3R_CAD
     register_cad_tools(*this);
 #endif

@@ -34,6 +34,7 @@ add_executable(${_TEST_NAME}_tests
     test_mcp_setup.cpp
     test_mcp_token.cpp
     test_mcp_tools.cpp
+    test_mcp_printer.cpp
     test_mcp_ui.cpp
     test_mcp_web.cpp
     test_mcp_results.cpp

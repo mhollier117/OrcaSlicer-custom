@@ -56,6 +56,11 @@ void register_ui_tools(McpService& service);
 void register_script_tools(McpService& service);
 void register_record_tools(McpService& service);
 void register_cad_tools(McpService& service);
+// Printer tools (fork): DeviceManager / MachineObject / NetworkAgent, see McpPrinterCommon.hpp.
+void register_printer_tools(McpService& service);       // McpToolsPrinter.cpp
+void register_print_tools(McpService& service);         // McpToolsPrint.cpp
+void register_printer_ctrl_tools(McpService& service);  // McpToolsPrinterCtrl.cpp
+void register_printer_media_tools(McpService& service); // McpToolsPrinterMedia.cpp
 
 // How run_script_job() runs a script beyond what the script says.
 struct ScriptRunOptions
