@@ -373,12 +373,25 @@ void apply_overrides(MachineObject& obj, const PlanProject& project, MappingRun&
             } // a tray without readable info (third party) is pickable whatever its type
         }
 
-        target->tray_id = tray_index_of(obj, ams_id, slot_id);
-        target->color   = hex_color(DevAmsTray::decode_color(tray->color));
-        target->ctype   = tray->ctype;
+        // The popup's tray id (AmsMappingPopupUpdate.cpp:211-231 sGetTrayData): GetAmsType() reports AMS-Lite-mixed as
+        // AMS-Lite, so such a tray is ams*4+slot there.
+        if (is_virtual_id(ams_id)) {
+            target->tray_id = std::atoi(ams_id.c_str());
+        } else {
+            DevAms*    ams  = obj.GetFilaSystem()->GetAmsById(ams_id);
+            const auto type = ams->GetAmsType();
+            const int  a = std::atoi(ams_id.c_str()), sl = std::atoi(slot_id.c_str());
+            target->tray_id = type == DevAms::N3S ? a + sl : a * 4 + sl;
+        }
+        // An unreadable tray (third party, no info) shows as grey in the popup, and that colour is what the dialog stores
+        // (AmsMappingPopupUpdate.cpp:604-608, SelectMachine.cpp:3914).
+        const bool readable = tray->is_tray_info_ready();
+        target->color       = readable ? hex_color(DevAmsTray::decode_color(tray->color)) : std::string("#CECECEFF");
+        target->ctype       = readable ? tray->ctype : 0;
         target->colors.clear();
-        for (const std::string& c : tray->cols)
-            target->colors.push_back(hex_color(DevAmsTray::decode_color(c)));
+        if (readable)
+            for (const std::string& c : tray->cols)
+                target->colors.push_back(hex_color(DevAmsTray::decode_color(c)));
         target->ams_id  = ams_id;
         target->slot_id = slot_id;
         // the dialog leaves FilamentInfo::type and filament_id as they were (on_set_finish_mapping)
@@ -394,19 +407,18 @@ void apply_overrides(MachineObject& obj, const PlanProject& project, MappingRun&
 json build_nozzles_info(const PlanProject& project)
 {
     json out = json::array();
-    if (project.nozzle_diameters.size() != 2)
+    // mirrors SelectMachine.cpp:1472 build_nozzles_info (config index 0 = left, 1 = right) and :160 the flow strings
+    if (!project.nozzle_volume_option || project.nozzle_diameters.size() != 2)
         return out;
-    // mirrors SelectMachine.cpp:1472 build_nozzles_info (config index 0 = left, 1 = right)
-    static const char* flow_names[] = {"standard_flow", "high_flow", "tpu_high_flow", "e3d_high_flow", "hybrid_flow"};
     for (size_t i = 0; i < 2; ++i) {
         json item;
         item["id"]   = i == 0 ? kCloudNozzleLeft : kCloudNozzleRight;
         item["type"] = nullptr;
         if (i < project.nozzle_volume_types.size()) {
-            const int v = project.nozzle_volume_types[i];
-            // NozzleVolumeType order: nvtStandard, nvtHighFlow, nvtHybrid, nvtTPUHighFlow, nvtE3DHighFlow
-            const char* name = v == int(nvtStandard) ? flow_names[0] : v == int(nvtHighFlow) ? flow_names[1] :
-                               v == int(nvtTPUHighFlow) ? flow_names[2] : v == int(nvtE3DHighFlow) ? flow_names[3] : flow_names[4];
+            const int   v    = project.nozzle_volume_types[i];
+            const char* name = v == int(nvtStandard) ? "standard_flow" : v == int(nvtHighFlow) ? "high_flow" :
+                               v == int(nvtTPUHighFlow) ? "tpu_high_flow" : v == int(nvtE3DHighFlow) ? "e3d_high_flow" :
+                               v == int(nvtHybrid) ? "hybrid_flow" : "";
             item["flowSize"] = name;
         }
         item["diameter"] = project.nozzle_diameters[i];
@@ -415,9 +427,9 @@ json build_nozzles_info(const PlanProject& project)
     return out;
 }
 
-// mirrors SelectMachine.cpp:1358 get_ams_mapping_result (FROM_NORMAL). FIX vs the dialog: nozzleId comes from the
-// real filament maps (the dialog uses PartPlate::get_filament_maps and omits nozzleId when the plate uses the
-// global map), and every lookup is by filament id, not by position in a parallel vector.
+// mirrors SelectMachine.cpp:1358 get_ams_mapping_result (FROM_NORMAL), nozzleId included: the plate's own filament
+// map (PartPlate::get_filament_maps) decides, so nothing is written when the plate follows the project. Lookups are
+// by filament id, not by position in a parallel vector.
 Encodings encode_mapping(MachineObject& obj, const PlanProject& project, const MappingRun& run)
 {
     Encodings enc;
@@ -448,12 +460,9 @@ Encodings encode_mapping(MachineObject& obj, const PlanProject& project, const M
             info["ams"]           = tray_id;
             info["filamentType"]  = f != nullptr ? f->type : r->type;
             info["filamentId"]    = i < project.slot_filament_ids.size() ? project.slot_filament_ids[i] : std::string();
-            if (project.nozzle_count > 1 && i < project.filament_maps.size()) {
-                const int m = project.filament_maps[i];
-                if (m == kFilamentMapLeft)
-                    info["nozzleId"] = kCloudNozzleLeft;
-                else if (m == kFilamentMapRight)
-                    info["nozzleId"] = kCloudNozzleRight;
+            if (i < project.plate_filament_maps.size()) { // convert_filament_map_nozzle_id_to_task_nozzle_id
+                const int m = project.plate_filament_maps[i];
+                info["nozzleId"] = m == kFilamentMapLeft ? kCloudNozzleLeft : m == kFilamentMapRight ? kCloudNozzleRight : m;
             }
             info["sourceColor"] = f != nullptr ? f->color : std::string();
             info["targetColor"] = r->color;
@@ -737,7 +746,8 @@ CheckOutcome run_checks(MachineObject& obj, const PlanProject& project, const Pr
     }
 
     // ---- hotend rack nozzle mapping (CheckErrorSyncNozzleMappingResultV0/V1 ~1802/1869)
-    if (rack && (project.dynamic_nozzle_map || !project.rack_needed_nozzles.empty())) {
+    // the V0 request is skipped only when a nozzle grouping exists and lists no right-extruder nozzles (SelectMachine.cpp:1883)
+    if (rack && (project.dynamic_nozzle_map || !(project.nozzle_group_present && project.rack_needed_nozzles.empty()))) {
         auto mapping = obj.get_nozzle_mapping_result();
         if (!mapping->HasResult()) {
             add("rack_nozzle_mapping_pending", "error", "The printer is calculating nozzle mapping. Please wait a moment...",
@@ -871,18 +881,20 @@ CheckOutcome run_checks(MachineObject& obj, const PlanProject& project, const Pr
             }
         }
     }
-    // timelapse
-    const bool timelapse_warning = std::any_of(project.slice_warnings.begin(), project.slice_warnings.end(),
-                                               [](const PlanSliceWarning& w) { return w.msg == NOT_GENERATE_TIMELAPSE; });
-    if (timelapse_warning) {
-        const auto it = std::find_if(project.slice_warnings.begin(), project.slice_warnings.end(),
-                                     [](const PlanSliceWarning& w) { return w.msg == NOT_GENERATE_TIMELAPSE; });
-        std::string text = it->error_code == "10014001" ? "When spiral vase mode is enabled, machines with I3 structure will not generate timelapse videos." :
-                           it->error_code == "10014002" ? "The current printer does not support timelapse in Traditional Mode when printing By-Object." : it->text;
-        add("timelapse_not_generated", "warning", text);
+    // timelapse (SelectMachine.cpp:5229): with a valid mapping, missing storage replaces the slice's timelapse warning
+    if (valid) {
+        if (options.timelapse && sd_state == DevStorage::SdcardState::NO_SDCARD && !obj.m_has_timelapse_kit && !obj.is_support_internal_timelapse) {
+            add("timelapse_needs_storage", "warning", "Storage needs to be inserted to record timelapse.");
+        } else {
+            const auto it = std::find_if(project.slice_warnings.begin(), project.slice_warnings.end(),
+                                         [](const PlanSliceWarning& w) { return w.msg == NOT_GENERATE_TIMELAPSE; });
+            if (it != project.slice_warnings.end()) {
+                std::string text = it->error_code == "10014001" ? "When spiral vase mode is enabled, machines with I3 structure will not generate timelapse videos." :
+                                   it->error_code == "10014002" ? "The current printer does not support timelapse in Traditional Mode when printing By-Object." : it->text;
+                add("timelapse_not_generated", "warning", text);
+            }
+        }
     }
-    if (valid && options.timelapse && sd_state == DevStorage::SdcardState::NO_SDCARD && !obj.m_has_timelapse_kit && !obj.is_support_internal_timelapse)
-        add("timelapse_needs_storage", "warning", "Storage needs to be inserted to record timelapse.");
     if (options.timelapse && obj.is_support_internal_timelapse && !options.timelapse_storage.empty() && obj.is_timelapse_storage_low(options.timelapse_storage))
         add("timelapse_storage_low", "warning",
             std::string(options.timelapse_storage == "internal" ? "Internal" : "External") +
@@ -1022,22 +1034,18 @@ CheckOutcome run_checks(MachineObject& obj, const PlanProject& project, const Pr
             confirm("slice_warning_nozzle_hardness", w.text.empty() ? w.msg : w.text);
     }
     {
+        // AmsMapingPopup::parse_ams_mapping (AmsMappingPopup.cpp:1113) ids every tray ams*4+slot (AMS_TOTAL_COUNT), so
+        // the dialog only matches trays whose mapping index is that: not AMS-HT, AMS-Lite-mixed or external spools.
         bool unknown = false;
         for (const FilamentInfo& r : run.result) {
-            if (r.tray_id < 0)
-                continue;
-            DevAmsTray* t = nullptr;
-            if (is_virtual_id(r.ams_id)) {
-                for (DevAmsTray& v : obj.vt_slot)
-                    if (v.id == r.ams_id)
-                        t = &v;
-            } else {
-                t = obj.GetFilaSystem()->GetAmsTray(r.ams_id, r.slot_id);
-            }
-            // parse_ams_mapping: a present tray whose info is not ready is THIRD, an absent one EMPTY (the
-            // dialog's tray id there is ams*4+slot, so it only sees AMS trays)
-            if (t != nullptr && !is_virtual_id(r.ams_id) && (!t->is_exists || !t->is_tray_info_ready()))
-                unknown = true;
+            for (const auto& ams : obj.GetFilaSystem()->GetAmsList())
+                for (const auto& tray : ams.second->GetTrays()) {
+                    const int id = std::atoi(ams.first.c_str()) * 4 + std::atoi(tray.first.c_str());
+                    if (id != r.tray_id)
+                        continue;
+                    if (!tray.second->is_exists || !tray.second->is_tray_info_ready())
+                        unknown = true;
+                }
         }
         if (unknown)
             confirm("unknown_filament_in_mapping",
@@ -1054,11 +1062,21 @@ PrintPlan make_plan(MachineObject& obj, PlanProject project, const PrinterFacts&
     PrintPlan plan;
     plan.plate     = project.plate;
     plan.filaments = project.filaments;
-    plan.options   = options;
     plan.run       = run_auto_mapping(obj, project.filaments, project.nozzle_count, project.filament_maps, true);
     plan.dual_nozzle = plan.run.dual;
     if (plan.run.error.empty())
         apply_overrides(obj, project, plan.run, overrides);
+    {
+        // The option stays off unless more than one filament sits on one external spool (SelectMachine.cpp:4870).
+        int main_ext = 0, deputy_ext = 0;
+        for (const FilamentInfo& r : plan.run.result) {
+            main_ext += r.ams_id == VIRTUAL_AMS_MAIN_ID_STR;
+            deputy_ext += r.ams_id == VIRTUAL_AMS_DEPUTY_ID_STR;
+        }
+        if (main_ext <= 1 && deputy_ext <= 1)
+            options.ext_change_assist = false;
+        plan.options = options;
+    }
     plan.enc = encode_mapping(obj, project, plan.run);
 
     CheckOutcome outcome = run_checks(obj, project, facts, plan.run, options);
@@ -1211,6 +1229,9 @@ PrintPlan ui_build_plan(Plater& plater, int plate_idx, MachineObject& obj, const
     PresetBundle* pb = wxGetApp().preset_bundle;
     if (pb == nullptr)
         throw ToolFailure("The preset bundle is not available");
+    // Pull-mode agents only refresh their filament data when asked (SelectMachine.cpp:4829).
+    if (NetworkAgent* pull_agent = wxGetApp().getAgent(); pull_agent != nullptr && pull_agent->get_filament_sync_mode() == FilamentSyncMode::pull)
+        pull_agent->fetch_filament_info(obj.get_dev_id());
 
     const DynamicPrintConfig full = pb->full_config();
     PlanProject              pr;
@@ -1238,6 +1259,7 @@ PrintPlan ui_build_plan(Plater& plater, int plate_idx, MachineObject& obj, const
     const auto* nozzle_diameter = full.option<ConfigOptionFloats>("nozzle_diameter");
     pr.nozzle_count             = nozzle_diameter ? int(nozzle_diameter->values.size()) : 1;
     pr.filament_maps            = plate->get_real_filament_maps(pb->project_config);
+    pr.plate_filament_maps      = plate->get_filament_maps();
     pr.filaments                = filaments_from(slots, plate->get_used_filaments(), pr.filament_maps, pr.nozzle_count);
 
     const auto* edited_diameter = pb->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
@@ -1250,6 +1272,8 @@ PrintPlan ui_build_plan(Plater& plater, int plate_idx, MachineObject& obj, const
 
     GCodeProcessorResult*                                    gcode = plate->get_slice_result();
     std::shared_ptr<MultiNozzleUtils::NozzleGroupResultBase> group = gcode ? gcode->nozzle_group_result : nullptr;
+    pr.nozzle_group_present     = group != nullptr;
+    pr.nozzle_volume_option     = volume_type != nullptr;
     pr.dynamic_nozzle_map       = group && group->is_support_dynamic_nozzle_map();
     pr.slicing_with_fila_switch = pr.dynamic_nozzle_map;
     if (!pr.slicing_with_fila_switch)
@@ -1407,6 +1431,8 @@ PrintPlan ui_build_plan(Plater& plater, int plate_idx, MachineObject& obj, const
     std::string tl        = stored("timelapse");
     if (opts.contains("timelapse"))
         tl = opts["timelapse"].is_boolean() ? (opts["timelapse"].get<bool>() ? "on" : "off") : opts["timelapse"].get<std::string>();
+    if (tl != "on" && tl != "off")
+        tl = "on"; // load_option_vals: a stored value the menu does not offer falls back to "on"
     po.timelapse = tl == "on";
     if (po.timelapse && !facts.timelapse_allowed) {
         if (opts.contains("timelapse"))

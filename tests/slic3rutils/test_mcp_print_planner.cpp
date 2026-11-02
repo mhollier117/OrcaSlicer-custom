@@ -123,6 +123,8 @@ PlanProject project_of(std::vector<PlanFilament> filaments, size_t slots, int no
     p.slot_filament_ids.assign(slots, "GFA00");
     p.nozzle_count     = nozzles;
     p.filament_maps    = std::move(maps);
+    if (nozzles == 2)
+        p.plate_filament_maps = p.filament_maps; // the plate sets its own map
     if (nozzles == 2) {
         p.nozzle_diameters    = {0.4, 0.4};
         p.nozzle_volume_types = {int(nvtStandard), int(nvtHighFlow)};
@@ -485,4 +487,54 @@ TEST_CASE("The dialog's filament list comes from the used slots", "[McpPrintPlan
     CHECK(filaments[1].brand == "Generic");
     // on a single nozzle project no filament belongs to a side
     CHECK(filaments_from(slots, {1}, {1, 1, 1}, 1)[0].filament_map == 0);
+}
+
+TEST_CASE("The nozzle id is written from the plate's own filament map exactly as the dialog does", "[McpPrintPlanner]")
+{
+    MachineObject obj(nullptr, nullptr, "test", "test_dev", "127.0.0.1");
+    make_ready(obj);
+    load_ams(obj, {{"0", 0x1, {{"FF0000FF", "PLA"}, {"0000FFFF", "PLA"}}}});
+
+    // a single nozzle plate that follows the project: no nozzleId
+    PlanProject project = project_of({fil(0, "PLA", "#FF0000FF"), fil(1, "PLA", "#0000FFFF")}, 2);
+    PrintPlan   plan    = make_plan(obj, project, PrinterFacts{}, PlanOptions{}, no_overrides());
+    CHECK_FALSE(plan.enc.ams_mapping_info[0].contains("nozzleId"));
+
+    // the same plate with its own map [1, 2]: written whatever the nozzle count (1 is the left nozzle = 1, 2 the right = 0)
+    project.plate_filament_maps = {1, 2};
+    plan                        = make_plan(obj, project, PrinterFacts{}, PlanOptions{}, no_overrides());
+    CHECK(plan.enc.ams_mapping_info[0]["nozzleId"] == 1);
+    CHECK(plan.enc.ams_mapping_info[1]["nozzleId"] == 0);
+}
+
+TEST_CASE("Overriding to an unreadable tray stores the dialog's grey, and nozzles_info follows the dialog's flow strings", "[McpPrintPlanner]")
+{
+    MachineObject obj(nullptr, nullptr, "test", "test_dev", "127.0.0.1");
+    make_ready(obj);
+    load_ams(obj, {{"0", 0x1, {{"FF0000FF", "PLA"}, {"00FF00FF", ""}}}});
+    obj.GetFilaSystem()->GetAmsTray("0", "1")->is_exists = true; // present, but its filament info is not readable
+
+    PlanProject project = project_of({fil(0, "PLA", "#FF0000FF")}, 1);
+    PrintPlan   plan    = make_plan(obj, project, PrinterFacts{}, PlanOptions{}, json::array({json{{"filament", 1}, {"ams_id", "0"}, {"slot_id", "1"}}}));
+    CHECK(target(plan, 0).tray_color == "#CECECEFF");
+    CHECK(target(plan, 0).tray_index == 1);
+
+    PlanProject dual = project_of({}, 0, 2, {});
+    dual.nozzle_volume_types = {int(nvtHybrid), 99};
+    json info = build_nozzles_info(dual);
+    CHECK(info[0]["flowSize"] == "hybrid_flow");
+    CHECK(info[1]["flowSize"] == "");
+    dual.nozzle_volume_option = false;
+    CHECK(build_nozzles_info(dual).empty());
+}
+
+TEST_CASE("The assisted external change option stays off unless filaments share an external spool", "[McpPrintPlanner]")
+{
+    MachineObject obj(nullptr, nullptr, "test", "test_dev", "127.0.0.1");
+    make_ready(obj);
+    load_ams(obj, {{"0", 0x1, {{"FF0000FF", "PLA"}}}});
+    PlanProject project = project_of({fil(0, "PLA", "#FF0000FF")}, 1);
+    PlanOptions options;
+    options.ext_change_assist = true;
+    CHECK_FALSE(make_plan(obj, project, PrinterFacts{}, options, no_overrides()).options.ext_change_assist);
 }

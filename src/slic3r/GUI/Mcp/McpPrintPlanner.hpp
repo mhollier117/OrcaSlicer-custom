@@ -80,7 +80,10 @@ struct PlanProject
     size_t                    slots = 0;                  // preset_bundle->filament_presets.size()
     std::vector<std::string>  slot_filament_ids;          // per slot: the filament preset's filament_id
     int                       nozzle_count = 1;           // size of the printer preset's nozzle_diameter
-    std::vector<int>          filament_maps;              // PartPlate::get_real_filament_maps
+    std::vector<int>          filament_maps;              // PartPlate::get_real_filament_maps (drives the mapping)
+    std::vector<int>          plate_filament_maps;        // PartPlate::get_filament_maps: the plate's own map, empty when it follows the project (drives nozzleId)
+    bool                      nozzle_group_present = false; // the slice produced a nozzle grouping result
+    bool                      nozzle_volume_option = true;  // the project has a nozzle_volume_type option
     std::vector<double>       nozzle_diameters;           // printer preset, for nozzles_info
     std::vector<int>          nozzle_volume_types;        // project nozzle_volume_type, for nozzles_info
     bool                      gcode_valid = true;

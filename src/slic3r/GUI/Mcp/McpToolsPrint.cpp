@@ -29,6 +29,8 @@
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Print.hpp"
+#include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/Utils/bambu_networking.hpp"
 
 #include <boost/algorithm/string/join.hpp>
@@ -178,7 +180,7 @@ NozzleSync compute_nozzle_sync(Plater& plater, MachineObject& obj)
         NozzleVolumeType target = NozzleVolumeType::nvtStandard;
         if (obj.is_nozzle_flow_type_supported()) {
             if (obj.GetExtderSystem()->GetNozzleFlowType(index) == NozzleFlowType::NONE_FLOWTYPE) {
-                out.warnings.push_back("extruder " + std::to_string(index) + " has no nozzle type set on the printer; its flow type was left as it is");
+                out.warnings.push_back("extruder " + std::to_string(index) + " has no nozzle type set on the printer (the dialog asks to set the nozzle types of all extruders before synchronizing); its flow type was set to standard");
                 continue;
             }
             if (std::fabs(out.diameters[size_t(extruder_id)] - 0.2) > EPSILON)
@@ -276,8 +278,8 @@ void apply_nozzle_sync(Plater& plater, const NozzleSync& sync)
             auto*               opt      = new_conf.option<ConfigOptionFloats>("nozzle_diameter");
             if (tab == nullptr || opt == nullptr || opt->size() < 2)
                 throw ToolFailure("The printer preset has no per-extruder nozzle diameters");
-            opt->values[0] = sync.diameters[0];
-            opt->values[1] = sync.diameters[1];
+            opt->values[0] = std::stod(left); // the dialog parses the combo's text (ToCDouble)
+            opt->values[1] = std::stod(right);
             tab->load_config(new_conf);
         } else {
             switch_diameter_to(left);
@@ -320,10 +322,10 @@ json slots_json()
 
 // The AMS part's preview: which preset each tray would select (PresetBundle::sync_ams_list' rule for a known filament
 // id; an unknown one falls back to a generic preset of its type, which only the sync itself decides).
-json ams_preview(PresetBundle& pb)
+json ams_preview(PresetBundle& pb, const std::map<int, DynamicPrintConfig>& list)
 {
     json out = json::array();
-    for (const auto& [key, tray] : pb.filament_ams_list) {
+    for (const auto& [key, tray] : list) {
         const std::string filament_id = tray.opt_string("filament_id", 0u);
         json              t;
         t["tray"]      = tray.opt_string("tray_name", 0u);
@@ -355,8 +357,14 @@ json sync_ams(Plater& plater, MachineObject& obj, bool color_only, bool dry_run)
 {
     PresetBundle& pb = *wxGetApp().preset_bundle;
     Sidebar&      sidebar = plater.sidebar();
-    sidebar.load_ams_list(&obj);
-    auto& list = pb.filament_ams_list;
+    // A dry run builds the list locally; load_ams_list would replace the bundle's list and refresh the sidebar.
+    std::map<int, DynamicPrintConfig> local_list;
+    if (dry_run)
+        local_list = sidebar.build_filament_ams_list(&obj);
+    else
+        sidebar.load_ams_list(&obj);
+    const std::map<int, DynamicPrintConfig>& list_ref = dry_run ? local_list : pb.filament_ams_list;
+    const auto& list = list_ref;
     if (list.empty()) {
         if (obj.is_connected() && obj.m_push_count > 0)
             throw ToolFailure("The printer answered but reports no filament system (no AMS and no external spool)");
@@ -375,7 +383,7 @@ json sync_ams(Plater& plater, MachineObject& obj, bool color_only, bool dry_run)
 
     json result = {{"before", slots_json()}, {"mode", color_only ? "color_only" : "override"}};
     if (dry_run) {
-        result["trays"] = ams_preview(pb);
+        result["trays"] = ams_preview(pb, list);
         return result;
     }
 
@@ -387,13 +395,16 @@ json sync_ams(Plater& plater, MachineObject& obj, bool color_only, bool dry_run)
         if (!stored.empty())
             boost::algorithm::split(ids, stored, boost::algorithm::is_any_of(","));
         ids.resize(list.size());
-        auto it = list.begin();
+        auto it = pb.filament_ams_list.begin(); // a real run: the list load_ams_list filled
         for (size_t i = 0; i < list.size(); ++i, ++it) {
             it->second.set_key_value("filament_changed", new ConfigOptionBool{true});
             ids[i] = it->second.opt_string("filament_id", 0u);
         }
     }
     std::vector<std::string> colors_before;
+    std::vector<bool>        support_before;
+    for (size_t i = 0; i < sidebar.combos_filament().size(); ++i)
+        support_before.push_back(is_support_filament(int(i)));
     for (const std::string& c : pb.project_config.option<ConfigOptionStrings>("filament_colour")->values)
         colors_before.push_back(c);
 
@@ -426,6 +437,8 @@ json sync_ams(Plater& plater, MachineObject& obj, bool color_only, bool dry_run)
         else if (colors_after && i < colors_after->values.size() && colors_before[i] != colors_after->values[i] &&
                  config->get("auto_calculate_flush") != "disabled")
             sidebar.auto_calc_flushing_volumes(int(i));
+        else if (i < support_before.size() && is_support_filament(int(i)) != support_before[i] && config->get("auto_calculate_flush") == "all")
+            sidebar.auto_calc_flushing_volumes(int(i)); // Plater.cpp:6448
     }
     if (!color_only) {
         pb.install_slot_filaments(*config);
@@ -455,7 +468,7 @@ json sync_ams(Plater& plater, MachineObject& obj, bool color_only, bool dry_run)
     if (!merge_info.is_empty() && config->get_bool("enable_merge_color_by_sync_ams"))
         result["note"] = "enable_merge_color_by_sync_ams is on: merging identical filaments is a dialog step and was not applied";
     result["after"]   = slots_json();
-    result["trays"]   = ams_preview(pb);
+    result["trays"]   = ams_preview(pb, pb.filament_ams_list);
     result["unknown"] = unknown_json;
     return result;
 }
@@ -600,39 +613,66 @@ void register_print_tools(McpService& service)
         "(same arguments: plate, overrides, options) and refuses with the blocking errors in details when it is not sendable; "
         "warnings the dialog confirms in a popup (plan needs_confirmation) refuse the call unless confirm_warnings is true. "
         "The plate is selected, its sliced 3mf (and for cloud printers its config 3mf) exported like Plater::send_gcode, and "
-        "the job runs on a worker: on a hotend-rack printer the printer is first asked for its nozzle mapping (up to 10 s). "
-        "dry_run builds the plan and the PrintParams the job would send (secrets redacted) and sends nothing: no file is exported "
-        "and no job is created. Real runs return {started, message}; the Monitor tab is shown afterwards as in the dialog. "
-        "plate is the 0-based plate index. A LAN printer that rejects the access code or address fails the call instead of opening "
-        "the dialog's address prompt.",
+        "the job runs on a worker: on a hotend-rack printer the printer is first asked for a fresh nozzle mapping (up to 10 s). "
+        "With the timelapse option on, the printer's storage is checked first as the dialog does; when it is low the call refuses "
+        "until confirm_timelapse_storage is true (the oldest timelapse videos are then deleted), or options.timelapse is false. "
+        "dry_run builds the plan and the PrintParams the job would send (secrets redacted) and sends nothing: no file is exported, "
+        "no job is created and the current plate stays. A dry run returns {sendable, errors, warnings, plan, print_params, files} "
+        "even when the plan is blocked; a real run refuses. Real runs return {started, message}; the Monitor tab is shown afterwards "
+        "as in the dialog. plate is the 0-based plate index. A LAN printer that rejects the access code or address fails the call "
+        "instead of opening the dialog's address prompt.",
         object_schema({{"plate", prop("integer", "0-based plate index; default the current plate.")},
                        {"dev_id", dev_id_prop()},
                        {"overrides", overrides_prop()},
                        {"options", options_prop()},
                        {"confirm_warnings", prop("boolean", "Proceed although the plan has warnings the dialog asks to confirm.")},
+                       {"confirm_timelapse_storage", prop("boolean", "Allow deleting the oldest timelapse videos when the timelapse storage is low.")},
                        {"dry_run", dry_run_prop()}}),
         [](const json& args, ToolContext& ctx) {
             const bool dry_run = arg_bool(args, "dry_run", false);
             PrinterTarget target = resolve_printer(ctx, args, true, true);
             const json overrides = args.value("overrides", json::array());
 
-            // Phase 1: select the plate, and for a hotend rack ask the printer for its nozzle mapping.
-            int  plate_idx      = 0;
-            bool needs_round_trip = false;
+            struct Timelapse
+            {
+                bool        needed = false;
+                std::string storage;
+                int         layers = 0;
+            };
+            // the storage check the dialog runs before it sends (on_ok_btn -> start_timelapse_storage_check)
+            auto timelapse_of = [](Plater& plater, int plate_idx, MachineObject& obj, const PrintPlan& plan) {
+                Timelapse t;
+                t.needed = plan.options.timelapse && obj.is_support_internal_timelapse && !plan.options.timelapse_storage.empty();
+                t.storage = plan.options.timelapse_storage;
+                if (PartPlate* plate = plater.get_partplate_list().get_plate(plate_idx); plate != nullptr && plate->fff_print() != nullptr)
+                    for (const PrintObject* po : plate->fff_print()->objects())
+                        t.layers = std::max(t.layers, int(po->layer_count()));
+                return t;
+            };
+
+            // Phase 1 (real runs): the plate, a fresh rack nozzle mapping. A dry run changes nothing here.
+            int       plate_idx = 0;
+            bool      needs_round_trip = false;
+            Timelapse timelapse;
             ctx.run_ui([&]() -> json {
                 MachineObject& obj    = ui_printer(target.dev_id);
                 Plater&        plater = ui_plater();
                 plate_idx             = plate_arg(args);
-                if (plater.is_slicing_any())
-                    throw ToolFailure("Slicing is in progress; wait {for:\"idle\"} and try again");
-                if (plate_idx != plater.get_partplate_list().get_curr_plate_index() && plater.select_plate(plate_idx) != 0)
-                    throw ToolFailure("Plate " + std::to_string(plate_idx) + " could not be selected");
                 if (dry_run)
                     return json();
+                if (last_worker() && !last_worker()->is_idle())
+                    throw ToolFailure("The previous print job is still being sent; wait for it to finish");
+                if (plater.is_slicing_any())
+                    throw ToolFailure("Slicing is in progress; wait {for:\"idle\"} and try again");
+                ctx.begin_operation();
+                if (plate_idx != plater.get_partplate_list().get_curr_plate_index() && plater.select_plate(plate_idx) != 0)
+                    throw ToolFailure("Plate " + std::to_string(plate_idx) + " could not be selected");
+                // The dialog clears a cached nozzle mapping when the printer or the options change; always ask afresh.
+                obj.clear_auto_nozzle_mapping();
                 PrintPlan plan = ui_build_plan(plater, plate_idx, obj, overrides, plan_args(args, true));
+                timelapse      = timelapse_of(plater, plate_idx, obj, plan);
                 for (const PlanCheck& c : plan.checks)
                     if (c.id == "rack_nozzle_mapping_pending") {
-                        ctx.begin_operation();
                         const int flow_cali = plan.options.flow_cali == "off" ? 0 : plan.options.flow_cali == "on" ? 1 : 2;
                         const int pa        = obj.is_support_pa_mode ? (plan.options.pa_value == "on" ? 0 : 1) : 1;
                         const int rc = plan.project.dynamic_nozzle_map ?
@@ -658,16 +698,64 @@ void register_print_tools(McpService& service)
                 }
             }
 
+            // Phase 1b (real runs): timelapse storage (SelectMachine.cpp:3393-3557).
+            if (!dry_run && timelapse.needed) {
+                run_printer_command(ctx, target.dev_id, false, [&](MachineObject& o) {
+                    o.timelapse_storage_check_done   = false;
+                    o.timelapse_storage_check_result = -1;
+                    return o.command_ipcam_check_timelapse_storage(timelapse.storage, timelapse.layers);
+                });
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
+                json       reply;
+                for (;;) {
+                    reply = ctx.observe_ui([&]() -> json {
+                        MachineObject& o = ui_printer(target.dev_id);
+                        if (!o.timelapse_storage_check_done.load())
+                            return json();
+                        return {{"result", o.timelapse_storage_check_result}, {"enough", o.timelapse_storage_is_enough}, {"files", o.timelapse_storage_file_count}};
+                    });
+                    if (!reply.is_null() || std::chrono::steady_clock::now() >= deadline)
+                        break; // a timed out check proceeds, as in the dialog
+                    if (ctx.cancelled())
+                        throw ToolFailure("Cancelled while checking the timelapse storage");
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                if (!reply.is_null() && reply["result"].get<int>() == 0 && !reply["enough"].get<bool>()) {
+                    const bool internal  = timelapse.storage == "internal";
+                    const bool has_files = reply["files"].get<int>() >= 0; // < 0 is the printer's "no video files" sentinel
+                    if (!internal && !has_files)
+                        throw ToolFailure("Insufficient external storage for time-lapse photography. Connect to computer to delete files, or use a larger "
+                                          "memory card, or print with options.timelapse set to false.",
+                                          {{"storage", timelapse.storage}});
+                    if (!arg_bool(args, "confirm_timelapse_storage", false))
+                        throw ToolFailure(std::string("Low ") + (internal ? "internal" : "external") +
+                                              " storage. This timelapse will overwrite the oldest video files. Pass confirm_timelapse_storage: true to allow "
+                                              "it, or options.timelapse: false to print without a timelapse.",
+                                          {{"storage", timelapse.storage}});
+                    run_printer_command(ctx, target.dev_id, false, [&](MachineObject& o) {
+                        return o.command_ipcam_delete_oldest_timelapse(timelapse.storage, timelapse.layers);
+                    });
+                }
+            }
+
             // Phase 2: the plan, the export and the job.
             auto state = std::make_shared<std::atomic<bool>>(false); // the job's LAN check failed
             auto progress = std::make_shared<JobProgress>();
             std::shared_ptr<Worker> worker;
             std::shared_ptr<PrintJob> job;
+            Timelapse dry_timelapse;
             json prepared = ctx.run_ui([&]() -> json {
                 MachineObject& obj    = ui_printer(target.dev_id);
                 Plater&        plater = ui_plater();
-                PrintPlan      plan   = ui_build_plan(plater, plate_idx, obj, overrides, plan_args(args, false));
-                if (!plan.sendable)
+                // send_gcode exports the CURRENT plate: make sure it is the target
+                if (!dry_run) {
+                    if (plater.get_partplate_list().get_curr_plate_index() != plate_idx && plater.select_plate(plate_idx) != 0)
+                        throw ToolFailure("Plate " + std::to_string(plate_idx) + " could not be selected");
+                    if (plater.get_partplate_list().get_curr_plate_index() != plate_idx)
+                        throw ToolFailure("The current plate changed while the print was prepared; try again");
+                }
+                PrintPlan plan = ui_build_plan(plater, plate_idx, obj, overrides, plan_args(args, !dry_run));
+                if (!dry_run && !plan.sendable)
                     throw ToolFailure("The plan has blocking errors; print_plan shows them", {{"errors", checks_for_error(plan, "error")}, {"plan", redact(plan_to_json(plan))}});
                 if (plan.needs_confirmation && !arg_bool(args, "confirm_warnings", false) && !dry_run) {
                     json confirm = json::array();
@@ -686,14 +774,17 @@ void register_print_tools(McpService& service)
 
                 if (dry_run) {
                     ScopedPublishCapture capture; // nothing below sends, and a print start would be refused
+                    dry_timelapse = timelapse_of(plater, plate_idx, obj, plan);
                     json out = {{"dry_run", true},
+                                {"sendable", plan.sendable},
+                                {"errors", checks_for_error(plan, "error")},
+                                {"warnings", checks_for_error(plan, "warning")},
                                 {"plan", plan_to_json(plan)},
                                 {"print_params", print_params_json(setup)},
                                 {"files", {{"3mf", setup.file_3mf}, {"config_3mf", setup.file_config_3mf}, {"exported", false}}}};
                     return redact(std::move(out));
                 }
 
-                ctx.begin_operation();
                 // exactly Plater::send_gcode / export_config_3mf (the plate is the current one)
                 if (plater.send_gcode(plate_idx, nullptr) < 0)
                     throw ToolFailure("Abnormal print file data. Please slice again");
@@ -707,8 +798,16 @@ void register_print_tools(McpService& service)
                 replace_job(*worker, job);
                 return json{{"plan", redact(plan_to_json(plan))}, {"print_params", redact(print_params_json(setup))}};
             });
-            if (dry_run)
+            if (dry_run) {
+                if (dry_timelapse.needed) {
+                    json would = run_printer_command(ctx, target.dev_id, true, [&](MachineObject& o) {
+                        return o.command_ipcam_check_timelapse_storage(dry_timelapse.storage, dry_timelapse.layers);
+                    });
+                    prepared["timelapse_storage_check"] = {{"note", "the check runs on a real print; if the storage is low the call then needs confirm_timelapse_storage or timelapse off"},
+                                                           {"would_send", would["would_send"]}};
+                }
                 return ToolResult::ok(std::move(prepared));
+            }
 
             // Wait for the job: the worker is idle once the job and its finalize message were handled.
             for (;;) {
