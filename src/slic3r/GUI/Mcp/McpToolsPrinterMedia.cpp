@@ -938,7 +938,8 @@ void register_printer_media_tools(McpService& service)
 {
     ToolRegistry& reg = service.registry();
 
-    reg.add(inspect_tool(
+    // A mutate tool, not inspect: it may select the printer (a state change) and holds a tunnel for seconds.
+    reg.add(mutate_tool(
         "printer_camera", L("Printer camera"),
         "One current frame from the printer's camera, returned as an image (action \"snapshot\"). It connects to the printer "
         "over the LAN (the same tunnel the Device tab's live view uses), so the printer needs its IP and access code "
