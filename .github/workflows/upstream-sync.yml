@@ -1,0 +1,96 @@
+name: Upstream sync
+
+on:
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_URL: https://github.com/OrcaSlicer/OrcaSlicer.git
+  UPSTREAM_BRANCH: release/v2.5.0
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch upstream "$UPSTREAM_BRANCH" --tags
+
+      - name: Merge upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -u
+          UP="upstream/$UPSTREAM_BRANCH"
+          if git merge-base --is-ancestor "$UP" HEAD; then
+            echo "Upstream already contained in main; nothing to do."
+            exit 0
+          fi
+          if git merge --no-ff --no-edit -m "Merge upstream $UPSTREAM_BRANCH (auto-sync)" "$UP"; then
+            git push origin HEAD:main
+            echo "Merged and pushed."
+            exit 0
+          fi
+
+          echo "Merge conflict."
+          CONFLICTS=$(git diff --name-only --diff-filter=U)
+          git merge --abort
+
+          SHORT=$(git rev-parse --short "$UP")
+          TITLE="Upstream sync conflict: $UPSTREAM_BRANCH $SHORT"
+          EXISTING=$(gh pr list --state open --search '"Upstream sync conflict" in:title' --json number,title \
+            --jq '[.[] | select(.title | startswith("Upstream sync conflict"))] | length')
+          if [ "$EXISTING" != "0" ]; then
+            echo "An open upstream-sync conflict PR already exists; skipping."
+            exit 0
+          fi
+
+          BRANCH="sync/upstream-$(date -u +%Y%m%d)"
+          git push --force-with-lease origin "$UP:refs/heads/$BRANCH" || git push origin "$UP:refs/heads/$BRANCH"
+          {
+            echo "Automatic merge of \`upstream/$UPSTREAM_BRANCH\` ($SHORT) into \`main\` hit conflicts."
+            echo "\`main\` was not modified."
+            echo
+            echo "Conflicting files:"
+            echo '```'
+            echo "$CONFLICTS"
+            echo '```'
+            echo
+            echo "To resolve locally: merge \`$BRANCH\` into \`main\`, fix the conflicts, push."
+          } > body.md
+          gh pr create --base main --head "$BRANCH" --title "$TITLE" --body-file body.md
+
+      - name: Disable other workflows
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow list --all --json id,name,path,state \
+            --jq '.[] | select(.state=="active" and .path != ".github/workflows/upstream-sync.yml") | .id' \
+          | while read -r id; do
+              echo "Disabling workflow $id"
+              gh workflow disable "$id" || true
+            done
