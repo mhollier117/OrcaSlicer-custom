@@ -5247,7 +5247,8 @@ void StatusPanel::on_filament_edit(wxCommandEvent &event)
                     m_filament_setting_dlg->set_colors(cols);
                 }
 
-                m_filament_setting_dlg->m_is_third = !DevFilaSystem::IsBBL_Filament(tray->tag_uid);
+                // Fork: an RFID spool is editable too when allow_edit_bambu_spools is on
+                m_filament_setting_dlg->m_is_third = !DevFilaSystem::IsBBL_Filament(tray->tag_uid) || obj->can_edit_bambu_spools();
                 if (!m_filament_setting_dlg->m_is_third)
                 {
                     sn_number = tray->uuid;
@@ -5313,7 +5314,7 @@ void StatusPanel::on_ext_spool_edit(wxCommandEvent &event)
                 m_filament_setting_dlg->set_colors(cols);
             }
 
-            m_filament_setting_dlg->m_is_third = !DevFilaSystem::IsBBL_Filament(obj->vt_slot[nozzle_index].tag_uid);
+            m_filament_setting_dlg->m_is_third = !DevFilaSystem::IsBBL_Filament(obj->vt_slot[nozzle_index].tag_uid) || obj->can_edit_bambu_spools();
             if (!m_filament_setting_dlg->m_is_third) {
                 sn_number = obj->vt_slot[nozzle_index].uuid;
                 filament  = obj->vt_slot[nozzle_index].sub_brands;

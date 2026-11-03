@@ -342,9 +342,15 @@ TEST_CASE("printer_ams set_tray writes the slot's filament settings", "[McpPrint
     REFUSED(dispatch_ams(r.obj, with("ams_id", 3)));
     REFUSED(dispatch_ams(r.obj, with("slot_id", 3)));
     REFUSED(dispatch_ams(r.obj, with("colors", json::array({"#112233"})))); // firmware without multi-colour
-    // a Bambu RFID spool is read only
+    // a Bambu RFID spool is read only unless the app config allows editing it
     r.obj.GetFilaSystem()->GetAmsTray("0", "1")->tag_uid = "0123456789ABCDEF";
+    r.config.set_bool("allow_edit_bambu_spools", false);
     REFUSED(dispatch_ams(r.obj, args));
+    r.config.set_bool("allow_edit_bambu_spools", true);
+    r.agent->messages.clear();
+    CHECK(dispatch_ams(r.obj, args) == 0);
+    CHECK(r.print().at("command") == "ams_filament_setting");
+    r.config.set_bool("allow_edit_bambu_spools", false);
     r.obj.GetFilaSystem()->GetAmsTray("0", "1")->tag_uid = "";
     // no edits during a print unless the printer advertises it or the app config allows it
     r.obj.print_status = "RUNNING";

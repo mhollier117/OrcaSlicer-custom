@@ -653,6 +653,10 @@ public:
     // (print.flag3 bit 3) or the app config "allow_ams_edit_while_printing" is on (default). Firmware tested
     // on an H2D (ahb 02.04.11.98) accepts ams_filament_setting mid-print although it advertises 0.
     bool can_edit_filament_while_printing() const;
+    // Fork: Bambu RFID spools are read only in the AMS dialog (the tag supplies type and colour); with
+    // "allow_edit_bambu_spools" on (default) they can be edited and reset like third-party spools. The
+    // printer may restore the tag's data when it re-reads the RFID.
+    bool can_edit_bambu_spools() const;
     bool is_support_internal_timelapse { false };// fun[28], support timelapse without SD card
     bool m_support_mqtt_homing { false };// fun[32]
     bool is_support_brtc{false};                 // fun[31], support tcp and upload protocol

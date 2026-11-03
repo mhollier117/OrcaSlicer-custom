@@ -2566,6 +2566,12 @@ bool MachineObject::can_edit_filament_while_printing() const
     return config != nullptr && config->get_bool("allow_ams_edit_while_printing");
 }
 
+bool MachineObject::can_edit_bambu_spools() const
+{
+    AppConfig* config = m_manager ? m_manager->get_app_config() : nullptr;
+    return config != nullptr && config->get_bool("allow_edit_bambu_spools");
+}
+
 bool MachineObject::is_in_printing()
 {
     /* use print_status if print_status is valid */

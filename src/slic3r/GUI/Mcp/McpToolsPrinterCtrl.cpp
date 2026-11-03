@@ -454,7 +454,7 @@ int ams_set_tray(MachineObject& m, const json& args, json* info)
             fail(std::string(ref.virt ? "Setting external spool information" : "Setting AMS slot information") +
                  " while printing is not supported by this printer (override_print_lock sends it anyway)");
     }
-    if (DevFilaSystem::IsBBL_Filament(ref.tray->tag_uid))
+    if (DevFilaSystem::IsBBL_Filament(ref.tray->tag_uid) && !m.can_edit_bambu_spools())
         fail("This slot holds a Bambu Lab RFID spool; its information is read only");
 
     const std::string tray_info_idx = req_string(args, "tray_info_idx");
@@ -541,7 +541,7 @@ int ams_reset_tray(MachineObject& m, const json& args, json* info)
     }
     int rc = 0;
     // AMSMaterialsSetting.cpp:682 on_select_reset: a third-party tray is cleared (empty ids, white, 0 temperatures)...
-    if (!DevFilaSystem::IsBBL_Filament(ref.tray->tag_uid))
+    if (!DevFilaSystem::IsBBL_Filament(ref.tray->tag_uid) || m.can_edit_bambu_spools())
         rc = m.command_ams_filament_settings(ref.ams_id, ref.slot_id, "", "", "FFFFFF00", "", 0, 0);
     // ...and its K goes back to the default profile (:688)
     json k_args = {{"ams_id", ref.ams_id}, {"slot_id", ref.slot_id}, {"cali_idx", -1}, {"filament_id", ref.tray->setting_id}};

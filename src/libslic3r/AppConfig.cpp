@@ -141,6 +141,9 @@ void AppConfig::set_defaults()
         // Fork: allow AMS slot edits during a print even when the printer does not advertise it.
         if (get("allow_ams_edit_while_printing").empty())
             set_bool("allow_ams_edit_while_printing", true);
+        // Fork: allow editing Bambu RFID spools in the AMS dialog.
+        if (get("allow_edit_bambu_spools").empty())
+            set_bool("allow_edit_bambu_spools", true);
 
 #ifdef SUPPORT_BACKGROUND_PROCESSING
         // Disable background processing by default as it is not stable.
