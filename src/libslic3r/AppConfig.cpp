@@ -144,9 +144,6 @@ void AppConfig::set_defaults()
         // Fork: allow editing Bambu RFID spools in the AMS dialog.
         if (get("allow_edit_bambu_spools").empty())
             set_bool("allow_edit_bambu_spools", true);
-        // Fork: use the printer's LAN camera stream when it offers one, before the cloud (TUTK) route.
-        if (get("prefer_lan_liveview").empty())
-            set_bool("prefer_lan_liveview", true);
 
 #ifdef SUPPORT_BACKGROUND_PROCESSING
         // Disable background processing by default as it is not stable.
