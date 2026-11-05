@@ -2392,8 +2392,8 @@ wxBoxSizer *StatusBasePanel::create_misc_control(wxWindow *parent)
     /* create speed control */
     m_switch_speed = new ImageSwitchButton(parent, m_bitmap_speed_active, m_bitmap_speed);
     m_switch_speed->SetLabels("100%", "100%");
-    m_switch_speed->SetMinSize(MISC_BUTTON_2FAN_SIZE);
-    m_switch_speed->SetMaxSize(MISC_BUTTON_2FAN_SIZE);
+    m_switch_speed->SetMinSize(MISC_BUTTON_3FAN_SIZE);
+    m_switch_speed->SetMaxSize(MISC_BUTTON_3FAN_SIZE);
     m_switch_speed->SetPadding(FromDIP(3));
     m_switch_speed->SetBorderWidth(FromDIP(2));
     m_switch_speed->SetFont(Label::Head_13);
@@ -2409,13 +2409,30 @@ wxBoxSizer *StatusBasePanel::create_misc_control(wxWindow *parent)
     /* create lamp control */
     m_switch_lamp = new ImageSwitchButton(parent, m_bitmap_lamp_on, m_bitmap_lamp_off);
     m_switch_lamp->SetLabels(_L("Lamp"), _L("Lamp"));
-    m_switch_lamp->SetMinSize(MISC_BUTTON_2FAN_SIZE);
-    m_switch_lamp->SetMaxSize(MISC_BUTTON_2FAN_SIZE);
+    m_switch_lamp->SetMinSize(MISC_BUTTON_3FAN_SIZE);
+    m_switch_lamp->SetMaxSize(MISC_BUTTON_3FAN_SIZE);
     m_switch_lamp->SetPadding(FromDIP(3));
     m_switch_lamp->SetBorderWidth(FromDIP(2));
     m_switch_lamp->SetFont(Label::Head_13);
     m_switch_lamp->SetTextColor(StateColor(std::make_pair(DISCONNECT_TEXT_COL, (int) StateColor::Disabled), std::make_pair(NORMAL_TEXT_COL, (int) StateColor::Normal)));
     line_sizer->Add(m_switch_lamp, 1, wxALIGN_CENTER | wxALL, 0);
+
+    /* create toolhead logo lamp control (M960 S5) */
+    line = new StaticLine(parent, true);
+    line->SetLineColour(STATIC_BOX_LINE_COL);
+    line_sizer->Add(line, 0, wxEXPAND | wxTOP | wxBOTTOM, 4);
+
+    m_switch_toolhead_logo = new ImageSwitchButton(parent, m_bitmap_lamp_on, m_bitmap_lamp_off);
+    m_switch_toolhead_logo->SetLabels(_L("Logo"), _L("Logo"));
+    m_switch_toolhead_logo->SetToolTip(_L("Toolhead logo light. A new print turns it back on."));
+    m_switch_toolhead_logo->SetMinSize(MISC_BUTTON_3FAN_SIZE);
+    m_switch_toolhead_logo->SetMaxSize(MISC_BUTTON_3FAN_SIZE);
+    m_switch_toolhead_logo->SetPadding(FromDIP(3));
+    m_switch_toolhead_logo->SetBorderWidth(FromDIP(2));
+    m_switch_toolhead_logo->SetFont(Label::Head_13);
+    m_switch_toolhead_logo->SetTextColor(StateColor(std::make_pair(DISCONNECT_TEXT_COL, (int) StateColor::Disabled), std::make_pair(NORMAL_TEXT_COL, (int) StateColor::Normal)));
+    m_switch_toolhead_logo->SetValue(true);
+    line_sizer->Add(m_switch_toolhead_logo, 1, wxALIGN_CENTER | wxALL, 0);
 
     //sizer->Add(line_sizer, 0, wxEXPAND, FromDIP(5));
     line = new StaticLine(parent);
@@ -3131,6 +3148,7 @@ void StatusPanel::wire_controls()
     m_tempCtrl_chamber->Connect(wxEVT_KILL_FOCUS, wxFocusEventHandler(StatusPanel::on_cham_temp_kill_focus), NULL, this);
     m_tempCtrl_chamber->Connect(wxEVT_SET_FOCUS, wxFocusEventHandler(StatusPanel::on_cham_temp_set_focus), NULL, this);
     m_switch_lamp->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(StatusPanel::on_lamp_switch), NULL, this);
+    m_switch_toolhead_logo->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(StatusPanel::on_toolhead_logo_switch), NULL, this);
     //m_switch_nozzle_fan->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(StatusPanel::on_nozzle_fan_switch), NULL, this); // TODO
     //m_switch_printing_fan->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(StatusPanel::on_nozzle_fan_switch), NULL, this);
     //m_switch_cham_fan->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(StatusPanel::on_nozzle_fan_switch), NULL, this);
@@ -3199,6 +3217,7 @@ StatusPanel::~StatusPanel()
         m_tempCtrl_nozzle_deputy->Disconnect(wxEVT_SET_FOCUS, wxFocusEventHandler(StatusPanel::on_nozzle_temp_set_focus), NULL, this);
 
         m_switch_lamp->Disconnect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(StatusPanel::on_lamp_switch), NULL, this);
+        m_switch_toolhead_logo->Disconnect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(StatusPanel::on_toolhead_logo_switch), NULL, this);
         /*m_switch_nozzle_fan->Disconnect(wxEVT_COMMAND_TOGGLEBUTTON_CLICKED, wxCommandEventHandler(StatusPanel::on_nozzle_fan_switch), NULL, this);
         m_switch_printing_fan->Disconnect(wxEVT_COMMAND_TOGGLEBUTTON_CLICKED, wxCommandEventHandler(StatusPanel::on_nozzle_fan_switch), NULL, this);
         m_switch_cham_fan->Disconnect(wxEVT_COMMAND_TOGGLEBUTTON_CLICKED, wxCommandEventHandler(StatusPanel::on_nozzle_fan_switch), NULL, this);*/
@@ -3506,6 +3525,7 @@ void StatusPanel::update(MachineObject *obj)
     /*STUDIO-12573*/
     if (!obj->is_fdm_type()) {
         m_switch_lamp->Enable(false);
+        m_switch_toolhead_logo->Enable(false);
     }
 
     update_temp_ctrl(obj);
@@ -3673,6 +3693,7 @@ void StatusPanel::show_printing_status(bool ctrl_area, bool temp_area)
         m_switch_speed->Enable(false);
         m_switch_speed->SetValue(false);
         m_switch_lamp->Enable(false);
+        m_switch_toolhead_logo->Enable(false);
         /*m_switch_nozzle_fan->Enable(false);
         m_switch_printing_fan->Enable(false);
         m_switch_cham_fan->Enable(false);*/
@@ -3685,6 +3706,7 @@ void StatusPanel::show_printing_status(bool ctrl_area, bool temp_area)
         m_switch_speed->Enable();
         m_switch_speed->SetValue(true);
         m_switch_lamp->Enable();
+        m_switch_toolhead_logo->Enable();
         /*m_switch_nozzle_fan->Enable();
         m_switch_printing_fan->Enable();
         m_switch_cham_fan->Enable();*/
@@ -3974,6 +3996,8 @@ void StatusPanel::update_misc_ctrl(MachineObject *obj)
         /*wxString label = light_on ? "On" : "Off";
         m_switch_lamp->SetLabels(label, label);*/
     }
+
+    m_switch_toolhead_logo->SetValue(obj->GetLamp()->IsToolheadLogoOn());
 
     if (speed_lvl_timeout > 0)
         speed_lvl_timeout--;
@@ -5624,6 +5648,15 @@ void StatusPanel::on_lamp_switch(wxCommandEvent &event)
     }
 }
 
+void StatusPanel::on_toolhead_logo_switch(wxCommandEvent &event)
+{
+    if (!obj) return;
+    // The button has already flipped its value; send what it now shows.
+    const bool on = m_switch_toolhead_logo->GetValue();
+    if (obj->GetLamp()->CtrlSetToolheadLogo(on) != 0)
+        m_switch_toolhead_logo->SetValue(!on);
+}
+
 void StatusPanel::on_switch_vcamera(wxMouseEvent &event)
 {
     //if (!obj) return;
@@ -5996,6 +6029,7 @@ void StatusPanel::msw_rescale()
     m_switch_speed->SetMinSize(MISC_BUTTON_2FAN_SIZE);
     m_switch_speed->Rescale();
     m_switch_lamp->SetImages(m_bitmap_lamp_on, m_bitmap_lamp_off);
+    m_switch_toolhead_logo->SetImages(m_bitmap_lamp_on, m_bitmap_lamp_off);
     m_switch_lamp->SetMinSize(MISC_BUTTON_2FAN_SIZE);
     m_switch_lamp->Rescale();
     /*m_switch_nozzle_fan->SetImages(m_bitmap_fan_on, m_bitmap_fan_off);

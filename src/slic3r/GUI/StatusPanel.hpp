@@ -509,6 +509,7 @@ protected:
     Label *  m_staticText_control;
     ImageSwitchButton *m_switch_lamp;
     int               m_switch_lamp_timeout{0};
+    ImageSwitchButton *m_switch_toolhead_logo{nullptr};
     ImageSwitchButton *m_switch_speed;
 
     /* TempInput */
@@ -784,6 +785,7 @@ protected:
     void on_cham_temp_set_focus(wxFocusEvent& event);
     void on_switch_speed(wxCommandEvent& event);
     void on_lamp_switch(wxCommandEvent &event);
+    void on_toolhead_logo_switch(wxCommandEvent &event);
     void on_printing_fan_switch(wxCommandEvent &event);
     void on_nozzle_fan_switch(wxCommandEvent &event);
     void on_thumbnail_enter(wxMouseEvent &event);

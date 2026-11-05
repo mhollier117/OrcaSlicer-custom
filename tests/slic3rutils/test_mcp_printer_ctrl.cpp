@@ -23,6 +23,7 @@
 #include "slic3r/GUI/DeviceCore/DevExtruderSystem.h"
 #include "slic3r/GUI/DeviceCore/DevFan.h"
 #include "slic3r/GUI/DeviceCore/DevFilaSystem.h"
+#include "slic3r/GUI/DeviceCore/DevLamp.h"
 #include "slic3r/GUI/DeviceCore/DevManager.h"
 #include "slic3r/GUI/DeviceManager.hpp"
 #include "slic3r/GUI/Mcp/McpPrinterCtrl.hpp"
@@ -192,6 +193,26 @@ TEST_CASE("printer_control light sets both chamber lights", "[McpPrinterCtrl]")
     CHECK(dispatch_control(r.obj, {{"action", "light"}, {"on", false}}) == 0);
     CHECK(r.msg(0).at("system").at("led_mode") == "off");
     REFUSED(dispatch_control(r.obj, {{"action", "light"}}));
+}
+
+TEST_CASE("printer_control light toolhead_logo sends M960 S5 and works mid-print", "[McpPrinterCtrl]")
+{
+    Rig r;
+    r.obj.print_status = "RUNNING";
+    r.obj.subtask_id_  = "job-1";
+    CHECK(r.obj.GetLamp()->IsToolheadLogoOn());
+    CHECK(dispatch_control(r.obj, {{"action", "light"}, {"light", "toolhead_logo"}, {"on", false}}) == 0);
+    REQUIRE(r.agent->messages.size() == 1);
+    CHECK(r.print().at("command") == "gcode_line");
+    CHECK(r.print().at("param") == "M960 S5 P0\n");
+    CHECK_FALSE(r.obj.GetLamp()->IsToolheadLogoOn());
+    // A new print's start G-code turns the logo back on.
+    r.obj.subtask_id_ = "job-2";
+    CHECK(r.obj.GetLamp()->IsToolheadLogoOn());
+    r.agent->messages.clear();
+    CHECK(dispatch_control(r.obj, {{"action", "light"}, {"light", "toolhead_logo"}, {"on", true}}) == 0);
+    CHECK(r.print().at("param") == "M960 S5 P1\n");
+    REFUSED(dispatch_control(r.obj, {{"action", "light"}, {"light", "nozzle"}, {"on", false}}));
 }
 
 TEST_CASE("printer_control home, jog, extrude and select_extruder are refused while printing", "[McpPrinterCtrl]")

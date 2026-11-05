@@ -245,7 +245,10 @@ json section_lights(MachineObject& m)
     DevLamp* lamp = m.GetLamp();
     if (lamp == nullptr)
         return nullptr;
-    return {{"chamber_light", lamp->IsChamberLightOn() ? "on" : "off"}};
+    // toolhead_logo is not reported by the printer: it is what Orca last sent
+    // during the current job (a new print's start G-code turns it back on).
+    return {{"chamber_light", lamp->IsChamberLightOn() ? "on" : "off"},
+            {"toolhead_logo", lamp->IsToolheadLogoOn() ? "on" : "off"}};
 }
 
 json section_ams(MachineObject& m)

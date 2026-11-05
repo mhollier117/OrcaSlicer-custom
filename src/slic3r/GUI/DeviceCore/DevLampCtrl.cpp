@@ -34,6 +34,26 @@ void DevLamp::CtrlSetChamberLight(LIGHT_EFFECT effect)
     command_set_chamber_light2(effect);
 }
 
+bool DevLamp::IsToolheadLogoOn() const
+{
+    if (!m_toolhead_logo_off) return true;
+    // A new print's start G-code (M960 S5 P1) has turned it back on.
+    return m_owner && m_owner->subtask_id_ != m_toolhead_logo_off_subtask;
+}
+
+int DevLamp::CtrlSetToolheadLogo(bool on)
+{
+    if (!m_owner) return -1;
+    // Sent as a G-code line, the same path the fan controls use, so it also
+    // works mid-print.
+    const int rtn = m_owner->publish_gcode(on ? "M960 S5 P1\n" : "M960 S5 P0\n");
+    if (rtn == 0) {
+        m_toolhead_logo_off         = !on;
+        m_toolhead_logo_off_subtask = m_owner->subtask_id_;
+    }
+    return rtn;
+}
+
 int DevLamp::command_set_chamber_light(LIGHT_EFFECT effect, int on_time, int off_time, int loops, int interval)
 {
     json j;

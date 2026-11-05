@@ -326,6 +326,11 @@ int control_set_speed(MachineObject& m, const json& args)
 int control_light(MachineObject& m, const json& args, json* info)
 {
     const bool on = req_bool(args, "on");
+    const std::string light = args.value("light", std::string("chamber"));
+    if (light == "toolhead_logo")
+        return m.GetLamp()->CtrlSetToolheadLogo(on); // M960 S5 via gcode_line, works mid-print
+    if (light != "chamber")
+        fail("Unknown light \"" + light + "\"; expected chamber or toolhead_logo", {{"light", light}});
     if (!on && m.GetLamp()->HasLampCloseRecheck() && m.is_in_printing())
         set_info(info, "warning", "Turning the light off during a print makes AI monitoring (spaghetti detection) fail");
     m.GetLamp()->CtrlSetChamberLight(on ? DevLamp::LIGHT_EFFECT_ON : DevLamp::LIGHT_EFFECT_OFF); // StatusPanel.cpp:5060
@@ -1208,7 +1213,7 @@ void register_printer_ctrl_tools(McpService& service)
         "printer_control", L("Control the printer"),
         "Heat, fans, speed, light and motion on the selected (or dev_id) Bambu printer, as the Device tab does. Actions: set_temp {target: nozzle|bed|chamber, "
         "value C (0 = off), extruder? (0 right/main, 1 left)}; set_fan {fan: part|aux|chamber, percent 0-100, in steps of 10}; set_speed {level: silent|standard|sport|ludicrous or 1-4} "
-        "(printing only); light {on}; home; jog {axis: X|Y|Z|E, distance mm +-100, speed? mm/min} (positive X is right, Y back, Z moves the bed down, E extrudes; "
+        "(printing only); light {on, light?: chamber|toolhead_logo}; home; jog {axis: X|Y|Z|E, distance mm +-100, speed? mm/min} (positive X is right, Y back, Z moves the bed down, E extrudes; "
         "some printers move in exact steps of 1 or 10 mm only); extrude {length mm, negative retracts; nozzle at least 170 C}; select_extruder {extruder 0|1} "
         "(dual-nozzle printers). Temperatures, fans, speed and the light work during a print; home, jog, extrude and select_extruder are refused while printing. "
         "Nothing acknowledges: re-read printer_status. dry_run returns the exact messages without sending. A printer error reply may open a dialog.",
@@ -1222,6 +1227,7 @@ void register_printer_ctrl_tools(McpService& service)
                        {"percent", prop("integer", "set_fan: 0-100.")},
                        {"level", {{"type", {"string", "integer"}}, {"description", "set_speed: silent|standard|sport|ludicrous or 1-4."}}},
                        {"on", prop("boolean", "light: on or off.")},
+                       {"light", enum_prop({"chamber", "toolhead_logo"}, "light: which light. Default chamber. toolhead_logo is the lit logo on the toolhead (M960 S5); a new print turns it back on.")},
                        {"axis", enum_prop({"X", "Y", "Z", "E"}, "jog: axis.")},
                        {"distance", prop("number", "jog: mm, signed, at most 100.")},
                        {"speed", prop("integer", "jog / extrude: mm/min (defaults 3000 for X/Y, 900 otherwise).")},

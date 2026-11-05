@@ -28,8 +28,14 @@ namespace Slic3r
         void SetLampCloseRecheck(bool enable) { m_lamp_close_recheck = enable;};
         bool HasLampCloseRecheck() const { return m_lamp_close_recheck; }
 
+        // Toolhead logo lamp (M960 S5). Printers do not report its state, so
+        // this is what Orca last sent. A print's start G-code turns it back on,
+        // so an "off" only holds for the job it was sent during.
+        bool IsToolheadLogoOn() const;
+
     public:
         void CtrlSetChamberLight(LIGHT_EFFECT effect);
+        int  CtrlSetToolheadLogo(bool on);
 
     private:
         int command_set_chamber_light(LIGHT_EFFECT effect, int on_time = 500, int off_time = 500, int loops = 1, int interval = 1000);
@@ -40,5 +46,8 @@ namespace Slic3r
 
         bool m_lamp_close_recheck = false;
         LIGHT_EFFECT m_chamber_light = LIGHT_EFFECT_UNKOWN;
+
+        bool        m_toolhead_logo_off = false;
+        std::string m_toolhead_logo_off_subtask; // subtask the "off" was sent during
     };
 }
