@@ -6699,7 +6699,10 @@ void GUI_App::check_new_version_sf(bool show_tips, int by_user)
         detect_updater_os_info()
     };
 
-    const std::string query_string = build_updater_query(query);
+    // The install id, OS details and signature are for Orca's own update server; other hosts
+    // (this build checks its GitHub releases) get a plain request.
+    const bool orca_update_server = version_check_url.find("check-version.orcaslicer.com") != std::string::npos;
+    const std::string query_string = orca_update_server ? build_updater_query(query) : std::string();
     if (!query_string.empty()) {
         const bool has_query = version_check_url.find('?') != std::string::npos;
         if (!has_query)
