@@ -2041,6 +2041,65 @@ void GUI_App::migrate_network_plugin_config()
     }
 }
 
+void GUI_App::deploy_bundled_network_plugin()
+{
+    // The Windows installer of this build can ship an open-bamboo-networking (OBN) build in
+    // <install>/obn. OBN implements the 02.03.00 plug-in ABI, so it goes in as that series.
+    // It is deployed once per bundled build (keyed on the DLL's MD5): a plug-in the user
+    // installs afterwards is left alone until an installer brings a different OBN build.
+    if (!app_config)
+        return;
+#ifdef _WIN32
+    namespace fs = boost::filesystem;
+    static const std::string obn_series = "02.03.00";
+    boost::system::error_code ec;
+
+    const fs::path bundle_dir = fs::path(resources_dir()).parent_path() / "obn";
+    std::string bundled_plugin = (bundle_dir / "bambu_networking.dll").string();
+    if (!fs::is_regular_file(bundled_plugin, ec))
+        return;
+
+    std::string md5;
+    if (!bbl_calc_md5(bundled_plugin, md5) || md5.empty())
+        return;
+    if (app_config->get("bundled_network_plugin_md5") == md5)
+        return;
+
+    const fs::path plugin_dir = fs::path(data_dir()) / "plugins";
+    fs::create_directories(plugin_dir, ec);
+
+    const fs::path target = plugin_dir / ("bambu_networking_" + obn_series + ".dll");
+    const fs::path backup = plugin_dir / ("bambu_networking_" + obn_series + ".dll.pre-bundled-obn");
+    if (fs::exists(target, ec) && !fs::exists(backup, ec))
+        fs::copy_file(target, backup, fs::copy_options::overwrite_existing, ec);
+
+    struct Item { const char* src; fs::path dst; };
+    const Item items[] = {
+        {"bambu_networking.dll", target},
+        {"BambuSource.dll", plugin_dir / "BambuSource.dll"},
+        {"live555.dll", plugin_dir / "live555.dll"},
+    };
+    for (const Item& item : items) {
+        const fs::path src = bundle_dir / item.src;
+        if (!fs::is_regular_file(src, ec))
+            continue;
+        fs::copy_file(src, item.dst, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            // Leave the MD5 unrecorded so the next launch tries again.
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": copying " << item.src << " failed: " << ec.message();
+            return;
+        }
+    }
+
+    app_config->set_bool("installed_networking", true);
+    app_config->set_network_plugin_version(obn_series);
+    app_config->set("bundled_network_plugin_md5", md5);
+    app_config->save();
+    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": installed the bundled open-bamboo-networking plug-in (md5 " << md5
+                            << ") as " << target.filename().string();
+#endif
+}
+
 bool GUI_App::hot_reload_network_plugin()
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": starting hot reload";
@@ -4077,6 +4136,8 @@ bool GUI_App::on_init_network(bool try_backup)
             }
         }
     }
+
+    deploy_bundled_network_plugin();
 
     auto should_load_networking_plugin = app_config->get_bool("installed_networking");
 

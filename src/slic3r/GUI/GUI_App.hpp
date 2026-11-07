@@ -898,6 +898,9 @@ public:
     // ..._02.08.01.53.dylib) to the AA.BB.CC series form, with no re-download. Runs at startup
     // before the plug-in is loaded.
     void            migrate_network_plugin_config();
+    // Copies the open-bamboo-networking build bundled with this installer (<install>/obn) into
+    // the plugins folder and selects it, once per bundled build. No-op when nothing is bundled.
+    void            deploy_bundled_network_plugin();
     bool            hot_reload_network_plugin();
     bool            install_network_plugin_from_ota(bool& had_cache);
     std::string     get_latest_network_version() const;
