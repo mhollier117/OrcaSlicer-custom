@@ -58,7 +58,8 @@ jobs:
         shell: pwsh
         run: |
           choco install strawberryperl --no-progress
-          .\build_win.bat -d --arch x64 --deps-dir deps/build --msvc --msbuild
+          # An absolute path: the slicer configure resolves a relative DEP_BUILD_DIR against its build dir.
+          .\build_win.bat -d --arch x64 --deps-dir "$($PWD.Path.Replace('\','/'))/deps/build" --msvc --msbuild
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Save dependencies
@@ -112,7 +113,8 @@ jobs:
         shell: pwsh
         run: |
           $env:ORCA_SLICER_CMAKE_ARGS = "-DORCA_BUNDLED_NETWORK_PLUGIN_DIR=$($PWD.Path.Replace('\','/'))/obn-bundle"
-          .\build_win.bat --installer --arch x64 --build-dir build --deps-dir deps/build --msvc --msbuild
+          $deps = "$($PWD.Path.Replace('\','/'))/deps/build"
+          .\build_win.bat --installer --arch x64 --build-dir build --deps-dir $deps --msvc --msbuild
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Publish the release
