@@ -1,0 +1,170 @@
+name: Custom release
+
+# Builds the Windows installer of this fork and publishes it as a GitHub release tagged
+# v<version>+custom. The upstream-sync workflow starts it after merging a new upstream release;
+# run it by hand to rebuild the current main.
+#
+# Orca's update check reads this repository's releases, so the tag carries the upstream version
+# (the +custom build metadata does not change how versions compare).
+#
+# Secrets (all optional):
+#   NTFY_URL    ntfy topic URL, e.g. https://ntfy.sh/<topic>; no notifications without it
+#   NTFY_TOKEN  ntfy access token for a reserved topic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: custom-release
+  cancel-in-progress: false
+
+env:
+  DEPS_PATH: deps/build/OrcaSlicer_dep
+  NSIS_VERSION: '3.13'
+  NSIS_SHA256: BA63DFFC4410EE89193E1CB5A41989991BD77C61068DA17E3156D136B7B0B3D8
+
+jobs:
+  deps:
+    name: Dependencies
+    runs-on: windows-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: 'false'
+
+      - name: Look up cached dependencies
+        id: cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ github.workspace }}/${{ env.DEPS_PATH }}
+          key: windows-x64-msvc-custom-deps-${{ hashFiles('deps/**') }}
+          lookup-only: true
+
+      - name: Build dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          choco install strawberryperl --no-progress
+          .\build_win.bat -d --arch x64 --deps-dir deps/build --msvc --msbuild
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Save dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ github.workspace }}/${{ env.DEPS_PATH }}
+          key: windows-x64-msvc-custom-deps-${{ hashFiles('deps/**') }}
+
+  installer:
+    name: Installer
+    needs: deps
+    runs-on: windows-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: 'false'
+
+      - name: Restore dependencies
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ github.workspace }}/${{ env.DEPS_PATH }}
+          key: windows-x64-msvc-custom-deps-${{ hashFiles('deps/**') }}
+          fail-on-cache-miss: true
+
+      - uses: microsoft/setup-msbuild@v3
+
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "nsis-$env:NSIS_VERSION.zip"
+          curl.exe -fsSL --retry 5 --retry-all-errors --retry-delay 15 -o $zip "https://downloads.sourceforge.net/project/nsis/NSIS%203/$env:NSIS_VERSION/nsis-$env:NSIS_VERSION.zip"
+          if ($LASTEXITCODE -ne 0) { throw "NSIS download failed." }
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $env:NSIS_SHA256) { throw "NSIS archive does not match its pinned SHA256." }
+          Expand-Archive $zip -DestinationPath $env:RUNNER_TEMP
+          Join-Path $env:RUNNER_TEMP "nsis-$env:NSIS_VERSION" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
+
+      # The open-bamboo-networking DLLs the installer bundles live as assets of the obn-bundle
+      # release of this repository (bambu_networking.dll, BambuSource.dll, live555.dll).
+      - name: Download the bundled network plug-in
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download obn-bundle -R $env:GITHUB_REPOSITORY -p '*.dll' -D obn-bundle
+          if ($LASTEXITCODE -ne 0) { throw "obn-bundle release download failed." }
+          Get-ChildItem obn-bundle | Format-Table Name, Length
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $env:ORCA_SLICER_CMAKE_ARGS = "-DORCA_BUNDLED_NETWORK_PLUGIN_DIR=$($PWD.Path.Replace('\','/'))/obn-bundle"
+          .\build_win.bat --installer --arch x64 --build-dir build --deps-dir deps/build --msvc --msbuild
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Publish the release
+        id: publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION=$(sed -nE 's/^set\(SoftFever_VERSION "([^"]+)"\).*/\1/p' version.inc)
+          TAG="v${VERSION}+custom"
+          INSTALLER=$(ls build/OrcaSlicer_Windows_Installer_*.exe | head -1)
+          SHORT=$(git rev-parse --short HEAD)
+          {
+            echo "OrcaSlicer ${VERSION} with this fork's changes, built from \`${SHORT}\`."
+            echo
+            echo "Includes the MCP server and printer tools, AMS editing while printing, Bambu spool editing,"
+            echo "the camera full-screen changes and the bundled open-bamboo-networking plug-in."
+          } > notes.md
+          # A rebuild of the same version replaces the earlier release.
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete "$TAG" -R "$GITHUB_REPOSITORY" --cleanup-tag -y
+          fi
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "OrcaSlicer ${VERSION} (custom)" --notes-file notes.md --latest \
+            "$INSTALLER" "$INSTALLER.sha256"
+          echo "url=https://github.com/$GITHUB_REPOSITORY/releases/tag/$(printf %s "$TAG" | sed 's/+/%2B/g')" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Notify
+        if: always()
+        shell: bash
+        env:
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -n "${NTFY_URL:-}" ] || exit 0
+          if [ "${{ job.status }}" = "success" ]; then
+            TITLE="OrcaSlicer ${{ steps.publish.outputs.version }} custom build ready"
+            MSG="The installer is published."; TAGS="white_check_mark"; CLICK="${{ steps.publish.outputs.url }}"
+          else
+            TITLE="OrcaSlicer custom build failed"
+            MSG="The installer build did not finish (${{ job.status }})."; TAGS="x"; CLICK="$RUN_URL"
+          fi
+          AUTH=(); [ -n "${NTFY_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer $NTFY_TOKEN")
+          curl -fsS "${AUTH[@]}" -H "Title: $TITLE" -H "Tags: $TAGS" -H "Click: $CLICK" -d "$MSG" "$NTFY_URL" >/dev/null || true
+
+  notify-deps-failure:
+    name: Notify on a dependencies failure
+    needs: deps
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify
+        env:
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -n "${NTFY_URL:-}" ] || exit 0
+          AUTH=(); [ -n "${NTFY_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer $NTFY_TOKEN")
+          curl -fsS "${AUTH[@]}" -H "Title: OrcaSlicer custom build failed" -H "Tags: x" -H "Click: $RUN_URL" \
+            -d "Building the dependencies failed." "$NTFY_URL" >/dev/null || true

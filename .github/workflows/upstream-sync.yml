@@ -1,5 +1,19 @@
 name: Upstream sync
 
+# Daily: merge the latest official (non-prerelease) OrcaSlicer release into main.
+# - Clean merge: push main and start the Custom release build.
+# - Conflict: main is left alone; the release goes to a sync/<tag> branch with a pull request
+#   for review, and ntfy is notified.
+# - When main's version has no custom release yet (for example after a conflict pull request
+#   was merged by hand), start the build once for that commit.
+#
+# Secrets:
+#   SYNC_TOKEN  fine-grained token for this repository with Contents, Pull requests and
+#               Workflows read/write. Needed because upstream releases change files under
+#               .github/workflows, which the built-in token is not allowed to push.
+#   NTFY_URL    ntfy topic URL, e.g. https://ntfy.sh/<topic> (optional)
+#   NTFY_TOKEN  ntfy access token for a reserved topic (optional)
+
 on:
   schedule:
     - cron: "17 7 * * *"
@@ -8,7 +22,6 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  issues: write
   actions: write
 
 concurrency:
@@ -16,81 +29,149 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  UPSTREAM_URL: https://github.com/OrcaSlicer/OrcaSlicer.git
-  UPSTREAM_BRANCH: release/v2.5.0
+  UPSTREAM_REPO: OrcaSlicer/OrcaSlicer
+  KEEP_WORKFLOWS: ".github/workflows/upstream-sync.yml .github/workflows/custom-release.yml"
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
+      - name: Check the sync token
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          if [ -z "$SYNC_TOKEN" ]; then
+            echo "::error::The SYNC_TOKEN secret is not set; see the comment at the top of this workflow."
+            exit 1
+          fi
+
       - name: Checkout main
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
 
       - name: Configure git identity
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Fetch upstream
-        run: |
-          git remote add upstream "$UPSTREAM_URL"
-          git fetch upstream "$UPSTREAM_BRANCH" --tags
-
-      - name: Merge upstream
+      - name: Find the latest upstream release
+        id: latest
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq .tag_name)
+          echo "Latest upstream release: $TAG"
+          git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
+          git fetch --no-tags upstream "refs/tags/$TAG:refs/upstream-tags/$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Merge the release
+        id: merge
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+          TAG: ${{ steps.latest.outputs.tag }}
         run: |
           set -u
-          UP="upstream/$UPSTREAM_BRANCH"
+          UP="refs/upstream-tags/$TAG"
           if git merge-base --is-ancestor "$UP" HEAD; then
-            echo "Upstream already contained in main; nothing to do."
+            echo "main already contains $TAG."
+            echo "result=current" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if git merge --no-ff --no-edit -m "Merge upstream $UPSTREAM_BRANCH (auto-sync)" "$UP"; then
+          if git merge --no-ff --no-edit -m "Merge upstream $TAG release (auto-sync)" "$UP"; then
             git push origin HEAD:main
-            echo "Merged and pushed."
+            echo "Merged $TAG and pushed main."
+            echo "result=merged" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "Merge conflict."
           CONFLICTS=$(git diff --name-only --diff-filter=U)
           git merge --abort
-
-          SHORT=$(git rev-parse --short "$UP")
-          TITLE="Upstream sync conflict: $UPSTREAM_BRANCH $SHORT"
-          EXISTING=$(gh pr list --state open --search '"Upstream sync conflict" in:title' --json number,title \
-            --jq '[.[] | select(.title | startswith("Upstream sync conflict"))] | length')
-          if [ "$EXISTING" != "0" ]; then
-            echo "An open upstream-sync conflict PR already exists; skipping."
+          BRANCH="sync/$TAG"
+          EXISTING=$(gh pr list -R "$GITHUB_REPOSITORY" --state open --head "$BRANCH" --json url --jq '.[0].url // ""')
+          if [ -n "$EXISTING" ]; then
+            echo "A pull request for $TAG is already open: $EXISTING"
+            echo "result=conflict-open" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
-          BRANCH="sync/upstream-$(date -u +%Y%m%d)"
-          git push --force-with-lease origin "$UP:refs/heads/$BRANCH" || git push origin "$UP:refs/heads/$BRANCH"
+          git push --force origin "$UP^{commit}:refs/heads/$BRANCH"
           {
-            echo "Automatic merge of \`upstream/$UPSTREAM_BRANCH\` ($SHORT) into \`main\` hit conflicts."
-            echo "\`main\` was not modified."
+            echo "Merging upstream release \`$TAG\` into \`main\` hit conflicts, so \`main\` was not changed."
             echo
             echo "Conflicting files:"
             echo '```'
             echo "$CONFLICTS"
             echo '```'
             echo
-            echo "To resolve locally: merge \`$BRANCH\` into \`main\`, fix the conflicts, push."
+            echo "To resolve: merge \`$BRANCH\` into \`main\` locally, fix the conflicts, build, and push \`main\`."
+            echo "Close this pull request afterwards. The next sync run starts the release build."
           } > body.md
-          gh pr create --base main --head "$BRANCH" --title "$TITLE" --body-file body.md
+          URL=$(gh pr create -R "$GITHUB_REPOSITORY" --base main --head "$BRANCH" \
+                  --title "Upstream $TAG: merge conflicts need review" --body-file body.md)
+          echo "Opened $URL"
+          echo "result=conflict" >> "$GITHUB_OUTPUT"
+          echo "pr=$URL" >> "$GITHUB_OUTPUT"
 
-      - name: Disable other workflows
+      - name: Start the release build if main has none
+        if: steps.merge.outputs.result == 'merged' || steps.merge.outputs.result == 'current'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(sed -nE 's/^set\(SoftFever_VERSION "([^"]+)"\).*/\1/p' version.inc)
+          TAG="v${VERSION}+custom"
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "$TAG is already released."
+            exit 0
+          fi
+          SHA=$(git rev-parse HEAD)
+          RUNS=$(gh run list -R "$GITHUB_REPOSITORY" -w custom-release.yml --commit "$SHA" --json databaseId --jq length)
+          if [ "$RUNS" != "0" ]; then
+            echo "A release build already ran for $SHA; not starting another."
+            exit 0
+          fi
+          gh workflow run custom-release.yml -R "$GITHUB_REPOSITORY" --ref main
+          echo "Started the release build for $TAG."
+
+      - name: Notify
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+          RESULT: ${{ steps.merge.outputs.result }}
+          TAG: ${{ steps.latest.outputs.tag }}
+          PR: ${{ steps.merge.outputs.pr }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          gh workflow list --all --json id,name,path,state \
-            --jq '.[] | select(.state=="active" and .path != ".github/workflows/upstream-sync.yml") | .id' \
-          | while read -r id; do
-              echo "Disabling workflow $id"
-              gh workflow disable "$id" || true
+          [ -n "${NTFY_URL:-}" ] || exit 0
+          if [ "${{ job.status }}" != "success" ]; then
+            TITLE="OrcaSlicer sync failed"; MSG="The upstream sync run failed."; TAGS="x"; CLICK="$RUN_URL"; PRIO=4
+          elif [ "$RESULT" = "conflict" ]; then
+            TITLE="OrcaSlicer $TAG needs review"; MSG="Merging upstream $TAG hit conflicts. main was not changed."
+            TAGS="warning"; CLICK="$PR"; PRIO=4
+          elif [ "$RESULT" = "merged" ]; then
+            TITLE="OrcaSlicer $TAG merged"; MSG="Upstream $TAG merged cleanly; the installer build has started."
+            TAGS="arrows_counterclockwise"; CLICK="$RUN_URL"; PRIO=3
+          else
+            exit 0
+          fi
+          AUTH=(); [ -n "${NTFY_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer $NTFY_TOKEN")
+          curl -fsS "${AUTH[@]}" -H "Title: $TITLE" -H "Tags: $TAGS" -H "Priority: $PRIO" -H "Click: $CLICK" \
+            -d "$MSG" "$NTFY_URL" >/dev/null || true
+
+      # Upstream's own workflows come along with every merge. Keep them off so they never run here.
+      - name: Disable upstream workflows
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow list -R "$GITHUB_REPOSITORY" --all --json id,path,state \
+            --jq '.[] | select(.state=="active") | "\(.id) \(.path)"' \
+          | while read -r id path; do
+              case " $KEEP_WORKFLOWS " in *" $path "*) continue ;; esac
+              case "$path" in .github/workflows/*) ;; *) continue ;; esac
+              echo "Disabling $path"
+              gh workflow disable "$id" -R "$GITHUB_REPOSITORY" || true
             done
