@@ -31,17 +31,26 @@ jobs:
     name: Dependencies
     runs-on: windows-latest
     timeout-minutes: 300
+    outputs:
+      key: ${{ steps.key.outputs.key }}
     steps:
       - uses: actions/checkout@v7
         with:
           lfs: 'false'
+
+      # Hash deps/ while it holds only the sources: after the build it also holds the build tree,
+      # and hashFiles() over that does not finish in its 120 s limit.
+      - name: Compute the cache key
+        id: key
+        shell: bash
+        run: echo "key=windows-x64-msvc-custom-deps-${{ hashFiles('deps/**') }}" >> "$GITHUB_OUTPUT"
 
       - name: Look up cached dependencies
         id: cache
         uses: actions/cache/restore@v6
         with:
           path: ${{ github.workspace }}/${{ env.DEPS_PATH }}
-          key: windows-x64-msvc-custom-deps-${{ hashFiles('deps/**') }}
+          key: ${{ steps.key.outputs.key }}
           lookup-only: true
 
       - name: Build dependencies
@@ -57,7 +66,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: ${{ github.workspace }}/${{ env.DEPS_PATH }}
-          key: windows-x64-msvc-custom-deps-${{ hashFiles('deps/**') }}
+          key: ${{ steps.key.outputs.key }}
 
   installer:
     name: Installer
@@ -73,7 +82,7 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: ${{ github.workspace }}/${{ env.DEPS_PATH }}
-          key: windows-x64-msvc-custom-deps-${{ hashFiles('deps/**') }}
+          key: ${{ needs.deps.outputs.key }}
           fail-on-cache-miss: true
 
       - uses: microsoft/setup-msbuild@v3
