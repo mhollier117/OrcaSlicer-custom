@@ -1,0 +1,23 @@
+name: Notify test
+
+# Sends a test message to the ntfy topic in the NTFY_URL / NTFY_TOKEN secrets.
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send a test notification
+        env:
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "${NTFY_URL:-}" ]; then echo "::error::NTFY_URL is not set."; exit 1; fi
+          AUTH=(); [ -n "${NTFY_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer $NTFY_TOKEN")
+          curl -fsS "${AUTH[@]}" -H "Title: OrcaSlicer custom: test" -H "Tags: bell" -H "Click: $RUN_URL" \
+            -d "Test notification from the OrcaSlicer-custom workflows." "$NTFY_URL" -o /dev/null -w "ntfy HTTP %{http_code}\n"

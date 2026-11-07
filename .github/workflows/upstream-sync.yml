@@ -30,7 +30,7 @@ concurrency:
 
 env:
   UPSTREAM_REPO: OrcaSlicer/OrcaSlicer
-  KEEP_WORKFLOWS: ".github/workflows/upstream-sync.yml .github/workflows/custom-release.yml"
+  KEEP_WORKFLOWS: ".github/workflows/upstream-sync.yml .github/workflows/custom-release.yml .github/workflows/notify-test.yml"
 
 jobs:
   sync:
