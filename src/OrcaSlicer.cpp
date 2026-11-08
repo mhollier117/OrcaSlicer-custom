@@ -1525,6 +1525,8 @@ int CLI::run(int argc, char **argv)
             params.mcp.port = opt->value;
         if (const auto *opt = m_config.opt<ConfigOptionString>("mcp_token"))
             params.mcp.token = opt->value;
+        if (const auto *opt = m_config.opt<ConfigOptionString>("mcp_launched_by"))
+            params.mcp.launched_by = opt->value;
         // Resolved now: the GUI moves the working directory to <data_dir>/log before the script runs.
         if (const auto *opt = m_config.opt<ConfigOptionString>("mcp_script"))
             params.mcp.script = resolve_cli_input_path(opt->value);

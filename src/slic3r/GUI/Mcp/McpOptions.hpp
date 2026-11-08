@@ -16,6 +16,7 @@ struct McpLaunchOptions
     std::string token;            // --mcp-token; ORCA_MCP_TOKEN takes precedence
     std::string script;           // --mcp-script
     std::string script_out;       // --mcp-script-out
+    std::string launched_by;      // --mcp-launched-by: who started this window, kept in its instance record
 };
 
 }}} // namespace Slic3r::GUI::Mcp

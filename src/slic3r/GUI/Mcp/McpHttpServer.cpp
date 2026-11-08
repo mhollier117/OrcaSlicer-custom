@@ -21,6 +21,8 @@
 #include <boost/beast/http/verb.hpp>
 #include <boost/beast/http/write.hpp>
 #include <boost/system/error_code.hpp>
+#include <boost/system/system_error.hpp>
+#include <nlohmann/json.hpp>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -120,7 +122,8 @@ std::string error_json(const std::string& message)
 
 } // namespace
 
-HttpCheck validate_request(const HttpRequestView& r, uint16_t port, const std::string& token, std::size_t max_body)
+HttpCheck validate_request(const HttpRequestView& r, uint16_t port, const std::string& token, std::size_t max_body,
+                           const std::string& incarnation)
 {
     const std::string path = r.target.substr(0, r.target.find('?'));
     if (path != "/mcp")
@@ -138,6 +141,8 @@ HttpCheck validate_request(const HttpRequestView& r, uint16_t port, const std::s
     const std::string auth = trim(r.authorization);
     if (auth.size() < 7 || lower(auth.substr(0, 7)) != "bearer " || !constant_time_equal(trim(auth.substr(7)), token))
         return {401, "Missing or invalid bearer token"};
+    if (!r.incarnation.empty() && r.incarnation != incarnation)
+        return {409, "This OrcaSlicer window is not the one the request was addressed to (it was restarted or replaced)"};
 
     const std::string type = lower(trim(r.content_type.substr(0, r.content_type.find(';'))));
     if (type != "application/json")
@@ -156,6 +161,9 @@ struct McpHttpServer::Impl : std::enable_shared_from_this<McpHttpServer::Impl>
     std::string token;
     Handler     handler;
     HttpLimits  limits;
+    std::string incarnation;
+    std::vector<std::pair<std::string, std::string>> reply_headers;
+    bool        address_in_use = false;
 
     net::io_context ioc{1};
     tcp::acceptor   acceptor{ioc};
@@ -243,10 +251,21 @@ struct McpHttpServer::Impl::Session : std::enable_shared_from_this<McpHttpServer
         view.origin        = std::string(req[http::field::origin]);
         view.content_type  = std::string(req[http::field::content_type]);
         view.authorization = std::string(req[http::field::authorization]);
+        view.incarnation   = std::string(req["Mcp-Orca-Incarnation"]);
         view.body_size     = req.body().size();
 
-        const HttpCheck check = validate_request(view, server->bound_port, server->token, server->limits.max_body);
+        const HttpCheck check = validate_request(view, server->bound_port, server->token, server->limits.max_body,
+                                                  server->incarnation);
         if (check.status != 0) {
+            if (check.status == 409) {
+                // Carries the id of the request when it parses, so the client can match the refusal to its call.
+                const nlohmann::json request = nlohmann::json::parse(req.body(), nullptr, false);
+                const nlohmann::json id      = request.is_object() && request.contains("id") ? request["id"] : nlohmann::json();
+                reply(409,
+                      nlohmann::json{{"jsonrpc", "2.0"}, {"id", id}, {"error", {{"code", -32001}, {"message", check.message}}}}.dump(),
+                      req.keep_alive());
+                return;
+            }
             reply(check.status, error_json(check.message), req.keep_alive());
             return;
         }
@@ -281,6 +300,8 @@ struct McpHttpServer::Impl::Session : std::enable_shared_from_this<McpHttpServer
         response.result(http::status(status));
         response.set(http::field::server, "OrcaSlicer-MCP");
         response.set(http::field::cache_control, "no-store");
+        for (const auto& [name, value] : server->reply_headers)
+            response.set(name, value);
         if (status == 405)
             response.set(http::field::allow, "POST");
         if (status == 401)
@@ -349,10 +370,24 @@ McpHttpServer::McpHttpServer(std::string token, Handler handler, HttpLimits limi
 
 McpHttpServer::~McpHttpServer() { stop(); }
 
+void McpHttpServer::set_reply_header(std::string name, std::string value)
+{
+    m_impl->reply_headers.emplace_back(std::move(name), std::move(value));
+}
+
+void McpHttpServer::set_incarnation(std::string incarnation)
+{
+    set_reply_header("Mcp-Orca-Incarnation", incarnation);
+    m_impl->incarnation = std::move(incarnation);
+}
+
+bool McpHttpServer::last_start_address_in_use() const { return m_impl->address_in_use; }
+
 bool McpHttpServer::start(uint16_t port, std::string& error)
 {
     if (m_impl->running)
         return true;
+    m_impl->address_in_use = false;
     try {
         const tcp::endpoint endpoint(net::ip::address_v4::loopback(), port);
         m_impl->acceptor.open(endpoint.protocol());
@@ -367,6 +402,8 @@ bool McpHttpServer::start(uint16_t port, std::string& error)
         m_impl->bound_port = m_impl->acceptor.local_endpoint().port();
     } catch (const std::exception& e) {
         error = e.what();
+        if (const auto* se = dynamic_cast<const boost::system::system_error*>(&e))
+            m_impl->address_in_use = se->code() == boost::system::errc::address_in_use || se->code() == net::error::address_in_use;
         beast::error_code ignored;
         m_impl->acceptor.close(ignored);
         return false;

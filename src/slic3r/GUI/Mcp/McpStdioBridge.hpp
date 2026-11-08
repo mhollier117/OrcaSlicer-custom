@@ -7,10 +7,12 @@
 
 namespace Slic3r { namespace GUI { namespace Mcp {
 
-// `orca-slicer --mcp-stdio [--datadir DIR] [--mcp-port N]`: an MCP server on stdin/stdout for
-// clients that only speak stdio (Claude Desktop, for one). Each newline-delimited JSON-RPC message
-// is POSTed to the running OrcaSlicer's endpoint found through <datadir>/mcp/server.json; when none
-// answers, OrcaSlicer is started with --mcp and given up to 60 s. Runs before any GUI setup.
+// `orca-slicer --mcp-stdio [--datadir DIR]`: an MCP server on stdin/stdout for clients that only speak stdio.
+// It answers initialize, server/discover, tools/list and ping from the shipped catalog (resources/mcp/catalog.json)
+// without OrcaSlicer, finds every running window through its instance record, routes each tool call to one of them
+// and starts OrcaSlicer (--mcp) on the first call when none runs. --datadir is the configuration folder given to
+// windows it starts; --mcp-port is accepted and ignored. Runs before any GUI setup; only stdin EOF ends it. The
+// decisions live in BridgeCore (McpBridge.hpp).
 int run_stdio_bridge(int argc, char** argv);
 
 // The HTTP headers a Streamable HTTP client derives from a message: MCP-Protocol-Version (the

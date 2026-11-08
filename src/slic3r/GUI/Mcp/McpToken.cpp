@@ -34,6 +34,8 @@ bool is_token(const std::string& s)
     return s.size() == 64 && std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isxdigit(c) != 0; });
 }
 
+} // namespace
+
 int current_pid()
 {
 #ifdef _WIN32
@@ -60,8 +62,6 @@ bool process_running(int pid)
     return ::kill(pid_t(pid), 0) == 0 || errno == EPERM;
 #endif
 }
-
-} // namespace
 
 std::string random_token()
 {

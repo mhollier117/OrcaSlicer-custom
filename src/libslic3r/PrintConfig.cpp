@@ -13163,6 +13163,19 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->cli_params = "token";
     def->set_default_value(new ConfigOptionString());
 
+    def = this->add("mcp_launched_by", coString);
+    def->label = L("MCP launched by");
+    def->tooltip = L("Who started this window, an id the MCP stdio bridge gives it. Kept in the window's MCP instance record.");
+    def->cli_params = "id";
+    def->set_default_value(new ConfigOptionString());
+
+    // Not read by the app: the single-instance check looks for this token in the raw command line
+    // before parsing, and the parser must still accept it.
+    def = this->add("no_single_instance", coBool);
+    def->label = L("No single instance");
+    def->tooltip = L("Open a new window even when single instance mode would hand the command line to a running one.");
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("mcp_script", coString);
     def->label = L("MCP script");
     def->tooltip = L("Run an MCP script once the GUI is ready, write its results, and exit: 0 when it passed, 1 when a step failed, 2 when the script is invalid.");

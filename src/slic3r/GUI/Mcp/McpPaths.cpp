@@ -2,10 +2,12 @@
 #include "McpToken.hpp"
 
 #include "libslic3r/Utils.hpp"
+#include "libslic3r_version.h"
 
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/nowide/convert.hpp>
+#include <boost/nowide/cstdlib.hpp>
 #include <boost/system/error_code.hpp>
 #include <nlohmann/json.hpp>
 
@@ -24,11 +26,38 @@
 #include <windows.h>
 #elif defined(__APPLE__)
 #include <CoreFoundation/CoreFoundation.h>
+#include <mach-o/dyld.h>
 #endif
 
 namespace Slic3r { namespace GUI { namespace Mcp {
 
 namespace fs = boost::filesystem;
+
+// Mirrors GUI_App::init_app_config's choice without a wxApp.
+fs::path default_datadir()
+{
+#ifdef __linux__
+    return fs::path(default_data_dir());
+#elif defined(_WIN32)
+    wchar_t exe[MAX_PATH] = {0};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    const fs::path portable = fs::path(exe).parent_path() / "data_dir";
+    if (fs::exists(portable))
+        return portable;
+    const char* appdata = boost::nowide::getenv("APPDATA");
+    return path_from_utf8(appdata ? appdata : ".") / SLIC3R_APP_KEY;
+#else
+    char     exe[4096] = {0};
+    uint32_t size      = sizeof(exe);
+    if (_NSGetExecutablePath(exe, &size) == 0) {
+        const fs::path portable = fs::path(exe).parent_path().parent_path().parent_path().parent_path() / "data_dir";
+        if (fs::exists(portable))
+            return portable;
+    }
+    const char* home = boost::nowide::getenv("HOME");
+    return fs::path(home ? home : ".") / "Library" / "Application Support" / SLIC3R_APP_KEY;
+#endif
+}
 
 fs::path path_from_utf8(const std::string& utf8)
 {

@@ -10,6 +10,7 @@
 #include "McpTypes.hpp"
 #include "UiInvoker.hpp"
 
+#include <boost/filesystem/path.hpp>
 #include <nlohmann/json.hpp>
 
 #include <atomic>
@@ -52,6 +53,12 @@ public:
     McpService(const McpService&)            = delete;
     McpService& operator=(const McpService&) = delete;
 
+    // {version, features, instructions, tools}: what a client sees of this build before any window runs,
+    // the tools being exactly the tools/list result. Registers the tools into a service that is never
+    // started, so it needs no running app. The shipped resources/mcp/catalog.json is this, and a test
+    // keeps the two equal.
+    static nlohmann::json catalog_json();
+
     // Builds the catalog and, when `serve` is true, opens the HTTP endpoint. A script from
     // `options` runs after mark_ready(). Returns false with `err` set when the endpoint can't start;
     // the catalog stays usable for the script either way.
@@ -74,6 +81,10 @@ public:
     // The last start() could not open the endpoint because another OrcaSlicer window that shares the
     // configuration folder serves on the port. Cleared when the endpoint opens or stop_serving() runs.
     bool port_held_by_other_window() const { return m_port_held_by_other; }
+    // The window serves on a port of the system's choosing because the configured one is taken.
+    bool ephemeral() const { return m_ephemeral; }
+    // The port the preference or --mcp-port asked for, as of the last start().
+    int configured_port() const { return m_configured_port; }
     uint16_t port() const;
     const std::string& token() const { return m_token; }
 
@@ -123,7 +134,7 @@ public:
     bool endpoint_open() const;
 
     // {serving, ready, version, port, url, token_file, token_source, discovery_file,
-    // discovery_error} for Preferences and get_state.
+    // discovery_error, incarnation, ephemeral, configured_port} for Preferences and get_state.
     nlohmann::json describe() const;
     // Where the token in use comes from: "file", "ORCA_MCP_TOKEN" or "--mcp-token".
     const std::string& token_source() const { return m_token_source; }
@@ -178,6 +189,12 @@ private:
     std::string      m_token_source;
     std::string      m_discovery_error;
     bool             m_port_held_by_other = false;
+    // One run of this window, made at the first start(): names its instance record and is sent on every reply.
+    std::string      m_incarnation;
+    bool             m_ephemeral       = false;
+    int              m_configured_port = 0;
+    std::string      m_record_error;
+    boost::filesystem::path m_record_base; // where the instance record was written, "" when none
 
     std::unique_ptr<UiDispatcher>  m_dispatcher;
     ToolRegistry                   m_registry;

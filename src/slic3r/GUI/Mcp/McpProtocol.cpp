@@ -23,32 +23,15 @@ constexpr int kInternalError    = -32603;
 constexpr int kHeaderMismatch   = -32020;
 constexpr int kUnsupportedProto = -32022;
 
-constexpr const char* kMetaVersion = "io.modelcontextprotocol/protocolVersion";
-constexpr const char* kMetaServer  = "io.modelcontextprotocol/serverInfo";
-// How long a modern client may cache the tool list and discovery result. The catalog is fixed for
-// the life of the process, so the value only bounds how long a stale client survives a restart into
-// a different build.
-constexpr int kListTtlMs = 300000;
-
 json error_body(const json& id, int code, const std::string& message, json data = json())
 {
-    json err{{"code", code}, {"message", message}};
-    if (!data.is_null())
-        err["data"] = std::move(data);
-    return {{"jsonrpc", "2.0"}, {"id", id}, {"error", std::move(err)}};
+    return jsonrpc_error_body(id, code, message, std::move(data));
 }
 
 PostReply reply(int status, const json& body) { return {status, body.dump()}; }
 
 PostReply result_reply(const json& id, json result) { return reply(200, {{"jsonrpc", "2.0"}, {"id", id}, {"result", std::move(result)}}); }
 
-json supported_versions()
-{
-    json v = json::array({kModernVersion});
-    for (const std::string& legacy : legacy_versions())
-        v.push_back(legacy);
-    return v;
-}
 
 int base64_value(char c)
 {
@@ -294,6 +277,77 @@ std::string decode_header_value(const std::string& value)
     return out;
 }
 
+// ---- shared builders ------------------------------------------------------------
+
+json jsonrpc_error_body(const json& id, int code, const std::string& message, json data)
+{
+    json err{{"code", code}, {"message", message}};
+    if (!data.is_null())
+        err["data"] = std::move(data);
+    return {{"jsonrpc", "2.0"}, {"id", id}, {"error", std::move(err)}};
+}
+
+json jsonrpc_result_body(const json& id, json result) { return {{"jsonrpc", "2.0"}, {"id", id}, {"result", std::move(result)}}; }
+
+std::optional<std::string> meta_protocol_version(const json& params)
+{
+    if (params.is_object() && params.contains("_meta") && params["_meta"].is_object() && params["_meta"].contains(kMetaVersion)) {
+        const json& v = params["_meta"][kMetaVersion];
+        return v.is_string() ? v.get<std::string>() : v.dump();
+    }
+    return std::nullopt;
+}
+
+json supported_versions_json()
+{
+    json v = json::array({kModernVersion});
+    for (const std::string& legacy : legacy_versions())
+        v.push_back(legacy);
+    return v;
+}
+
+json unsupported_version_body(const json& id, const std::string& requested)
+{
+    return jsonrpc_error_body(id, kUnsupportedProto, "Unsupported protocol version",
+                              {{"supported", supported_versions_json()}, {"requested", requested}});
+}
+
+json initialize_result(const json& params, const ServerInfo& info)
+{
+    const auto&       versions  = legacy_versions();
+    const std::string requested = params.is_object() ? params.value("protocolVersion", "") : std::string();
+    const bool        supported = std::find(versions.begin(), versions.end(), requested) != versions.end();
+    json              server_info{{"name", info.name}, {"title", info.title}, {"version", info.version}};
+    return {{"protocolVersion", supported ? requested : versions.front()},
+            {"capabilities", {{"tools", {{"listChanged", false}}}}},
+            {"serverInfo", std::move(server_info)},
+            {"instructions", info.instructions}};
+}
+
+json complete_result(json result)
+{
+    result["resultType"] = "complete";
+    return result;
+}
+
+json discover_result(const ServerInfo& info)
+{
+    json result{{"supportedVersions", supported_versions_json()},
+                {"capabilities", {{"tools", json::object()}}},
+                {"_meta", {{kMetaServer, {{"name", info.name}, {"title", info.title}, {"version", info.version}}}}},
+                {"instructions", info.instructions},
+                {"ttlMs", kListTtlMs},
+                {"cacheScope", "public"}};
+    return complete_result(std::move(result));
+}
+
+json tools_list_result(const json& tools, bool modern)
+{
+    if (!modern)
+        return {{"tools", tools}};
+    return complete_result({{"tools", tools}, {"ttlMs", kListTtlMs}, {"cacheScope", "public"}});
+}
+
 // ---- McpProtocol --------------------------------------------------------------
 
 McpProtocol::McpProtocol(const ToolRegistry& registry, ToolCaller& caller, ServerInfo info)
@@ -333,13 +387,15 @@ json McpProtocol::result_to_json(const ToolResult& result)
     return out;
 }
 
-json McpProtocol::tools_list() const
+json tools_list_json(const ToolRegistry& registry)
 {
     json tools = json::array();
-    for (const ToolDef& def : m_registry.tools())
-        tools.push_back(tool_to_json(def));
+    for (const ToolDef& def : registry.tools())
+        tools.push_back(McpProtocol::tool_to_json(def));
     return tools;
 }
+
+json McpProtocol::tools_list() const { return tools_list_json(m_registry); }
 
 json McpProtocol::call_tool(const json& params, bool& unknown_tool, std::string& unknown_name)
 {
@@ -411,19 +467,12 @@ PostReply McpProtocol::handle_legacy(const json& id, const std::string& method, 
         return reply(400, error_body(id, kInvalidRequest, "Unsupported MCP-Protocol-Version: " + request.protocol_version,
                                      {{"supported", versions}}));
 
-    if (method == "initialize") {
-        const std::string requested  = params.value("protocolVersion", "");
-        const bool        supported  = std::find(versions.begin(), versions.end(), requested) != versions.end();
-        json              server_info{{"name", m_info.name}, {"title", m_info.title}, {"version", m_info.version}};
-        return result_reply(id, {{"protocolVersion", supported ? requested : versions.front()},
-                                 {"capabilities", {{"tools", {{"listChanged", false}}}}},
-                                 {"serverInfo", std::move(server_info)},
-                                 {"instructions", m_info.instructions}});
-    }
+    if (method == "initialize")
+        return result_reply(id, initialize_result(params, m_info));
     if (method == "ping")
         return result_reply(id, json::object());
     if (method == "tools/list")
-        return result_reply(id, {{"tools", tools_list()}});
+        return result_reply(id, tools_list_result(tools_list(), false));
     if (method == "tools/call") {
         bool        unknown = false;
         std::string name;
@@ -443,8 +492,7 @@ PostReply McpProtocol::handle_modern(const json& id, const std::string& method, 
                                      const PostRequest& request)
 {
     if (version != kModernVersion)
-        return reply(400, error_body(id, kUnsupportedProto, "Unsupported protocol version",
-                                     {{"supported", supported_versions()}, {"requested", version}}));
+        return reply(400, unsupported_version_body(id, version));
     if (request.protocol_version.empty())
         return reply(400, error_body(id, kHeaderMismatch, "Header mismatch: MCP-Protocol-Version header is required"));
     if (request.protocol_version != version)
@@ -468,24 +516,14 @@ PostReply McpProtocol::handle_modern(const json& id, const std::string& method, 
                                              body_name + "'"));
     }
 
-    auto complete = [](json result) {
-        result["resultType"] = "complete";
-        return result;
-    };
+    auto complete = [](json result) { return complete_result(std::move(result)); };
 
-    if (method == "server/discover") {
-        json result{{"supportedVersions", supported_versions()},
-                    {"capabilities", {{"tools", json::object()}}},
-                    {"_meta", {{kMetaServer, {{"name", m_info.name}, {"title", m_info.title}, {"version", m_info.version}}}}},
-                    {"instructions", m_info.instructions},
-                    {"ttlMs", kListTtlMs},
-                    {"cacheScope", "public"}};
-        return result_reply(id, complete(std::move(result)));
-    }
+    if (method == "server/discover")
+        return result_reply(id, discover_result(m_info));
     if (method == "ping")
         return result_reply(id, complete(json::object()));
     if (method == "tools/list")
-        return result_reply(id, complete({{"tools", tools_list()}, {"ttlMs", kListTtlMs}, {"cacheScope", "public"}}));
+        return result_reply(id, tools_list_result(tools_list(), true));
     if (method == "tools/call") {
         bool        unknown = false;
         std::string name;

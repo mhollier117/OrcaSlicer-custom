@@ -8,6 +8,7 @@
 #include "GLCanvas3D.hpp" // ORCA: for live preview refresh when toggling "Dim lower layers"
 #include "MsgDialog.hpp"
 #include "I18N.hpp"
+#include "format.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/Format/DRC.hpp"
 #include <wx/dataobj.h>
@@ -1453,7 +1454,14 @@ void PreferencesDialog::update_mcp_status(const std::string &note)
     const std::string shown_note = held ? std::string() : note;
     wxString    text;
     if (serving) {
-        text = _L("Running");
+        if (mcp->ephemeral()) {
+            // TRN %1% is the port this window serves on, %2% the port that was asked for.
+            text = mcp->port_held_by_other_window() ?
+                       format_wxstr(_L("Running on port %1% (port %2% is used by another OrcaSlicer window)"), mcp->port(),
+                                    mcp->configured_port()) :
+                       format_wxstr(_L("Running on port %1% (port %2% is held by another program)"), mcp->port(), mcp->configured_port());
+        } else
+            text = _L("Running");
         if (!shown_note.empty())
             text += "\n" + from_u8(shown_note);
     } else if (held)
@@ -1509,8 +1517,9 @@ wxBoxSizer *PreferencesDialog::create_item_mcp_transport(wxString title, wxStrin
         m_mcp_transport_hint->SetLabel(Mcp::Transport(m_mcp_transport->GetSelection()) == Mcp::Transport::Http ?
                                            _L("The agent connects to the open OrcaSlicer while the MCP server is on. The setup holds "
                                               "the access token, so don't share it.") :
-                                           _L("The agent starts this copy of OrcaSlicer when it isn't open, so set the agent up again "
-                                              "after OrcaSlicer moves."));
+                                           _L("The agent reaches every open OrcaSlicer window and opens this copy of OrcaSlicer on its "
+                                              "first OrcaSlicer call when none is open. Set the agent up again after "
+                                              "OrcaSlicer moves."));
         m_mcp_transport_hint->Wrap(FromDIP(MCP_HINT_WIDTH));
         m_parent->Layout();
         m_parent->FitInside();
@@ -1581,7 +1590,7 @@ wxBoxSizer *PreferencesDialog::create_item_mcp_connect(wxString title, wxString 
         const Mcp::Transport   transport = Mcp::Transport(m_mcp_transport->GetSelection());
         const Mcp::McpService *mcp       = wxGetApp().mcp_service();
         // The token the server uses: its own while it runs, otherwise the token file's, which turning it
-        // on reads. A stdio setup holds none: --mcp-stdio reads it from the discovery file.
+        // on reads. A stdio setup holds none: --mcp-stdio reads it from the instance records.
         std::string token;
         if (transport == Mcp::Transport::Http) {
             std::string err;

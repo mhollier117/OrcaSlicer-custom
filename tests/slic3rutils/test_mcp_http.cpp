@@ -18,6 +18,8 @@
 #include <boost/beast/http/verb.hpp>
 #include <boost/beast/http/write.hpp>
 
+#include <nlohmann/json.hpp>
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -43,6 +45,8 @@ struct Response
     std::string body;
     std::string allow;
     std::string www_authenticate;
+    std::string test_header;  // X-Orca-Test, set on every reply by EchoServer
+    std::string incarnation;  // Mcp-Orca-Incarnation
 };
 
 struct Request
@@ -53,6 +57,7 @@ struct Request
     std::string origin;
     std::string content_type = "application/json";
     std::string token        = kToken;
+    std::string incarnation; // Mcp-Orca-Incarnation request header, when not empty
     std::string body         = R"({"jsonrpc":"2.0","id":1,"method":"ping"})";
 };
 
@@ -69,30 +74,43 @@ Response send(uint16_t port, const Request& r)
         req.set(http::field::content_type, r.content_type);
     if (!r.token.empty())
         req.set(http::field::authorization, "Bearer " + r.token);
+    if (!r.incarnation.empty())
+        req.set("Mcp-Orca-Incarnation", r.incarnation);
     req.body() = r.body;
     req.prepare_payload();
     http::write(socket, req);
     boost::beast::flat_buffer          buffer;
     http::response<http::string_body> res;
     http::read(socket, buffer, res);
-    return {int(res.result_int()), res.body(), std::string(res[http::field::allow]), std::string(res[http::field::www_authenticate])};
+    return {int(res.result_int()),
+            res.body(),
+            std::string(res[http::field::allow]),
+            std::string(res[http::field::www_authenticate]),
+            std::string(res["X-Orca-Test"]),
+            std::string(res["Mcp-Orca-Incarnation"])};
 }
 
 // A server whose handler replies with the request body, after an optional delay.
 struct EchoServer
 {
     std::atomic<int> delay_ms{0};
+    std::atomic<int> status{200};
+    std::atomic<int> calls{0};
     McpHttpServer    server;
 
-    explicit EchoServer(HttpLimits limits = {})
+    explicit EchoServer(HttpLimits limits = {}, const std::string& incarnation = {})
         : server(kToken,
                  [this](const PostRequest& r) {
+                     ++calls;
                      if (int d = delay_ms.load())
                          std::this_thread::sleep_for(std::chrono::milliseconds(d));
-                     return PostReply{200, r.body};
+                     return PostReply{status.load(), status.load() == 202 ? std::string() : r.body};
                  },
                  limits)
     {
+        server.set_reply_header("X-Orca-Test", "yes");
+        if (!incarnation.empty())
+            server.set_incarnation(incarnation);
         std::string err;
         REQUIRE(server.start(0, err));
     }
@@ -268,4 +286,117 @@ TEST_CASE("with every connection dispatched a new connection takes an overflow p
     CHECK(reserve.get().status == 200);
     for (auto& b : busy)
         CHECK(b.get().status == 200);
+}
+
+TEST_CASE("the extra reply header is on every reply", "[Mcp]")
+{
+    EchoServer     s;
+    const uint16_t port = s.server.port();
+
+    CHECK(send(port, {}).test_header == "yes"); // 200
+
+    s.status = 202;
+    const Response accepted = send(port, {});
+    CHECK(accepted.status == 202);
+    CHECK(accepted.test_header == "yes");
+    s.status = 200;
+
+    Request no_token;
+    no_token.token = "";
+    const Response unauth = send(port, no_token);
+    CHECK(unauth.status == 401);
+    CHECK(unauth.test_header == "yes");
+
+    Request other;
+    other.target = "/other";
+    const Response missing = send(port, other);
+    CHECK(missing.status == 404);
+    CHECK(missing.test_header == "yes");
+}
+
+TEST_CASE("a second server on a held port reports address in use", "[Mcp]")
+{
+    EchoServer first;
+    McpHttpServer second(kToken, [](const PostRequest&) { return PostReply{200, "{}"}; });
+    std::string   err;
+    CHECK_FALSE(second.start(first.server.port(), err));
+    CHECK(second.last_start_address_in_use());
+    CHECK_FALSE(err.empty());
+    CHECK_FALSE(second.running());
+
+    // Any other failure is not reported as address in use, and a later success clears the flag.
+    CHECK(second.start(0, err));
+    CHECK_FALSE(second.last_start_address_in_use());
+}
+
+TEST_CASE("binding port 0 gives a real port that Host validation accepts", "[Mcp]")
+{
+    EchoServer     s;
+    const uint16_t port = s.server.port();
+    CHECK(port != 0);
+    CHECK(send(port, {}).status == 200); // Host: 127.0.0.1:<bound port>
+    Request wrong_host;
+    wrong_host.host = "127.0.0.1:" + std::to_string(port == 65535 ? port - 1 : port + 1);
+    CHECK(send(port, wrong_host).status == 403);
+}
+
+TEST_CASE("a request addressed to another incarnation is refused before dispatch", "[Mcp]")
+{
+    EchoServer     s({}, "inc-a");
+    const uint16_t port = s.server.port();
+
+    SECTION("the matching incarnation is handled, and replies carry it")
+    {
+        Request r;
+        r.incarnation = "inc-a";
+        const Response res = send(port, r);
+        CHECK(res.status == 200);
+        CHECK(res.incarnation == "inc-a");
+        CHECK(s.calls == 1);
+    }
+    SECTION("no incarnation is handled as before")
+    {
+        const Response res = send(port, {});
+        CHECK(res.status == 200);
+        CHECK(s.calls == 1);
+    }
+    SECTION("another incarnation gets 409 with a JSON-RPC error and the request id, and the handler never runs")
+    {
+        Request r;
+        r.incarnation = "inc-b";
+        const Response res = send(port, r);
+        CHECK(res.status == 409);
+        CHECK(res.incarnation == "inc-a");
+        const nlohmann::json body = nlohmann::json::parse(res.body);
+        CHECK(body["error"]["code"] == -32001);
+        CHECK(body["id"] == 1);
+        CHECK(s.calls == 0);
+
+        Request unparsable;
+        unparsable.incarnation = "inc-b";
+        unparsable.body        = "not json";
+        const Response res2    = send(port, unparsable);
+        CHECK(res2.status == 409);
+        CHECK(nlohmann::json::parse(res2.body)["id"].is_null());
+        CHECK(s.calls == 0);
+    }
+    SECTION("the token is checked first")
+    {
+        Request r;
+        r.incarnation = "inc-b";
+        r.token       = "wrong";
+        CHECK(send(port, r).status == 401);
+    }
+}
+
+TEST_CASE("validate_request refuses another incarnation after the token check", "[Mcp]")
+{
+    HttpRequestView v{"POST", "/mcp", "127.0.0.1:4000", "", "application/json", "Bearer secret", 10};
+    CHECK(validate_request(v, 4000, "secret", 50, "a").status == 0);
+    v.incarnation = "a";
+    CHECK(validate_request(v, 4000, "secret", 50, "a").status == 0);
+    v.incarnation = "b";
+    CHECK(validate_request(v, 4000, "secret", 50, "a").status == 409);
+    v.authorization = "Bearer wrong";
+    CHECK(validate_request(v, 4000, "secret", 50, "a").status == 401);
 }

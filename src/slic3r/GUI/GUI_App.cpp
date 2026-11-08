@@ -8542,8 +8542,9 @@ bool GUI_App::start_mcp_service(bool serve, std::string* error)
     if (init_params != nullptr && !m_post_initialized)
         options = init_params->mcp;
     else if (init_params != nullptr) {
-        options.port  = init_params->mcp.port;
-        options.token = init_params->mcp.token;
+        options.port        = init_params->mcp.port;
+        options.token       = init_params->mcp.token;
+        options.launched_by = init_params->mcp.launched_by;
     }
     if (!m_mcp)
         m_mcp.reset(new Mcp::McpService());

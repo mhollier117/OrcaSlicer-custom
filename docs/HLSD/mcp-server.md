@@ -97,10 +97,22 @@ It stays out of AppConfig, whose writes and backups use default permissions. `OR
 `get_state.mcp.token_source` says which is in force. Every start of the endpoint reads the file, so
 deleting it and turning the server off and on in Preferences issues a new token. While
 serving, `<datadir>/mcp/server.json` holds `{url, port, pid, version, token}` with the token in
-use, so the stdio bridge and the harness connect without the launch environment. It is written
-owner-only via an exclusive temporary file and a rename (`write_private_file()`), and removed on
+use, so the stdio bridge and the harness connect without the launch environment. It is written owner-only via an exclusive temporary file and a rename (`write_private_file()`), and removed on
 stop, but only by the process its `pid` names: windows that share a configuration folder share the
-file, and one that stops must not hide another's server from the stdio bridge.
+file, and one that stops must not hide another's server. Only the window on the configured port
+writes it.
+
+Every serving window also writes an instance record, `<default datadir>/mcp/instances/<pid>-<incarnation>.json`
+(`McpInstances.cpp`): `{pid, incarnation, port, token, version, features, datadir, exe, launched_by,
+started_at, primary}`. It goes under the default datadir (`default_datadir()`), not the window's own
+`--datadir`, so one per-user folder lists every window, whatever configuration each uses. The
+incarnation is 128 random bits made when the service first starts: pids and ports are reused and a
+token outlives a launch, so neither names one window for sure. Every reply carries
+`Mcp-Orca-Incarnation`, and a request that carries that header with another value is refused with
+409 (JSON-RPC -32001) before dispatch, so a client that addressed one window can never run a call in
+a window that replaced it. The owner removes its record on stop; readers never delete one. The
+first window to serve in a process removes records whose pid no longer runs, re-reading each just
+before deleting it.
 
 ## Lifecycle
 
@@ -146,14 +158,15 @@ posted before the rebuild refuses to run after it ("not run, safe to retry").
 
 Several OrcaSlicer windows may run at once, and those that share a configuration folder share the
 `mcp_enabled` preference and the port. The bind is exclusive (`SO_REUSEADDR` stays off on
-Windows, and POSIX refuses a second listener), so the first window to start serves and agents,
-over HTTP or stdio, reach it. A later window that wants to serve finds the port taken by the
-process the discovery file names (`discovery_held_by_other()`): it reports no error, Preferences
-says another window is serving agents, and `GUI_App` tries the port every 3 s, so when the serving
-window closes, one of the others takes over and writes the discovery file. A window that cannot
-bind for any other reason reports it and stops trying. Windows meant to serve side by side need
-their own configuration folders (`--datadir`) or `--mcp-port`; agents then pick one by its URL, or
-the stdio bridge by `--datadir`. The server makes no attempt to route between windows.
+Windows, and POSIX refuses a second listener), so the first window serves on the configured port
+and writes the discovery file. A later window that finds the port in use, whether by another
+window (`discovery_held_by_other()`) or another program, serves on a port the system picks instead
+and writes only its instance record; Preferences shows both ports. It stays on that port: moving a
+live window to the configured port when the first one closes would drop the replies of calls in
+flight, and the stdio bridge finds windows through their records, so it has no need for it. HTTP
+clients set up with the configured port reach only the window on it. A window that cannot bind at
+all reports it, and `GUI_App` retries every 3 s only when another window held the port. The server
+makes no attempt to route between windows; the stdio bridge does.
 
 Preferences turns the server on with `GUI_App::start_mcp_service()` and off with
 `GUI_App::stop_mcp_endpoint()`, which stops the takeover retries and calls
@@ -2331,26 +2344,49 @@ be satisfied. Only the call's own job counts as its job: a
 
 ## stdio bridge
 
-`orca-slicer --mcp-stdio [--datadir DIR] [--mcp-port N]` serves clients that speak only stdio,
-such as Claude Desktop; `main` handles it before any GUI or CLI processing (`McpStdioBridge.cpp`).
-It POSTs each line of JSON-RPC from stdin to the instance in the discovery file (or `--mcp-port`)
-with the token and the headers `bridge_headers()` derives: `MCP-Protocol-Version` (negotiated, or
-from `_meta`), `Mcp-Method`, and `Mcp-Name` for `tools/call`, `prompts/get` and `resources/read`.
-Replies go to stdout; a 202 writes nothing. When nothing answers, it starts `orca-slicer --mcp`
-detached and waits up to 60 s. If that process exits within seconds, a running instance without
-MCP took the launch over, and every request is answered with an error saying to turn the server
-on in Preferences. A request that could not be sent, or was refused with 401 because the token
-changed, is sent once more to the endpoint the discovery file names now: the app restarted, or its
-port or token changed in Preferences. A request that was sent but lost its reply is never sent
-again, since it may have run. The client gets an error saying so, and later requests go to the new
-endpoint. A request gets 5 s to connect, 30 s to be sent and 120 s for its reply (a tool replies
-within its 45 s budget, `wait` within 50 s), so a server that never replies can't hang the agent.
-A line that is valid JSON but not one message object, such as a batch, gets an error reply.
+`orca-slicer --mcp-stdio [--datadir DIR]` serves clients that speak only stdio, such as Claude
+Desktop, and agents that should reach every window and open OrcaSlicer on demand. `main` handles it
+before any GUI or CLI processing, and on Windows the launcher skips its OpenGL probe and prints
+nothing, so stdout carries only MCP messages. `McpStdioBridge.cpp` is the process glue (stdin loop,
+worker threads, one lock around whole-line writes, the HTTP client, the launcher and the launch
+lock); every decision is in `BridgeCore` (`McpBridge.cpp`), which is tested with fakes.
+
+The bridge answers `initialize`, `server/discover`, `tools/list`, `ping` and notifications itself,
+from `resources/mcp/catalog.json`, the tool catalog shipped with the build, so starting an agent
+session never starts OrcaSlicer. The seed is `McpService::catalog_json()` (the tools registered into
+a service that never starts), checked by a test that fails when it is stale. The same builders as
+the server shape each era's results, and `listChanged` is false, since the list never changes. Each
+tool gets an optional `orca_instance` argument (not `instance`, which `transform` uses for a model
+copy), stripped before forwarding, and the list adds three tools: `orca_list_instances`,
+`orca_open_instance` (always a new window, `--no-single-instance`) and `orca_use_instance`.
+
+A tool call goes to a window chosen in this order: its `orca_instance`; the window a prefixed job id
+names; the session's chosen window; the window this bridge opened; the only window; the window on
+the configured port, else the oldest. Windows get ids `w1`, `w2`... in the order the bridge first
+sees them, each bound to a pid and incarnation and never reused. Job ids in replies become `w2.j7`
+(in `job` fields, `get_state`'s job list and running notes), so `wait` and `cancel` reach the
+window that started the job. When several windows run and the call named none, the result says
+which one ran it. Every forward carries the expected incarnation, so a replaced window refuses it.
+
+With no window running, a tool call opens OrcaSlicer. Under a system-wide lock (a named mutex on
+Windows, `flock` elsewhere) the bridge looks again, since another session may have just opened one,
+then starts `orca-slicer --mcp --mcp-launched-by <bridge id>` detached. It waits up to 60 s for that
+window's record and a `ping`, and up to 45 s more for `ready`, then forwards the call either way: a
+window held by the setup wizard or a TLS prompt answers with its own blocked or starting result. A
+launched process that exits at once handed its command line to a running OrcaSlicer without the
+server on, and the call fails saying to turn it on. A failure doesn't stick: the next call tries
+again. Closing OrcaSlicer never ends the bridge; only the end of stdin does.
+
+A request that never reached a window (no connection) is sent once more to the same window after
+re-reading its record or, when that window is gone and the call named none, to the window chosen
+again. A 401 re-reads the same window's record (its token changed) and retries once. A request that
+was sent, even in part, and lost its reply is never sent again, since it may have run; the client
+gets an error saying so. A request gets 5 s to connect, 30 s to be sent and 120 s for its reply.
 
 ## Configuration
 
 The CLI options are in `CLIMiscConfigDef`, so the GUI still starts: `--mcp`, `--mcp-port N`,
-`--mcp-token T`, `--mcp-script FILE`, `--mcp-script-out DIR` and `--mcp-stdio`. The AppConfig `app`
+`--mcp-token T`, `--mcp-script FILE`, `--mcp-script-out DIR`, `--mcp-stdio`, `--mcp-launched-by ID` (recorded in the instance record, so the stdio bridge knows the window it opened) and `--no-single-instance` (always a new window). The AppConfig `app`
 section holds `mcp_enabled` (false) and `mcp_port` (13619). Preferences › General › AI features
 opens with a line on what agents can do and who can connect, then has five rows:
 
@@ -2382,13 +2418,13 @@ opens with a line on what agents can do and who can connect, then has five rows:
     `url` and `headers`, or with `command` and `args` for apps that only take a command, such as
     Claude Desktop.
 
-HTTP is the default because its URL stays the same whichever OrcaSlicer build runs, and starting an
-agent session never starts OrcaSlicer: the stdio bridge launches the app as soon as a client
-starts it, so a user-wide registration would open OrcaSlicer with every agent session. The cost is
-that OrcaSlicer must be running with the server on before the agent connects, and a registration
-holds the token: a new token (delete the token file, then turn the server off and on) or a new port
-means copying the setup again. Stdio suits an agent that should open OrcaSlicer on demand, and apps
-that can't connect over HTTP; its setup names this executable, so it breaks when the program moves.
+HTTP is the default because its URL stays the same whichever OrcaSlicer build runs. The cost is
+that OrcaSlicer must be running with the server on before the agent connects, only the window on
+the configured port is reachable, and a registration holds the token: a new token (delete the token
+file, then turn the server off and on) or a new port means copying the setup again. Stdio keeps the
+tools listed while OrcaSlicer is closed, opens it on the first call, reaches every window and holds
+no token; its setup names this executable, so it breaks when the program moves. The agent's own
+per-call timeout must allow for a cold start (Claude Code: `MCP_TOOL_TIMEOUT`).
 
 ## Testing
 

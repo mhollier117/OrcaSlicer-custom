@@ -36,6 +36,11 @@ void remove_discovery(const boost::filesystem::path& datadir);
 // shares the configuration folder serves agents there.
 bool discovery_held_by_other(const boost::filesystem::path& datadir, int port);
 
+// This process's id.
+int current_pid();
+// Whether `pid` is taken by a live process; one that belongs to another user still counts.
+bool process_running(int pid);
+
 // 32 random bytes as lowercase hex.
 std::string random_token();
 

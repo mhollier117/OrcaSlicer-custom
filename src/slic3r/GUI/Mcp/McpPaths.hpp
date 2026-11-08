@@ -14,6 +14,11 @@ namespace Slic3r { namespace GUI { namespace Mcp {
 boost::filesystem::path path_from_utf8(const std::string& utf8);
 std::string             path_to_utf8(const boost::filesystem::path& path);
 
+// The configuration folder a window uses when it is not given --datadir, as GUI_App::init_app_config
+// chooses it but without a wxApp: <exe dir>/data_dir when that exists (portable), else the per-user
+// location. The stdio bridge and the per-window MCP records use it.
+boost::filesystem::path default_datadir();
+
 // A key under which two spellings of one file compare equal: the path normalized, and where the file
 // system ignores case (Windows, macOS), case-folded over all of Unicode, not just ASCII, with one kind of
 // separator; on macOS also in the decomposed form its file systems compare in.

@@ -1,0 +1,3504 @@
+{
+  "features": "cad",
+  "instructions": "OrcaSlicer, a 3D-printing slicer, driven through its GUI.\nWorkflow: get_state (is it ready? which presets, plates, dialogs?) -> act -> check the result with the reading tools (list_objects, list_plates, get_settings, slice's reply, get_preview); screenshot only to see what they do not report.\n- Prefer typed tools (open_files, select_preset, set_settings, slice, export) and run_action (every Speed Dial command: list_actions to search) over GUI clicks.\n- What a setting does, or which one controls an effect: get_settings with keys, or query with a few words; each setting's meta has its description and where (its settings page and group).\n- For anything else use the GUI tools: ui_snapshot lists widgets, menus, 3D toolbar items, gizmos and ImGui items with refs; ui_click / ui_input / ui_key / ui_mouse act on refs from the latest snapshot.\n- Gizmos (Cut, Text, SVG, the painting tools...): ui_click {target: {gizmo: \"Cut\"}} opens one; its panel's fields and buttons are ImGui items for ui_input / ui_click, and painting is a ui_mouse drag starting on the object. Turn the camera with set_view camera or orbit, never a drag: what a drag does follows the user's mouse settings. gizmo_file only stands in for a file picker inside an open gizmo.\n- Objects, parts and plates are 0-based indices, as list_objects and list_plates give them; filament slots and Preview layers are 1-based.\n- A call that takes long or opens a dialog returns {status:\"running\"|\"blocked_by_dialog\", job}. It keeps running: never retry it. Answer dialogs with dialog_respond (see get_state.dialogs), then wait {for:\"job\"}. A native message box (native: true) is answered with dialog_respond by one of the buttons listed for it; a file or folder picker, or a native dialog whose buttons list is empty (any on macOS), can't be: register dialog_auto_answer before the step that opens one.\n- While an operation (slice, export, arrange or another background job) runs, other changes are refused; use wait or cancel.\n- Paths are absolute. Outputs never overwrite an existing file unless overwrite is true.\n- screenshot returns a downscaled image plus the full-size PNG path; target \"canvas\" is the 3D view.\n- start_recording / stop_recording record a video (MJPEG .mkv), with the tool calls as captions and the pointer highlighted when captions and pointer ask for them; with encode, stop_recording then encodes it to an MP4 with the system ffmpeg as a job to wait for, and encode_recording encodes any recording later.\n- export_script saves this session's calls as a replayable script; run_script replays one.",
+  "tools": [
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Get app state"
+      },
+      "description": "Snapshot of OrcaSlicer: version, platform, whether it is ready, current tab and mode, project, selected printer/process/filament presets, plates, the Preview's view type, time mode and layer range (1-based, with their Z), object count, slicing state, print host uploads (state, progress, error), the open gizmo, open modal dialogs, menus closed unseen (a menu a call opened that no reply listed), notifications, running jobs and a running recording. Call it first and whenever you are unsure what the app is doing.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "get_state",
+      "title": "Get app state"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Wait for a condition"
+      },
+      "description": "Block until a condition holds or timeout_s passes (max 50). for: \"ready\" (startup finished), \"idle\" (no dialog, no running job, nothing slicing or arranging, no gizmo working in the background), \"dialog\" / \"no_dialog\", or \"job\" with a job id returned by an earlier call - then the reply is that job's result. Returns {satisfied:false} on timeout; call it again.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "for": {
+            "description": "What to wait for; default job when job is given, else idle.",
+            "enum": [
+              "ready",
+              "idle",
+              "dialog",
+              "no_dialog",
+              "job"
+            ],
+            "type": "string"
+          },
+          "job": {
+            "description": "Job id, for \"job\".",
+            "type": "string"
+          },
+          "timeout_s": {
+            "description": "Default 30.",
+            "maximum": 50,
+            "minimum": 0,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "name": "wait",
+      "title": "Wait for a condition"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Read the log"
+      },
+      "description": "The last lines of OrcaSlicer's current log file, optionally only those at or above a level.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "level": {
+            "description": "Minimum level.",
+            "enum": [
+              "trace",
+              "debug",
+              "info",
+              "warning",
+              "error",
+              "fatal"
+            ],
+            "type": "string"
+          },
+          "lines": {
+            "description": "Default 200.",
+            "maximum": 2000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "get_log",
+      "title": "Read the log"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Search Speed Dial actions"
+      },
+      "description": "Search everything the Speed Dial can run: built-in commands (slice, export, views, object operations, plates, calibration wizards, help), recent projects, plugin scripts and pages. Each entry has an id for run_action, a description and, when it takes one, a param (type and help). include_settings also lists settings (each jumps to that setting in the sidebar; use get_settings / set_settings to read or change values).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "group": {
+            "description": "Only this group, e.g. \"Object\", \"View\", \"Slice & Export\".",
+            "type": "string"
+          },
+          "include_settings": {
+            "description": "Also list settings (thousands). Default false.",
+            "type": "boolean"
+          },
+          "limit": {
+            "description": "Default 50.",
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "query": {
+            "description": "Case-insensitive text to find in id, title, group or description.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_actions",
+      "title": "Search Speed Dial actions"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Run a Speed Dial action"
+      },
+      "description": "Run one action by the id list_actions returned (orca_command:view_front:orca, or the name inside it, view_front), with its param when it takes one (a percent, tab id, plate index, or an absolute path - commands with a path parameter skip their file dialog; outputs need {\"path\": ..., \"overwrite\": true} to replace a file). Actions that open a dialog return blocked_by_dialog; answer it with dialog_respond, or, for a native one it can't press (a file picker), register dialog_auto_answer before the call. An export_gcode with a path completes when the file is written; an action that starts a background job (obj_arrange, obj_orient) when the job ends. An action that does nothing (no object selected) is an error. Some commands add what they did to the reply (the obj_order_by_* order, the object obj_assemble made).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "Action id from list_actions, or the name inside it.",
+            "type": "string"
+          },
+          "param": {
+            "description": "Parameter, when the action takes one.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "run_action",
+      "title": "Run a Speed Dial action"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Open files"
+      },
+      "description": "Open model files (STL, 3MF, STEP, OBJ, AMF, SVG...), a project (.3mf) or G-code by absolute path, without a file dialog. Models are added to the current project. A .3mf opens as a project (replacing the current one: pass discard_changes when it has unsaved changes) unless as is \"geometry\". Importing can open a dialog (STEP mesh options, for instance); the reply is then blocked_by_dialog.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "as": {
+            "description": "How to open .3mf files. Default auto (= project).",
+            "enum": [
+              "auto",
+              "geometry",
+              "project"
+            ],
+            "type": "string"
+          },
+          "discard_changes": {
+            "description": "Replace a project with unsaved changes without asking.",
+            "type": "boolean"
+          },
+          "paths": {
+            "description": "Absolute paths.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "paths"
+        ],
+        "type": "object"
+      },
+      "name": "open_files",
+      "title": "Open files"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "New project"
+      },
+      "description": "Start a new, empty project. Fails when the current project has unsaved changes unless discard_changes is true. Modified printer, process and filament presets are kept for the new project, unless changes is \"discard\", the two answers of New Project's prompt. Reply: objects, names, plates; when presets had or have unsaved changes, discarded and modified list per preset the keys dropped and the keys still unsaved.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "changes": {
+            "description": "Unsaved changes of the presets: keep them (default) or drop them.",
+            "enum": [
+              "keep",
+              "discard"
+            ],
+            "type": "string"
+          },
+          "discard_changes": {
+            "description": "Drop unsaved changes without asking.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "name": "new_project",
+      "title": "New project"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Generate a calibration test"
+      },
+      "description": "Generate a Calibration menu test as its dialog's OK does: a new project named after the test with the test model, and the process, filament and printer presets changed as the test needs (presets_changed). The test prints with filament slot 1, so the filament tab is pointed at slot 1's preset. Omitted parameters take the dialog's defaults (pressure advance's by the printer's extruder type); temperatures are clamped to 155-500 °C and rounded down to 5 °C. Fails, changing nothing, when the project has unsaved changes (pass discard_changes) or presets do (pass changes). Reply: test, project, params (the values used, which the journal records), objects, names, plates, presets_changed, result_keys (where the measured value belongs), warnings, adjusted (vfa), and discarded and modified as new_project. Then slice and export. To save a measured value: new_project {discard_changes, changes: \"discard\"}, set_settings the value, save_preset.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "accelerations": {
+            "description": "pressure_advance pattern: one test per acceleration and speed; default the process's.",
+            "items": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "auto_adjust": {
+            "description": "vfa: lower the layer height, else the end speed, to stay within the filament's maximum volumetric speed (default true).",
+            "type": "boolean"
+          },
+          "auto_scale": {
+            "description": "temperature, vfa: scale the model to the nozzle (default true).",
+            "type": "boolean"
+          },
+          "changes": {
+            "description": "Unsaved preset changes: keep them for the test, or drop them first. Required when presets are modified.",
+            "enum": [
+              "keep",
+              "discard"
+            ],
+            "type": "string"
+          },
+          "damping": {
+            "description": "input_shaping_freq: the damping ratio printed with.",
+            "type": "number"
+          },
+          "discard_changes": {
+            "description": "Replace a project with unsaved changes.",
+            "type": "boolean"
+          },
+          "end": {
+            "description": "End of the swept value.",
+            "type": "number"
+          },
+          "end_y": {
+            "description": "input_shaping_freq: end of the Y range; default the X one.",
+            "type": "number"
+          },
+          "freq_x": {
+            "description": "input_shaping_damp: the X frequency, Hz.",
+            "type": "number"
+          },
+          "freq_y": {
+            "description": "input_shaping_damp: the Y frequency, Hz; default freq_x.",
+            "type": "number"
+          },
+          "method": {
+            "description": "pressure_advance: tower (default), line or pattern; flow_ratio: pass1, pass2, yolo (default) or yolo_perfectionist.",
+            "enum": [
+              "tower",
+              "line",
+              "pattern",
+              "pass1",
+              "pass2",
+              "yolo",
+              "yolo_perfectionist"
+            ],
+            "type": "string"
+          },
+          "print_numbers": {
+            "description": "pressure_advance line: print the values (default true).",
+            "type": "boolean"
+          },
+          "shaper_type": {
+            "description": "Input shaping: an input_shaping_type the printer's firmware offers; default the first.",
+            "type": "string"
+          },
+          "speeds": {
+            "description": "pressure_advance pattern: default an optimal speed.",
+            "items": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "start": {
+            "description": "Start of the swept value: °C, mm³/s, PA, mm, mm/s (vfa), Hz (input_shaping_freq), damping (input_shaping_damp), junction deviation mm or jerk mm/s (cornering).",
+            "type": "number"
+          },
+          "start_y": {
+            "description": "input_shaping_freq: start of the Y range; default the X one.",
+            "type": "number"
+          },
+          "step": {
+            "description": "Step: max_volumetric, pressure_advance, retraction, vfa.",
+            "type": "number"
+          },
+          "test": {
+            "description": "The test, named as the calib_* actions.",
+            "enum": [
+              "temperature",
+              "max_volumetric",
+              "pressure_advance",
+              "flow_ratio",
+              "retraction",
+              "vfa",
+              "cornering",
+              "input_shaping_freq",
+              "input_shaping_damp"
+            ],
+            "type": "string"
+          },
+          "test_model": {
+            "description": "Input shaping: ringing_tower (default) or fast_tower; cornering: also scv_v2; temperature on belt printers: standard (default) or overhang.",
+            "enum": [
+              "ringing_tower",
+              "fast_tower",
+              "scv_v2",
+              "standard",
+              "overhang"
+            ],
+            "type": "string"
+          },
+          "top_surface_pattern": {
+            "description": "flow_ratio (default archimedeanchords).",
+            "enum": [
+              "archimedeanchords",
+              "monotonic"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "test"
+        ],
+        "type": "object"
+      },
+      "name": "calibrate",
+      "title": "Generate a calibration test"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Save the project"
+      },
+      "description": "Save the project as a .3mf at an absolute path without a dialog; it becomes the project's file.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "overwrite": {
+            "description": "Replace an existing file.",
+            "type": "boolean"
+          },
+          "path": {
+            "description": "Absolute .3mf path.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "save_project",
+      "title": "Save the project"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Export"
+      },
+      "description": "Write the project to a file without a dialog. gcode: the current plate's G-code (slice first; runs in the background and the call completes when the file is written). sliced_3mf: the sliced plate (or all plates) as .gcode.3mf. 3mf: the model without slicing data. stl: all objects as one STL. Without format, the path's extension (.gcode, .gcode.3mf, .3mf, .stl) says which. plate selects the plate first.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "format": {
+            "description": "What to write; default from the path's extension.",
+            "enum": [
+              "gcode",
+              "sliced_3mf",
+              "3mf",
+              "stl"
+            ],
+            "type": "string"
+          },
+          "overwrite": {
+            "description": "Replace an existing file.",
+            "type": "boolean"
+          },
+          "path": {
+            "description": "Absolute output path.",
+            "type": "string"
+          },
+          "plate": {
+            "description": "\"current\" (default), a plate index, or \"all\" (sliced_3mf only).",
+            "type": [
+              "string",
+              "integer"
+            ]
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "export",
+      "title": "Export"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "List presets"
+      },
+      "description": "Printer, process or filament presets with flags: system or user, selected (and modified), compatible with the selected printer, and for filaments the slots using them. Only compatible, visible presets unless asked.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_hidden": {
+            "description": "Also list hidden presets.",
+            "type": "boolean"
+          },
+          "include_incompatible": {
+            "description": "Also list presets incompatible with the printer.",
+            "type": "boolean"
+          },
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "query": {
+            "description": "Case-insensitive part of the name.",
+            "type": "string"
+          },
+          "type": {
+            "description": "Preset category.",
+            "enum": [
+              "printer",
+              "process",
+              "filament"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "name": "list_presets",
+      "title": "List presets"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Select a preset"
+      },
+      "description": "Select a printer, process or filament preset by the name its selector shows (or its internal name), as a person would. With unsaved changes the Transfer-or-discard prompt opens (blocked_by_dialog) unless changes answers it. A filament is assigned to filament_slot (1-based, default 1). Reply: selected; when presets had or have unsaved changes, discarded and modified list per preset the keys dropped and the keys still unsaved.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "changes": {
+            "description": "Unsaved changes of the presets the switch replaces: move them to the new preset or drop them, as the prompt's buttons do. Omitted: the prompt opens.",
+            "enum": [
+              "transfer",
+              "discard"
+            ],
+            "type": "string"
+          },
+          "filament_slot": {
+            "description": "Filament slot, 1-based.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "name": {
+            "description": "Preset name as list_presets shows it.",
+            "type": "string"
+          },
+          "type": {
+            "description": "Preset category.",
+            "enum": [
+              "printer",
+              "process",
+              "filament"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "select_preset",
+      "title": "Select a preset"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Save a preset"
+      },
+      "description": "Save the printer, process or filament preset being edited, unsaved changes included, under name, as the tab's Save and the Save preset dialog's OK do; it is then selected. A filament is filament_slot's (default 1), and every slot using the old preset takes the new one. Replacing another existing preset needs overwrite (pass it in scripts meant to be rerun). Reply: saved, user, project, inherits, filament_slots. A temperature warning or an unsaved-changes prompt makes it blocked_by_dialog. To keep only some edits, set_settings {reset_all: true, values} first.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "detach": {
+            "description": "Copy inherited values and drop the parent (Developer mode).",
+            "type": "boolean"
+          },
+          "filament_slot": {
+            "description": "Filament slot, 1-based.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "inside_project": {
+            "description": "Keep it inside the project, not as a user preset. Default: where the edited preset is.",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "Name to save under.",
+            "type": "string"
+          },
+          "overwrite": {
+            "description": "Replace another preset of that name.",
+            "type": "boolean"
+          },
+          "type": {
+            "description": "Preset category.",
+            "enum": [
+              "printer",
+              "process",
+              "filament"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "save_preset",
+      "title": "Save a preset"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Delete a preset"
+      },
+      "description": "Delete a user preset or one inside the project, its file and its cloud copy, as the tab's Delete does, without asking. A selected preset is replaced as the tab does (its parent or the next preset). Another filament is deleted without changing the selection, and slots using it take the selected one; another process is selected, deleted and the selection restored; a printer must be selected first. Refused: system presets, presets others inherit from, another preset while the edited one of its type has unsaved changes. Deleting a selected printer or process can ask about other presets' unsaved changes (blocked_by_dialog). Reply: deleted, selected, filaments (per slot), attached, and discarded/modified as select_preset's.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "delete_attached": {
+            "description": "A custom printer: also delete the process and filament presets made for it alone, which the GUI deletes with it.",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "Preset name as list_presets shows it.",
+            "type": "string"
+          },
+          "type": {
+            "description": "Preset category.",
+            "enum": [
+              "printer",
+              "process",
+              "filament"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "delete_preset",
+      "title": "Delete a preset"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Read settings"
+      },
+      "description": "Read setting values (as OrcaSlicer serializes them) with meta: label, description (what the setting does, when to change it, what it affects), where (its settings page and group), type, unit, range, allowed values and their labels, and mode. Name keys; find the settings for an effect with query, a few words matched in keys, labels and descriptions, best matches first; or list one page or group with where (an unknown one lists them all). Without these, every option of the scope is listed, paged, without meta in a preset scope. A per-variant value lists in meta its variants (what each entry is for) and active (the entry each extruder prints with). preset reads a saved preset without selecting it; compare lists only the keys that differ from another preset, each with value and other. For object/volume scopes only the overrides that object or part carries are listed, each with effective (the value it prints with) and source (part, object, process or default); an object's item lists in parts the parts and modifiers that override the key inside their own volume. The project scope has the plate type, slot colours, flushing volumes, purge mode, prime tower position per plate, which slots are mixed and, with several extruders, the filament grouping; meta.offered lists the choices this printer has. The plate scope lists a plate's curr_bed_type, print_sequence, spiral_mode, first_layer_print_sequence, other_layers_print_sequence, name and locked, each with value (the plate's own, null where it follows the global setting or Auto) and effective. The preferences scope reads the named keys of the app configuration (the Preferences dialog's settings, keys as its controls are named), values as stored, and lists no keys unasked.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "compare": {
+            "description": "Preset scopes: a preset name, \":saved\" (the unsaved changes) or \":parent\" (the preset it inherits from).",
+            "type": "string"
+          },
+          "filament_slot": {
+            "description": "Filament slot, 1-based.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "include_meta": {
+            "description": "Include labels, types and ranges. Default true, false for a preset scope's whole listing and with compare.",
+            "type": "boolean"
+          },
+          "keys": {
+            "description": "Option keys, e.g. [\"layer_height\", \"wall_loops\"].",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "object": {
+            "description": "Object index (object/volume scope).",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "offset": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "plate": {
+            "description": "Plate index (plate scope; default: the current plate).",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "preset": {
+            "description": "Preset scopes: read this saved preset (a name from list_presets) instead of the one being edited.",
+            "type": "string"
+          },
+          "query": {
+            "description": "A few distinctive words, e.g. \"stringing\" or \"ooze travel\"; the best 20 matches unless limit says otherwise.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Which settings: the process (print), filament or printer preset being edited, an object's / part's own overrides, the project's own settings, a plate's, or the app's preferences (read only).",
+            "enum": [
+              "print",
+              "process",
+              "filament",
+              "printer",
+              "object",
+              "volume",
+              "project",
+              "plate",
+              "preferences"
+            ],
+            "type": "string"
+          },
+          "volume": {
+            "description": "Part index (volume scope).",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "where": {
+            "description": "A settings page, or \"Page > Group\" as meta.where gives it, e.g. \"Strength > Walls\".",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "get_settings",
+      "title": "Read settings"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Change settings"
+      },
+      "description": "Change settings as if typed into the settings tab: all values are parsed strictly first and applied together, and nothing changes if any is invalid. Values may be strings in OrcaSlicer's format (\"15%\", \"0.2\", \"1,2\") or JSON numbers, booleans and arrays (a point as [x, y]). object/volume scopes set per-object or per-part overrides, of the keys the object list offers there; a null value removes an override. extruder is the object's or part's filament (1-based; 0 or null is Default), set as the Change Filament menu does. A preset's per-variant value (get_settings meta.variants) takes a single value for the entries in use (meta.active, as the tab writes the variant it shows), {\"index\": i, \"value\": v} for one entry, or an array of all. In a preset scope, null takes a key back to its saved value (reset_to parent: the parent's), and reset_all first discards every unsaved change, as the tab's undo button does (reply: reverted), then applies values. Reply: applied, and changed, every setting the call changed, including those the app adjusted in turn. Spiral vase and some others confirm their adjustments in a dialog (blocked_by_dialog). The project scope writes as the sidebar's controls do: curr_bed_type, filament_colour (#RRGGBB per slot), flush_multiplier, flush_volumes_matrix (per nozzle, slots x slots from row to column, in config order over every slot, mixed ones left as they are; before the multiplier, which the G-code header applies; a colour change can recalculate it, so set it last), prime_volume_mode, and wipe_tower_x/y (mm from the plate's origin, one per plate; undoable). The plate scope writes as the Plate Settings dialog's OK does, after selecting the plate as its icon does: curr_bed_type, print_sequence (\"by layer\", \"by object\"), spiral_mode (true asks for confirmation: blocked_by_dialog), first_layer_print_sequence (every slot once, e.g. [2, 1]) and other_layers_print_sequence ([{from: layer >= 2, to, order}], to omitted for the last layer), null for the global setting or Auto; name, and locked (true or false). One undo step.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "filament_slot": {
+            "description": "Filament slot, 1-based.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "object": {
+            "description": "Object index (object/volume scope).",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "plate": {
+            "description": "Plate index (plate scope; default: the current plate).",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reset_all": {
+            "description": "Preset scopes: discard the unsaved changes before applying values.",
+            "type": "boolean"
+          },
+          "reset_to": {
+            "description": "Preset scopes: what a null value takes a key back to: the saved preset (default) or the preset it inherits from.",
+            "enum": [
+              "saved",
+              "parent"
+            ],
+            "type": "string"
+          },
+          "scope": {
+            "description": "Which settings: the process (print), filament or printer preset being edited, an object's / part's own overrides, the project's own settings, a plate's, or the app's preferences (read only).",
+            "enum": [
+              "print",
+              "process",
+              "filament",
+              "printer",
+              "object",
+              "volume",
+              "project",
+              "plate",
+              "preferences"
+            ],
+            "type": "string"
+          },
+          "values": {
+            "description": "{key: value}, or {key: {index, value}} for one entry",
+            "type": "object"
+          },
+          "volume": {
+            "description": "Part index (volume scope).",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "set_settings",
+      "title": "Change settings"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "List plates"
+      },
+      "description": "Plates with name, locked, current, objects ([object, instance]), and the settings they print with: curr_bed_type, print_sequence, spiral_mode, first_layer_print_sequence and other_layers_print_sequence (null: Auto); overrides lists those the plate sets itself (set_settings scope plate). Also sliced (an up-to-date slice), wipe_tower [x, y] and layer_gcode: the plate's pauses, custom G-code, templates and filament changes, each {z, layer, type, filament, color, gcode}; layer is the Preview slider's number, given while the plate's slice is up to date.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_plates",
+      "title": "List plates"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "List objects"
+      },
+      "description": "Objects in the project: filament, auto_drop, bounding box (instance 0), brim ear count and the settings they override; their instances (plate, offset, rotation in degrees, scale, mirrored, bbox); their parts and modifiers (type, with subtype for a precise seam; filament: a part's own or its object's, a modifier's only when it sets one; position, bbox and scaled_volume in mm3 on the bed, measured on instance 0; rotation_deg and scale in the object's frame; mirrored; triangle count; mesh_volume, the unscaled mesh's mm3; painted facets: supports and seam enforcers/blockers, fuzzy_skin, mmu per filament, texture per layer; a text part's text and font, an SVG part's file); its height range modifiers when it has any (layer_config_ranges: [{min_z, max_z, values}], as set_layer_ranges takes them) and its variable layer height profile when it has one (layer_height_profile: {points, min_height, max_height}). A bbox is {min, max, size} in mm of model parts only, so unlike the panel's Size it leaves out modifiers. Indices are what select, transform, ui_mouse targets and the object/volume settings scopes take.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "plate": {
+            "description": "Only objects on this plate.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "screen": {
+            "description": "Add each instance's rectangle in the shown 3D view, logical pixels [x, y, w, h].",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_objects",
+      "title": "List objects"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Select objects"
+      },
+      "description": "Select objects, instances or parts in the 3D view (the assemble view while it is shown, else Prepare, switching to it), as clicking them would. Give objects, instances ([[object, instance], ...]) or volumes ([[object, part], ...]); add keeps the current selection; all / none select everything or nothing.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "add": {
+            "description": "Add to the selection instead of replacing it.",
+            "type": "boolean"
+          },
+          "all": {
+            "description": "Select all objects.",
+            "type": "boolean"
+          },
+          "instances": {
+            "description": "[[object, instance], ...]",
+            "items": {
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "none": {
+            "description": "Clear the selection.",
+            "type": "boolean"
+          },
+          "objects": {
+            "description": "Object indices.",
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "volumes": {
+            "description": "[[object, part], ...]",
+            "items": {
+              "type": "array"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "name": "select",
+      "title": "Select objects"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Move, rotate or scale an instance or a part"
+      },
+      "description": "Change one instance's placement, or one part's with volume. translate is in mm, position where it goes (mm, as the Move panel shows it, whatever mode says), rotate in degrees about X/Y/Z, scale a factor (one number or [x, y, z]), size [x, y, z] mm along the object's or part's own axes, plate moves the instance onto that plate at the same place. mode \"relative\" (default) adds to the current placement, \"absolute\" sets it. An instance is dropped back onto the bed unless drop_to_bed is false. A part moves as the Object manipulation panel moves it: translate and rotate along the bed's axes, measured on instance 0, scale and size along its own axes; every instance shows the change, and Auto Drop may lower the object afterwards. One undo step. Replies with the instance's offset, scale and plate, or the part's size along its own axes and its list_objects entry (volume_info).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "drop_to_bed": {
+            "description": "Default true; instances only.",
+            "type": "boolean"
+          },
+          "instance": {
+            "description": "Default 0.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mode": {
+            "description": "Default relative.",
+            "enum": [
+              "relative",
+              "absolute"
+            ],
+            "type": "string"
+          },
+          "object": {
+            "description": "Object index (list_objects).",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "plate": {
+            "description": "Move the instance to this plate.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "position": {
+            "description": "[x, y, z] mm: the position to move to. Not with translate.",
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "rotate": {
+            "description": "[x, y, z] degrees; relative only for a part",
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "scale": {
+            "description": "Factor or [x, y, z] factors.",
+            "type": [
+              "number",
+              "array"
+            ]
+          },
+          "size": {
+            "description": "[x, y, z] mm, null keeps an axis; one number and two nulls keep the proportions. Not with scale.",
+            "items": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": "array"
+          },
+          "translate": {
+            "description": "[x, y, z] mm",
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "volume": {
+            "description": "Transform this part instead of the instance.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "object"
+        ],
+        "type": "object"
+      },
+      "name": "transform",
+      "title": "Move, rotate or scale an instance or a part"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Add a part or modifier to an object"
+      },
+      "description": "Add a part, negative part, modifier, support blocker or enforcer, or precise seam to an object, as its context menu's Add items do: a primitive shape at a size, or a model file as Load... adds it. The part lands where the menu puts it (a shape beside the object, a file at its coordinates relative to the object's first part) unless position is given. Like the menu, adding a shape folds the instance's rotation and scale into the object's parts (the instance's scale then reads 1). Refused for an object with several instances: add parts first. A STEP file may ask for mesh options (blocked_by_dialog). The new part is selected; one undo step. Replies with its index, which is not always the last (parts are ordered by type), the object's part count and the part's list_objects entry (volume_info).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "object": {
+            "description": "Object index (list_objects).",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "description": "Instead of shape: absolute path of a model file (STL, OBJ, 3MF, STEP, ...).",
+            "type": "string"
+          },
+          "position": {
+            "description": "[x, y, z] mm on the bed for the part's centre, on instance 0, as the Move panel shows it.",
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "shape": {
+            "description": "A primitive shape.",
+            "enum": [
+              "cube",
+              "cylinder",
+              "sphere",
+              "cone",
+              "disc",
+              "torus"
+            ],
+            "type": "string"
+          },
+          "size": {
+            "description": "mm, the Primitive size dialog's fields: cube [x, y, z]; cylinder, cone, disc [diameter, height]; sphere [diameter]; torus [inner diameter, tube diameter]. Default: the built-in size.",
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "type": {
+            "description": "What the new part is.",
+            "enum": [
+              "part",
+              "negative",
+              "modifier",
+              "support_blocker",
+              "support_enforcer",
+              "precise_seam"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "object",
+          "type"
+        ],
+        "type": "object"
+      },
+      "name": "add_part",
+      "title": "Add a part or modifier to an object"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Arrange objects or fill the bed"
+      },
+      "description": "Arrange objects as the toolbar's Arrange does (every unlocked plate) or as one plate's Arrange icon does (plates: an index or \"current\"), or fill object fill's plate with more of it, as Fill bed with instances or copies does. spacing, rotate, align_y and multi_material are the Arrange options panel's settings: values given are kept as the panel keeps them, so later arranges use them too. Waits for the arrangement (a longer one replies with a job); the reply has the settings in force, instances left off every plate, plates the all-plates arrange skipped and the job's notifications. An arrange may reorder objects, so list_objects again. One undo step.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "align_y": {
+            "description": "Align to Y axis (off while rotate is on).",
+            "type": "boolean"
+          },
+          "fill": {
+            "description": "Instead of arranging, fill this object's plate with more of it.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "fill_with": {
+            "description": "Default instances.",
+            "enum": [
+              "instances",
+              "copies"
+            ],
+            "type": "string"
+          },
+          "multi_material": {
+            "description": "Allow multiple materials on same plate.",
+            "type": "boolean"
+          },
+          "plates": {
+            "description": "\"all\" (default), \"current\" or a plate index.",
+            "type": [
+              "string",
+              "integer"
+            ]
+          },
+          "rotate": {
+            "description": "Auto rotate for arrangement.",
+            "type": "boolean"
+          },
+          "spacing": {
+            "description": "mm between objects; 0 means auto.",
+            "minimum": 0,
+            "type": "number"
+          },
+          "timeout_s": {
+            "description": "Cancel it after this long (default 300).",
+            "maximum": 1800,
+            "minimum": 10,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "arrange",
+      "title": "Arrange objects or fill the bed"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Slice"
+      },
+      "description": "Slice the current plate, all plates, or one plate by index, the way the toolbar's Slice button does, and wait for the result (or reply with a job id when it takes longer than the reply budget). Each requested plate reports ok, error, cancelled, empty or skipped; the whole operation is superseded when someone else started a slice or edited the project while it ran. An ok plate has time_s (silent_time_s when the printer estimates it), filament_m and filament_g including flush, filament_cost, layers, max_z, filament_changes, and filaments[i] for slot i+1 with m, g and the grams of model_g, support_g, flush_g and tower_g. Other changes are refused until it finishes; cancel stops it.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "plates": {
+            "description": "\"current\" (default), \"all\", or a plate index.",
+            "type": [
+              "string",
+              "integer"
+            ]
+          },
+          "timeout_s": {
+            "description": "Give up after this long (default 1800).",
+            "maximum": 7200,
+            "minimum": 10,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "slice",
+      "title": "Slice"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Cancel an operation"
+      },
+      "description": "Stop the running slice or G-code export, as the cancel button on the slicing progress does, or the background job (an arrange, orient or fill bed) an MCP call started. That job then reports cancelled; a background job keeps other changes out until it has really stopped. With job, only when that job is the running operation, or a running encode_recording, which stops and reports cancelled. Allowed while an operation holds the project.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "job": {
+            "description": "The operation's job to cancel, e.g. \"j12\".",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "cancel",
+      "title": "Cancel an operation"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Set height range modifiers"
+      },
+      "description": "Replace an object's height range modifiers (Height Range Modifier in the object list): Z ranges in mm, each printed with its own layer_height, filament and process settings, starting from the object's layer height and filament. Ranges may touch but not overlap; [] removes them all. One undo step; the object is selected. Replies with the object's height and its ranges as list_objects shows them, and warnings, such as a variable layer height profile deciding the layer heights instead.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "layer_config_ranges": {
+            "description": "The object's ranges afterwards, in any order.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "max_z": {
+                  "description": "Top, mm above the bed.",
+                  "minimum": 0,
+                  "type": "number"
+                },
+                "min_z": {
+                  "description": "Bottom, mm above the bed.",
+                  "minimum": 0,
+                  "type": "number"
+                },
+                "values": {
+                  "description": "{key: value} as set_settings takes them: layer_height, extruder (0 = the object's filament) and per-region process settings such as sparse_infill_density or wall_loops.",
+                  "type": "object"
+                }
+              },
+              "required": [
+                "min_z",
+                "max_z"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "object": {
+            "description": "Object index (list_objects).",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "object",
+          "layer_config_ranges"
+        ],
+        "type": "object"
+      },
+      "name": "set_layer_ranges",
+      "title": "Set height range modifiers"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Set a variable layer height profile"
+      },
+      "description": "Run the Variable layer height panel's Adaptive, Smooth or Reset on an object, without opening the panel: adaptive computes layer heights from the object's shape (inside a height range, the range's layer_height), smooth smooths its profile (or the one its height ranges give), reset goes back to its layer height and ranges. One undo step; the object is selected. Replies with the object's height, its layer_height_profile {points, min_height, max_height} as list_objects shows it (absent after reset), and warnings.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "The panel's button.",
+            "enum": [
+              "adaptive",
+              "smooth",
+              "reset"
+            ],
+            "type": "string"
+          },
+          "keep_min": {
+            "description": "smooth: keep the minimum layer heights (default false).",
+            "type": "boolean"
+          },
+          "object": {
+            "description": "Object index (list_objects).",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "quality": {
+            "description": "adaptive: 0 = quality .. 1 = speed (default 0.5, as the panel).",
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "radius": {
+            "description": "smooth: default 5.",
+            "maximum": 10,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "object",
+          "action"
+        ],
+        "type": "object"
+      },
+      "name": "set_layer_height_profile",
+      "title": "Set a variable layer height profile"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Set layer G-codes"
+      },
+      "description": "Add or remove pauses, custom G-code, custom templates and filament changes at the start of a layer, as the Preview layer slider's menu does; they are saved per plate in the project. They go on the plate's sliced layers, so the plate needs an up-to-date slice, or must be the one the Preview still shows after an earlier edit; the call selects it and shows the Preview. Applies clear, then remove, then add, all checked first. One code per layer: a custom code or filament change where there is one replaces it. Not undoable, as in the slider. A change invalidates the plate's slice: slice again before exporting. Replies with the plate's codes as list_plates' layer_gcode lists them, each with z and layer.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "add": {
+            "description": "Codes to add, each with layer or z.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "filament": {
+                  "description": "change_filament: printed from this layer up.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "gcode": {
+                  "description": "custom: the G-code.",
+                  "type": "string"
+                },
+                "layer": {
+                  "description": "1-based, as the Preview's layer slider numbers layers.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "type": {
+                  "description": "template runs the printer's template_custom_gcode.",
+                  "enum": [
+                    "pause",
+                    "custom",
+                    "template",
+                    "change_filament"
+                  ],
+                  "type": "string"
+                },
+                "z": {
+                  "description": "mm: the layer whose top is at or above it.",
+                  "minimum": 0,
+                  "type": "number"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "clear": {
+            "description": "Remove every code on the plate first.",
+            "type": "boolean"
+          },
+          "plate": {
+            "description": "Default: the current plate.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "remove": {
+            "description": "Codes to remove, by layer or z.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "layer": {
+                  "description": "1-based, as the Preview's layer slider numbers layers.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "z": {
+                  "description": "mm: the layer whose top is at or above it.",
+                  "minimum": 0,
+                  "type": "number"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "name": "set_layer_gcode",
+      "title": "Set layer G-codes"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Take a screenshot"
+      },
+      "description": "Capture what OrcaSlicer shows and return it as an image, downscaled to max_dim on the long edge (default 1280), plus the full-size PNG written to save_path (or the session's output folder). target: \"window\" (the main window), \"canvas\" (the visible 3D view exactly as rendered: scene, toolpaths, toolbars, ImGui panels; on the Design tab its view), \"dialog\" (the topmost modal dialog), or a widget's ref from ui_snapshot (a window that is not modal, or just that widget; a page element's ref captures its whole web view). The result says when parts may differ from the screen (approximate). Point the view first with set_view.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_image": {
+            "description": "Return the image itself (default true); false returns only the path.",
+            "type": "boolean"
+          },
+          "max_dim": {
+            "description": "Long edge of the returned image.",
+            "maximum": 2000,
+            "minimum": 256,
+            "type": "integer"
+          },
+          "overwrite": {
+            "description": "Replace an existing save_path.",
+            "type": "boolean"
+          },
+          "save_path": {
+            "description": "Absolute .png path for the full-size image.",
+            "type": "string"
+          },
+          "target": {
+            "description": "window (default), canvas, dialog, or a widget's ref or locator from ui_snapshot.",
+            "type": [
+              "string",
+              "object"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "name": "screenshot",
+      "title": "Take a screenshot"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Read the Preview"
+      },
+      "description": "What the Preview shows for a sliced plate. summary: the slice reply's, plus prepare and travel time and travel distance. features: seconds, share of the print time and grams per feature type (the Line Type legend), and travel. layers: per layer (1-based, as set_view's layer) Z, height, seconds and grams, paged; layer_features adds each feature type's seconds. objects: grams per object instance, with its list_objects index when its name is unique. view, for the plate the Preview shows: view type, time mode, layer range, which legend rows are visible, and each view type's colour range for what the legend shows. Times are normal-mode estimates. A G-code file opened for viewing reads the same.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "include": {
+            "description": "Parts besides the summary; default [\"features\", \"view\"].",
+            "items": {
+              "enum": [
+                "features",
+                "layers",
+                "layer_features",
+                "objects",
+                "view"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "description": "Layers per page (default 100).",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "plate": {
+            "description": "Plate index; default the current plate.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "get_preview",
+      "title": "Read the Preview"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Point the view"
+      },
+      "description": "Set up what the window shows, for screenshots and GUI work: the main tab, the 3D view (Prepare's, the preview or the assemble view, which has its own gizmos), the 3D camera (a named direction, the default view, or fit to bed / objects / selection, then orbit to look from between the named directions; the reply gives the elevation and azimuth it ends at), the preview's color scheme (picked as in the legend's combo, which shows every feature type again), legend rows, time estimate and layers (1-based, or up to a height), and the window size. Only the given fields change. On the Design tab the camera points its view (default is its Home view; no fit_bed). The reply echoes them; preview layers as [first, last, count] with z, the heights of first and last.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "camera": {
+            "description": "Camera direction or fit.",
+            "enum": [
+              "iso",
+              "top",
+              "bottom",
+              "front",
+              "rear",
+              "left",
+              "right",
+              "default",
+              "fit_bed",
+              "fit_objects",
+              "fit_selection"
+            ],
+            "type": "string"
+          },
+          "layer": {
+            "description": "Preview: show layers up to this one (1-based).",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "layer_range": {
+            "description": "Preview: [first, last] layers, 1-based.",
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "layer_z": {
+            "description": "Preview: show layers up to the first whose top is at or above this height (mm), as the slider places a custom G-code.",
+            "minimum": 0,
+            "type": "number"
+          },
+          "legend": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "description": "Preview: show (true) or hide (false) legend rows: feature types by name as get_preview lists them (\"Sparse infill\"), and travel, wipe, retract, unretract, seams, filament_changes, color_changes, pauses, custom_gcode, in any case and with _ or a space between words. Hiding a row this print lacks does nothing. Applied after view_type.",
+            "type": "object"
+          },
+          "orbit": {
+            "description": "[yaw, pitch] in degrees: move the camera around what it looks at, yaw to its right and pitch up (negative looks from lower), after camera. The same on every install, unlike a mouse drag.",
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "tab": {
+            "description": "Main window tab.",
+            "enum": [
+              "home",
+              "design",
+              "prepare",
+              "preview",
+              "device",
+              "multi_device",
+              "project",
+              "calibration"
+            ],
+            "type": "string"
+          },
+          "time_mode": {
+            "description": "Preview: the time estimate the legend and layer times show; silent only when the print has its own.",
+            "enum": [
+              "normal",
+              "silent"
+            ],
+            "type": "string"
+          },
+          "view": {
+            "description": "3D view: Prepare's, the preview, or the assemble view (needs an object; leave it with 3d, as its Return button does).",
+            "enum": [
+              "3d",
+              "preview",
+              "assemble"
+            ],
+            "type": "string"
+          },
+          "view_type": {
+            "description": "Preview color scheme.",
+            "enum": [
+              "summary",
+              "feature_type",
+              "color_print",
+              "speed",
+              "actual_speed",
+              "height",
+              "width",
+              "volumetric_flow_rate",
+              "actual_volumetric_flow_rate",
+              "layer_time_linear",
+              "layer_time_logarithmic",
+              "fan_speed",
+              "temperature",
+              "pressure_advance",
+              "acceleration",
+              "jerk"
+            ],
+            "type": "string"
+          },
+          "window_size": {
+            "description": "[width, height] of the main window in pixels.",
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "name": "set_view",
+      "title": "Point the view"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "List the GUI"
+      },
+      "description": "Describe what is on screen as an indented tree, one element per line with a ref: wx widgets of every shown window (buttons, fields, checkboxes, combos, tabs, labels), the rows of lists, trees and tables (label, other cells, checkbox, what an object list row is), each shown popup after the window it opened from, the main menus, the 3D canvas's toolbar items and gizmos, each ImGui panel drawn in the last frame with its items (kind, value, name) and text, and the elements of each shown web page (dialogs, the setup wizard, sign-in, plugin windows and pages) under its web view, as the same kinds of lines: button, link, text, checkbox, radio, choice (its options noted), slider, spin, tab, heading, row, canvas, frame and label, the element's id as name in CSS (name=#save is {css:\"#save\"}) (with a modal dialog open, only the topmost dialog's pages are read). Pass the refs to ui_click / ui_input / ui_key (and page elements to ui_mouse). Refs go stale when the element goes away; take a new snapshot then. root: \"all\" (default), \"main\", \"dialog\" (topmost modal), \"popup\" or a window's ref. query filters by label, value, name or class. Prefer run_action and the typed tools when one fits.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_imgui": {
+            "description": "List ImGui items (default true).",
+            "type": "boolean"
+          },
+          "include_menus": {
+            "description": "List menu items (default true).",
+            "type": "boolean"
+          },
+          "include_web": {
+            "description": "List the elements of web pages (default true).",
+            "type": "boolean"
+          },
+          "max_nodes": {
+            "description": "Default 400.",
+            "maximum": 5000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_web_nodes": {
+            "description": "Page elements, apart from max_nodes; default 300.",
+            "maximum": 5000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "query": {
+            "description": "Case-insensitive text to look for.",
+            "type": "string"
+          },
+          "root": {
+            "description": "all | main | dialog | popup | <ref of a window>.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "ui_snapshot",
+      "title": "List the GUI"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Click an element"
+      },
+      "description": "Activate a GUI element: menu items, buttons, checkboxes, toggles, radio buttons, toolbar items and gizmos are activated the way their owners expect (a gizmo as its toolbar icon: it opens, a second click closes it, and Text on an object with no text creates a text part and replies created); other widgets and ImGui items get a synthesized mouse click, after the item is scrolled into view. A row is selected as a click on its cell selects it (ctrl adds, shift extends; the object list acts on the column named, as Printable toggles), a double click activates it, a right click opens its menu; a drop-down row is picked. A plate icon does what clicking it in the Prepare view does: the reply says the plate's lock state (locked), arrange and orient wait for their job (done), settings and filament_map list the dialog they open (dialogs), and a right click opens the plate menu. With x/y, clicks that point of a 3D canvas or a custom-drawn widget (logical pixels from its top left). Modifiers are seen by the 3D canvas, the object list and handlers that read the event. A menu the click opens is never shown: it is listed as popup_menu, or popup_item runs one of its items (ran). A click that opens a dialog returns blocked_by_dialog with the job. A web page's element is scrolled into view and gets the pointer and mouse events of a click at its centre (or x/y), refused when something else covers that point; a checkbox drawn as its label is clicked there. The reply reads back checked, and says closed, navigated (with url) or dialogs when the click closed its dialog, changed the page or opened another dialog; with closed, dialogs lists the dialogs still open under it, which still need an answer (the filament picker under its colour picker). Failing those, page says what the click changed on its page by 300 ms later: changed (false: the page lists what it did before), the ui_snapshot lines it added and removed, partial when a plugin configuration frame could not be compared (then changed only when a line was found), and posted, how many messages the page sent OrcaSlicer (its plugin) meanwhile. timeout_s (default 10) is how long the page gets to answer.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "button": {
+            "description": "Default left.",
+            "enum": [
+              "left",
+              "right",
+              "middle"
+            ],
+            "type": "string"
+          },
+          "double": {
+            "description": "Double click.",
+            "type": "boolean"
+          },
+          "modifiers": {
+            "description": "Modifier keys held during the click, as in ui_key: ctrl and cmd are both Command on macOS and Ctrl elsewhere; rawctrl is the macOS Control key.",
+            "items": {
+              "enum": [
+                "ctrl",
+                "cmd",
+                "rawctrl",
+                "shift",
+                "alt"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "popup_item": {
+            "description": "Run this item of the menu the input opens (a right click's context menu, a button's menu), by its label path, \"Add Modifier>Cylinder\"; \"#2\" picks a repeated label's second item. Without it, such a menu is listed in the reply (popup_menu), not shown.",
+            "type": "string"
+          },
+          "target": {
+            "description": "A ref from the latest ui_snapshot (\"w12\") or a locator: {label, class, name, within, index} for widgets, {option:\"layer_height\"} for a setting field, {menu:\"File>Export>Export G-code\"}, {gltoolbar:\"arrange\"}, {gizmo:\"Move\"}, {imgui:\"label\", imgui_name?:\"name\", window?, canvas?, index?} for an ImGui item, by its label, its name or both, or {row:\"Plate 1>Cube>Cylinder\", column?, within?, index?} for a row of a list, tree, table or drop-down list, by its last labels and the column of the cell to act on, {plate_icon:\"lock\", plate:0} for a plate or its icon in the Prepare view: plate, delete, orient, arrange, lock, settings, name, move_to_front, filament_map, imex_mode, or {web:\"Next\", kind?:\"button\", css?:\"#AcceptBtn\", within?, index?} for an element of a web page, by the label ui_snapshot lists (exactly, else case aside, else a part of it), its kind there, a CSS selector, or together; within is the window's title as for widgets (without it, a modal dialog's page is searched while one is open, else every shown page). A web locator waits up to 3 s for its element to show.",
+            "type": [
+              "string",
+              "object"
+            ]
+          },
+          "timeout_s": {
+            "description": "For a web page's element: seconds the page gets to answer (default 10).",
+            "maximum": 120,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "x": {
+            "description": "x of the point to click, in a 3D canvas, a custom-drawn widget or a page element.",
+            "type": "integer"
+          },
+          "y": {
+            "description": "y of the point to click.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "type": "object"
+      },
+      "name": "ui_click",
+      "title": "Click an element"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Set a control's value"
+      },
+      "description": "Set the text, number, selection or checked state of a control and send the event a person's edit would: text fields (submit:true also presses Enter and leaves the field, which is when Orca's setting fields commit), spin controls, sliders, choice / combo / list boxes (by option text or index), checkboxes and toggles (true/false), a row's checkbox (true/false). An ImGui item is set by its kind and its value read back: a field is typed into (a slider through the number field beside it, multiline text with \\n), a combo's option is picked by its text or 0-based index, a checkbox, radio or toggle clicked when it differs. For settings, set_settings is more reliable. A web page's field is set as typing would leave it: text, number, range, colour and date fields and editable text get the value with input and change events (submit then leaves the field; press Enter with ui_key Return), a select its option by text, value or index, a checkbox or radio is clicked when it differs; the value is read back, and page says what changed on the page, as for ui_click. File fields can't be set.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "submit": {
+            "description": "Press Enter / commit after setting (default true).",
+            "type": "boolean"
+          },
+          "target": {
+            "description": "A ref from the latest ui_snapshot (\"w12\") or a locator: {label, class, name, within, index} for widgets, {option:\"layer_height\"} for a setting field, {menu:\"File>Export>Export G-code\"}, {gltoolbar:\"arrange\"}, {gizmo:\"Move\"}, {imgui:\"label\", imgui_name?:\"name\", window?, canvas?, index?} for an ImGui item, by its label, its name or both, or {row:\"Plate 1>Cube>Cylinder\", column?, within?, index?} for a row of a list, tree, table or drop-down list, by its last labels and the column of the cell to act on, {plate_icon:\"lock\", plate:0} for a plate or its icon in the Prepare view: plate, delete, orient, arrange, lock, settings, name, move_to_front, filament_map, imex_mode, or {web:\"Next\", kind?:\"button\", css?:\"#AcceptBtn\", within?, index?} for an element of a web page, by the label ui_snapshot lists (exactly, else case aside, else a part of it), its kind there, a CSS selector, or together; within is the window's title as for widgets (without it, a modal dialog's page is searched while one is open, else every shown page). A web locator waits up to 3 s for its element to show.",
+            "type": [
+              "string",
+              "object"
+            ]
+          },
+          "timeout_s": {
+            "description": "For a web page's element: seconds the page gets to answer (default 10).",
+            "maximum": 120,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "value": {
+            "description": "The new value.",
+            "type": [
+              "string",
+              "number",
+              "boolean"
+            ]
+          }
+        },
+        "required": [
+          "target",
+          "value"
+        ],
+        "type": "object"
+      },
+      "name": "ui_input",
+      "title": "Set a control's value"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Press keys"
+      },
+      "description": "Send a key chord (\"Ctrl+S\", \"Escape\", \"Return\", \"Delete\", \"Shift+Tab\", \"Left\", \"F5\") and/or type text to a target or, without one, to the focused window (the topmost dialog while one is open, the 3D view shown when nothing has focus). As with a real key press, the shortcut handling of the target's panels and window sees it first. Typing reaches ImGui fields and key handlers; to fill a native text field use ui_input. A menu the keys open is listed as popup_menu, or popup_item runs one of its items. Keys for a web page (its element, or without a target the focused web view or the topmost dialog's only page) go to the page's focused element with the browser's default actions: typing, Backspace/Delete, Enter (submits a form, activates a button), Space, Tab moving the focus, arrows stepping a select, range or radio group; page says what the keys changed on the page, as for ui_click.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "keys": {
+            "description": "Key chord.",
+            "type": "string"
+          },
+          "popup_item": {
+            "description": "Run this item of the menu the input opens (a right click's context menu, a button's menu), by its label path, \"Add Modifier>Cylinder\"; \"#2\" picks a repeated label's second item. Without it, such a menu is listed in the reply (popup_menu), not shown.",
+            "type": "string"
+          },
+          "target": {
+            "description": "A ref from the latest ui_snapshot (\"w12\") or a locator: {label, class, name, within, index} for widgets, {option:\"layer_height\"} for a setting field, {menu:\"File>Export>Export G-code\"}, {gltoolbar:\"arrange\"}, {gizmo:\"Move\"}, {imgui:\"label\", imgui_name?:\"name\", window?, canvas?, index?} for an ImGui item, by its label, its name or both, or {row:\"Plate 1>Cube>Cylinder\", column?, within?, index?} for a row of a list, tree, table or drop-down list, by its last labels and the column of the cell to act on, {plate_icon:\"lock\", plate:0} for a plate or its icon in the Prepare view: plate, delete, orient, arrange, lock, settings, name, move_to_front, filament_map, imex_mode, or {web:\"Next\", kind?:\"button\", css?:\"#AcceptBtn\", within?, index?} for an element of a web page, by the label ui_snapshot lists (exactly, else case aside, else a part of it), its kind there, a CSS selector, or together; within is the window's title as for widgets (without it, a modal dialog's page is searched while one is open, else every shown page). A web locator waits up to 3 s for its element to show.",
+            "type": [
+              "string",
+              "object"
+            ]
+          },
+          "text": {
+            "description": "Characters to type.",
+            "type": "string"
+          },
+          "timeout_s": {
+            "description": "For a web page's element: seconds the page gets to answer (default 10).",
+            "maximum": 120,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "ui_key",
+      "title": "Press keys"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Mouse gesture on the 3D view"
+      },
+      "description": "Synthesize a mouse gesture on a 3D canvas, as a person's would: move, down, up, click, drag (from the start through `path` to `to`, `steps` moves per leg: on an object it moves it, in a painting gizmo it paints from a press on the object being painted (one drag whose path zigzags over an area paints all of it), and elsewhere it turns or pans the camera as this install's mouse settings say, so turn the camera with set_view camera or orbit instead) or wheel (delta in notches, positive zooms in or scrolls a panel up). Give the start as `at`, a point of the model, which is projected through the camera and by default checked to land on that part there (check \"point\" only projects it), or as x/y, logical pixels from the canvas's top left. Modifiers are pressed as keys for the gesture (shift for Measure's point picking, alt for erasing). A down keeps its button and modifiers held, so moves drag with it, until an up or another gesture. Grabbers are set through the gizmo's panel fields or transform, not dragged. A menu a right click opens is listed as popup_menu, or popup_item (with click or up) runs one of its items. camera_moved in the reply says the gesture moved the camera, so earlier screenshots and pixels no longer match the view. With target, the gesture is on a web page's element instead (a canvas such as the colour picker's spectrum, a slider, a sortable or scrolled list): x/y, to and path are logical pixels from its top left, a drag keeps the pointer captured where the page asks for it, and wheel scrolls what is under the pointer unless the page takes the wheel; page says what the gesture changed there, as for ui_click.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "Default click.",
+            "enum": [
+              "move",
+              "down",
+              "up",
+              "click",
+              "drag",
+              "wheel"
+            ],
+            "type": "string"
+          },
+          "at": {
+            "additionalProperties": false,
+            "description": "A point of the model: {object, instance (default 0), volume (part, default 0), and point [x, y, z] in the part's own mesh coordinates (frame \"volume\", the default) or the scene's (frame \"world\"), or spot: top | bottom | front | back | left | right, where a ray along that axis first meets the part}.",
+            "properties": {
+              "frame": {
+                "description": "Default volume.",
+                "enum": [
+                  "volume",
+                  "world"
+                ],
+                "type": "string"
+              },
+              "instance": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "object": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "point": {
+                "description": "[x, y, z] mm",
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              "spot": {
+                "description": "A side of the part.",
+                "enum": [
+                  "top",
+                  "bottom",
+                  "front",
+                  "back",
+                  "left",
+                  "right"
+                ],
+                "type": "string"
+              },
+              "volume": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "object"
+            ],
+            "type": "object"
+          },
+          "button": {
+            "description": "Default left.",
+            "enum": [
+              "left",
+              "right",
+              "middle"
+            ],
+            "type": "string"
+          },
+          "canvas": {
+            "description": "Default current, the view shown. design takes x/y only.",
+            "enum": [
+              "3d",
+              "preview",
+              "assemble",
+              "design",
+              "current"
+            ],
+            "type": "string"
+          },
+          "check": {
+            "description": "For model points: surface (default) or projection only.",
+            "enum": [
+              "surface",
+              "point"
+            ],
+            "type": "string"
+          },
+          "delta": {
+            "description": "Wheel notches.",
+            "type": "integer"
+          },
+          "double": {
+            "description": "Double click.",
+            "type": "boolean"
+          },
+          "modifiers": {
+            "description": "Modifier keys held during the click, as in ui_key: ctrl and cmd are both Command on macOS and Ctrl elsewhere; rawctrl is the macOS Control key.",
+            "items": {
+              "enum": [
+                "ctrl",
+                "cmd",
+                "rawctrl",
+                "shift",
+                "alt"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "path": {
+            "description": "Drag waypoints after the start, before to.",
+            "items": {
+              "description": "A canvas pixel [x, y] or a point of the model, as for at.",
+              "type": [
+                "array",
+                "object"
+              ]
+            },
+            "type": "array"
+          },
+          "popup_item": {
+            "description": "Run this item of the menu the input opens (a right click's context menu, a button's menu), by its label path, \"Add Modifier>Cylinder\"; \"#2\" picks a repeated label's second item. Without it, such a menu is listed in the reply (popup_menu), not shown.",
+            "type": "string"
+          },
+          "steps": {
+            "description": "Moves per drag leg (default 10).",
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "target": {
+            "description": "A web page's element (its ref or a {web}/{css} locator) to gesture on instead of a 3D canvas.",
+            "type": [
+              "string",
+              "object"
+            ]
+          },
+          "timeout_s": {
+            "description": "For a web page's element: seconds the page gets to answer (default 10).",
+            "maximum": 120,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "to": {
+            "description": "A canvas pixel [x, y] or a point of the model, as for at.",
+            "type": [
+              "array",
+              "object"
+            ]
+          },
+          "tolerance": {
+            "description": "Surface check distance in mm (default 1% of the part's size, at least 0.1).",
+            "minimum": 0,
+            "type": "number"
+          },
+          "x": {
+            "description": "Start x, instead of at.",
+            "type": "integer"
+          },
+          "y": {
+            "description": "Start y, instead of at.",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "ui_mouse",
+      "title": "Mouse gesture on the 3D view"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Use a file in the open gizmo"
+      },
+      "description": "Do what a file picker inside the open gizmo does, with a path instead of its dialog: svg_change loads another SVG file into the SVG part being edited, svg_save_as writes that part's SVG to a new file (an existing one only with overwrite), texture_import imports a height-map image into the texture library and puts it on Texture Displacement's active layer. To add an SVG part, use run_action add_primitive_svg with a path. Gizmos open with ui_click {target: {gizmo: name}}, and their panels take ui_input / ui_click on the ImGui items ui_snapshot lists.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "What to do.",
+            "enum": [
+              "svg_change",
+              "svg_save_as",
+              "texture_import"
+            ],
+            "type": "string"
+          },
+          "overwrite": {
+            "description": "svg_save_as: replace an existing file.",
+            "type": "boolean"
+          },
+          "path": {
+            "description": "Absolute path of the file to read or write.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "gizmo_file",
+      "title": "Use a file in the open gizmo"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Answer a dialog"
+      },
+      "description": "Press a button of the topmost modal dialog (or of the one whose title contains dialog.title, which must be the topmost): yes, no, ok, cancel, close, apply, a button's label, or a numeric id; closed: true says it closed, with the dialogs still open. A native message box (native: true) is pressed through the OS, by one of the buttons get_state.dialogs lists for it; a file or folder picker can't be answered here, nor any native dialog on macOS (its buttons list is empty): register dialog_auto_answer before opening them. A web dialog's buttons are on its page: a label is pressed there (waiting up to 3 s for it to show), so the page's own handler runs; with no such page button, or a page busy for those 3 s, cancel and close end the dialog, and ok, yes, no and apply are refused rather than skipping the page's commit (page_buttons lists what it has).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "button": {
+            "description": "Button to press.",
+            "type": "string"
+          },
+          "dialog": {
+            "additionalProperties": false,
+            "description": "Which dialog; default the topmost.",
+            "properties": {
+              "title": {
+                "description": "Text the dialog's title contains (case-insensitive).",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "button"
+        ],
+        "type": "object"
+      },
+      "name": "dialog_respond",
+      "title": "Answer a dialog"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Pre-answer dialogs"
+      },
+      "description": "Answer modal dialogs automatically, native ones included, when their title or message matches a rule's regex (case-insensitive): a native dialog returns that button at once and never shows; a wx dialog has the button pressed as dialog_respond does, so its handler runs. A matching dialog that is already open is answered too, as dialog_respond would (answered_open_dialog), so a prompt that appears around the same time (the restore prompt after startup) is handled either way. Native file pickers can only be cancelled. Called from a script, the rules last until the script ends; otherwise they replace the rules this session set before (an empty list clears them). A web dialog is matched by its title. A button that names one of its shown wx buttons (by label, standard name or id) is pressed as for any wx dialog; any other is pressed on its page once it shows there, for up to 10 s of its page being loaded; then cancel and close end it, any other button gives up.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "rules": {
+            "description": "Rules, first match wins.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "button": {
+                  "description": "yes | no | ok | cancel | close | apply | label | id",
+                  "type": "string"
+                },
+                "match": {
+                  "description": "Regex searched in \"title\\nmessage\", and also in the title alone for a dialog with no message (a web dialog), so ^Title$ matches it.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "match",
+                "button"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "rules"
+        ],
+        "type": "object"
+      },
+      "name": "dialog_auto_answer",
+      "title": "Pre-answer dialogs"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Run JavaScript in a web view"
+      },
+      "description": "Evaluate JavaScript in one of OrcaSlicer's web views (Home, the device page, dialogs, plugin windows) and return the value of its last expression (JSON values come back parsed). Prefer ui_snapshot and the ui_* tools, which see and drive pages as they do widgets. While a modal dialog is open, scripts run in the topmost dialog's page; without a target, the web view of the topmost dialog is used, else the only shown one. With a page element's ref as target, the script runs in its page with the element as `el`. closed: true says the script closed its dialog, navigated: true (with url) that it changed the page, dialogs that it opened another. Messages the page posts to OrcaSlicer reach it once the script has returned. Scripts run through eval, which a page whose Content-Security-Policy forbids it may refuse (the ui_* tools still work there). Waits up to timeout_s (default 10).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "script": {
+            "description": "JavaScript to run.",
+            "type": "string"
+          },
+          "target": {
+            "description": "A ref from the latest ui_snapshot (\"w12\") or a locator: {label, class, name, within, index} for widgets, {option:\"layer_height\"} for a setting field, {menu:\"File>Export>Export G-code\"}, {gltoolbar:\"arrange\"}, {gizmo:\"Move\"}, {imgui:\"label\", imgui_name?:\"name\", window?, canvas?, index?} for an ImGui item, by its label, its name or both, or {row:\"Plate 1>Cube>Cylinder\", column?, within?, index?} for a row of a list, tree, table or drop-down list, by its last labels and the column of the cell to act on, {plate_icon:\"lock\", plate:0} for a plate or its icon in the Prepare view: plate, delete, orient, arrange, lock, settings, name, move_to_front, filament_map, imex_mode, or {web:\"Next\", kind?:\"button\", css?:\"#AcceptBtn\", within?, index?} for an element of a web page, by the label ui_snapshot lists (exactly, else case aside, else a part of it), its kind there, a CSS selector, or together; within is the window's title as for widgets (without it, a modal dialog's page is searched while one is open, else every shown page). A web locator waits up to 3 s for its element to show.",
+            "type": [
+              "string",
+              "object"
+            ]
+          },
+          "timeout_s": {
+            "description": "Default 10.",
+            "maximum": 120,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "script"
+        ],
+        "type": "object"
+      },
+      "name": "webview_eval",
+      "title": "Run JavaScript in a web view"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Run a script"
+      },
+      "description": "Run a script of tool calls in order and report each step: {orca_script:1, name, vars, steps:[{tool, args, expect, optional, await, save_as, timeout_s}]}, JSON with comments. Strings may use ${script_dir}, ${out_dir}, ${env:NAME}, ${vars.NAME} and ${jobs.NAME}. A step that returns a job is awaited unless await:false, which stores the job under save_as so later steps can answer the dialog it opened. expect maps a JSON pointer into the step's result to matchers (eq ne gt ge lt le contains regex exists empty); the first failed step or expectation stops the run unless the step is optional. Writes result.json to out_dir (default: <script name>.out next to a script file). dialog_auto_answer rules a script registers end with it. export_script turns this session into a script.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "out_dir": {
+            "description": "Absolute directory for result.json and screenshots; created if missing.",
+            "type": "string"
+          },
+          "path": {
+            "description": "Absolute path of a script file.",
+            "type": "string"
+          },
+          "script": {
+            "description": "The script itself, instead of path.",
+            "type": "object"
+          },
+          "vars": {
+            "description": "Values that override the script's vars.",
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "name": "run_script",
+      "title": "Run a script"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Export this session as a script"
+      },
+      "description": "Turn the calls this session made into a script run_script can replay: mutating calls, wait and screenshot, in order, with refs replaced by locators, job replies replayed with await:false, and screenshot paths moved under ${out_dir}. Calls that failed, at once or as a job later, are left out; so is a call whose job is still running (unless it waits on a dialog), which left_out_running lists as {tool, job}. Returns the script; with path, also writes it. clear:true starts a new recording afterwards.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "clear": {
+            "description": "Forget the calls recorded so far once exported.",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "Script name.",
+            "type": "string"
+          },
+          "overwrite": {
+            "description": "Replace an existing file.",
+            "type": "boolean"
+          },
+          "path": {
+            "description": "Absolute .json path to write.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "export_script",
+      "title": "Export this session as a script"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Start a recording"
+      },
+      "description": "Record a video of OrcaSlicer until stop_recording: the main window with any modal dialog on it (target window), or the 3D view shown (canvas). Frames are MJPEG in a Matroska (.mkv) file with their real timestamps. With captions, the tool call acting on the app shows as a caption at the bottom (secret setting values never show); with pointer, the pointer is highlighted, its clicks rippling. Capture takes at most about a third of the UI thread, so the frame rate drops where capturing is slow. One recording at a time: one a script starts ends with the script, a client's when the server is turned off. With encode, the stop_recording that reports it also encodes it to an MP4 beside it, as the Start Recording command does; encode_recording makes an MP4 of any recording later.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "captions": {
+            "description": "Caption the tool call acting on the app (default false).",
+            "type": "boolean"
+          },
+          "codec": {
+            "description": "With encode: the codec (default the preset's).",
+            "enum": [
+              "h265",
+              "h264"
+            ],
+            "type": "string"
+          },
+          "crf": {
+            "description": "With encode: constant rate factor, lower is better and larger (default the preset's).",
+            "maximum": 51,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "encode": {
+            "description": "Encode it to an MP4 once stopped; needs an ffmpeg (default false).",
+            "type": "boolean"
+          },
+          "encode_preset": {
+            "description": "With encode: the settings the fields below change (default balanced: h265, crf 28, medium, main).",
+            "enum": [
+              "small",
+              "balanced",
+              "quality",
+              "compatible"
+            ],
+            "type": "string"
+          },
+          "fps": {
+            "description": "Frames per second at most (default 10).",
+            "maximum": 30,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_dim": {
+            "description": "Long edge of the video in pixels (default 1920).",
+            "maximum": 3840,
+            "minimum": 320,
+            "type": "integer"
+          },
+          "max_seconds": {
+            "description": "The recording ends on its own after this long (default 600).",
+            "maximum": 3600,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "overwrite": {
+            "description": "Replace an existing save_path, and with encode its MP4.",
+            "type": "boolean"
+          },
+          "pointer": {
+            "description": "Highlight the pointer and show its clicks (default false).",
+            "type": "boolean"
+          },
+          "profile": {
+            "description": "With encode: h264 high, main or baseline; h265 main or main10 (default the preset's, else the codec's first).",
+            "enum": [
+              "high",
+              "main",
+              "baseline",
+              "main10"
+            ],
+            "type": "string"
+          },
+          "quality": {
+            "description": "JPEG quality of the frames (default 80).",
+            "maximum": 95,
+            "minimum": 30,
+            "type": "integer"
+          },
+          "save_path": {
+            "description": "Absolute .mkv path; default the session's output folder.",
+            "type": "string"
+          },
+          "speed": {
+            "description": "With encode: slower makes a smaller file (default the preset's).",
+            "enum": [
+              "ultrafast",
+              "superfast",
+              "veryfast",
+              "faster",
+              "fast",
+              "medium",
+              "slow",
+              "slower",
+              "veryslow"
+            ],
+            "type": "string"
+          },
+          "target": {
+            "description": "window (default): the main window and its dialogs; canvas: the 3D view shown.",
+            "enum": [
+              "window",
+              "canvas"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "start_recording",
+      "title": "Start a recording"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Stop the recording"
+      },
+      "description": "Stop the running recording and return its file once it is written: seconds, frames captured and written, frames dropped when encoding fell behind, failed when they could not be encoded, or skipped when the window could not be captured, the size, the mean UI-thread time a capture took (capture_ms), and why it ended. A recording that ended on its own (max_seconds, its script ended, a write error) is reported once by the next stop_recording. For a recording started with encode, it then starts the MP4 encode and returns it under encode: a job, whose wait {for: \"job\"} returns encode_recording's result.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "stop_recording",
+      "title": "Stop the recording"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Encode a recording"
+      },
+      "description": "Encode a recording into an H.265 (or H.264) MP4 with the system ffmpeg (ORCA_FFMPEG, else ffmpeg on PATH; it needs libx265 or libx264), keeping its timing. Takes this session's last finished recording unless path names one, and writes beside it unless save_path says where. A long encode returns a job: wait for it, or cancel {job} stops it. delete_source removes the .mkv afterwards, only for a recording this session made.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "codec": {
+            "description": "Default h265.",
+            "enum": [
+              "h265",
+              "h264"
+            ],
+            "type": "string"
+          },
+          "crf": {
+            "description": "Constant rate factor, lower is better and larger (default 28 for h265, 23 for h264).",
+            "maximum": 51,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "delete_source": {
+            "description": "Delete the .mkv once encoded (a recording this session made).",
+            "type": "boolean"
+          },
+          "overwrite": {
+            "description": "Replace an existing save_path.",
+            "type": "boolean"
+          },
+          "path": {
+            "description": "Absolute .mkv of a finished recording; default this session's last.",
+            "type": "string"
+          },
+          "profile": {
+            "description": "h264: high, main or baseline; h265: main, or main10 for 10 bits per sample. Default the encoder's (high, main).",
+            "enum": [
+              "high",
+              "main",
+              "baseline",
+              "main10"
+            ],
+            "type": "string"
+          },
+          "save_path": {
+            "description": "Absolute .mp4 path; default the recording's, with .mp4.",
+            "type": "string"
+          },
+          "speed": {
+            "description": "The encoder's preset: slower makes a smaller file of the same quality (default medium).",
+            "enum": [
+              "ultrafast",
+              "superfast",
+              "veryfast",
+              "faster",
+              "fast",
+              "medium",
+              "slow",
+              "slower",
+              "veryslow"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "encode_recording",
+      "title": "Encode a recording"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Printers"
+      },
+      "description": "List, select, connect and refresh printers. action list (default): the user's printers plus LAN printers found on the network, each with name, model, connection (lan/cloud), online, selected, print state and whether an access code is stored (never the code). select: makes dev_id the selected printer (full AMS and nozzle state exist only for the selected printer) and waits until it reports its state. connect: gives a LAN printer its access code (dev_id and access_code) as the Input access code dialog does, then selects it; the code is never echoed or journaled. Adding a printer by IP address is not supported. refresh: asks the printer for a full status push; Orca rate-limits this to once per 3 seconds (a refused request is reported as rate_limited).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "access_code": {
+            "description": "LAN access code, for connect.",
+            "type": "string"
+          },
+          "action": {
+            "description": "What to do. Default list.",
+            "enum": [
+              "list",
+              "select",
+              "connect",
+              "refresh"
+            ],
+            "type": "string"
+          },
+          "dev_id": {
+            "description": "Printer id (dev_id from printer_list). Default: the selected printer. A printer that is not selected is selected first, as the Device tab does.",
+            "type": "string"
+          },
+          "dry_run": {
+            "description": "Build and return exactly what would be sent to the printer, and send nothing. Bambu Lab printers only.",
+            "type": "boolean"
+          },
+          "ip": {
+            "description": "Not supported: adding a printer by IP address.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "printer_list",
+      "title": "Printers"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Printer status"
+      },
+      "description": "Read-only live state of a printer (it never sends anything and never selects a printer; call printer_list refresh first for fresh data). Sections: print (state, stage, progress, remaining_min, layers, error, can_pause/resume/abort), temps (per extruder with side, bed, chamber), fans, lights, ams (units with type, extruder side, bound extruders, humidity, trays with tray_index as the print mapping uses it, colour, type, remain, k/n; external spools 254 left / 255 right; current tray), nozzles (diameter, flow type, material; H2C rack; filament switch), hms (codes, level, text), storage, capabilities, firmware. Sides are right (extruder 0) and left (extruder 1) on dual-nozzle printers, main otherwise. Full AMS and nozzle state exists only for the selected printer; for any other the reply says partial.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "dev_id": {
+            "description": "Printer id (dev_id from printer_list). Default: the selected printer. A printer that is not selected is selected first, as the Device tab does.",
+            "type": "string"
+          },
+          "sections": {
+            "description": "Sections to return; default all.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "name": "printer_status",
+      "title": "Printer status"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Control the print job"
+      },
+      "description": "Pause, resume or stop the running print, or skip objects in it. pause needs a RUNNING print, resume a PAUSE, stop any active print; the error names the printer's print_status when the action is not possible. Only stop and skip_objects are destructive (they cannot be undone). skip_objects takes object_ids as the printer lists them in its Skip objects dialog (the ids printer_status shows as skipped_object_ids are already skipped). Resume uses the same command as the Device tab; a laser job that can only be resumed on the printer is refused. The reply is sent: true with no acknowledgement; re-read printer_status. dry_run returns the payload instead of sending.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "What to do.",
+            "enum": [
+              "pause",
+              "resume",
+              "stop",
+              "skip_objects"
+            ],
+            "type": "string"
+          },
+          "dev_id": {
+            "description": "Printer id (dev_id from printer_list). Default: the selected printer. A printer that is not selected is selected first, as the Device tab does.",
+            "type": "string"
+          },
+          "dry_run": {
+            "description": "Build and return exactly what would be sent to the printer, and send nothing. Bambu Lab printers only.",
+            "type": "boolean"
+          },
+          "object_ids": {
+            "description": "skip_objects: ids of the objects to skip, as the printer knows them.",
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "name": "printer_job",
+      "title": "Control the print job"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Printer errors (HMS)"
+      },
+      "description": "Printer errors and warnings. list: the active HMS items (code, level, text) and the current print error. The other actions answer the error dialog the printer raised, for the printer's current print error, with the same commands the dialog buttons send: resume (continue the print), ignore (ignore the error and continue; no_reminder: the idle \"don't remind me next time\" variant), stop (stop the print), clear (dismiss the error), stop_buzzer (silence the fire alarm buzzer). They fail when no print error is active. Sends no acknowledgement; re-read printer_status. dry_run returns the payload(s) instead of sending. Only stop is destructive.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "What to do. Default list.",
+            "enum": [
+              "list",
+              "resume",
+              "ignore",
+              "stop",
+              "clear",
+              "stop_buzzer"
+            ],
+            "type": "string"
+          },
+          "dev_id": {
+            "description": "Printer id (dev_id from printer_list). Default: the selected printer. A printer that is not selected is selected first, as the Device tab does.",
+            "type": "string"
+          },
+          "dry_run": {
+            "description": "Build and return exactly what would be sent to the printer, and send nothing. Bambu Lab printers only.",
+            "type": "boolean"
+          },
+          "no_reminder": {
+            "description": "ignore: use the idle \"don't remind me next time\" command.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "name": "printer_hms",
+      "title": "Printer errors (HMS)"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Printer account"
+      },
+      "description": "Read-only: whether the user is logged in to the printer cloud, the user name, the active printer agent, how many bound and LAN printers are known. Whether LAN discovery is running is not exposed by Orca.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "printer_account",
+      "title": "Printer account"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Sync printer information"
+      },
+      "description": "Bring the project in line with a printer, as the sidebar's \"Sync printer information\" and \"Sync AMS\" do. Step 1 (include_nozzles, default true): per extruder nozzle diameter (switching the printer preset to the one for that diameter) and flow type, the number of AMS units per extruder, and the filament switch flags. Step 2: the project's filaments take the presets, colours and types of the printer's AMS trays and external spools (mode \"override\": the filaments are replaced by the trays in order; color_only keeps the presets and only copies colours). The printer is selected first and its state awaited. dry_run returns the planned changes ({nozzles, ams_counts, filaments}) and changes nothing; the AMS part lists which preset each tray selects (unknown filaments fall back to a generic preset, decided when the sync runs). Printers that hold several nozzles per extruder (hotend rack) are refused in step 1: their nozzle picker is a dialog. May raise the dialogs of the GUI (unsaved preset changes).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "color_only": {
+            "description": "Only copy tray colours into the project; keep its filament presets (default false).",
+            "type": "boolean"
+          },
+          "dev_id": {
+            "description": "Printer id (dev_id from printer_list). Default: the selected printer. A printer that is not selected is selected first, as the Device tab does.",
+            "type": "string"
+          },
+          "dry_run": {
+            "description": "Build and return exactly what would be sent to the printer, and send nothing. Bambu Lab printers only.",
+            "type": "boolean"
+          },
+          "include_nozzles": {
+            "description": "Also sync nozzle diameters, flow types and AMS counts (default true).",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "name": "filament_sync",
+      "title": "Sync printer information"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Plan a print"
+      },
+      "description": "Show what the Print dialog would do for a sliced plate on the selected printer, without sending anything: the automatic filament to AMS tray / external spool mapping exactly as the dialog computes it (single nozzle, dual nozzle with each filament limited to its own side's AMS, external spools only where a side has no AMS, filament switch), your overrides validated by the dialog's rules, the encodings the job carries (ams_mapping: tray index per project slot with -1 for unused or external; ams_mapping2: {ams_id, slot_id}, external 254 left / 255 right, unused 255/255; ams_mapping_info; nozzles_info for two nozzles), the blocking errors (the dialog's checks, with stable ids and its wording) and the warnings, needs_confirmation for those the dialog confirms in a popup before sending, and sendable. plate is the 0-based plate index as slice and list_plates number them (default: the current plate); the plate must be sliced. dev_id must be the selected printer (printer_list select); this call selects nothing. On a hotend-rack printer the nozzle mapping needs a round trip to the printer, which printer_print performs.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "dev_id": {
+            "description": "Printer id (dev_id from printer_list). Default: the selected printer. A printer that is not selected is selected first, as the Device tab does.",
+            "type": "string"
+          },
+          "options": {
+            "additionalProperties": false,
+            "description": "Print options. What is left out comes from the app config for this printer model, as in the Print dialog.",
+            "properties": {
+              "acknowledge_nozzle_diameter_mismatch": {
+                "description": "Print although the installed nozzle diameter differs from the slicing file (the dialog's acknowledgement checkbox).",
+                "type": "boolean"
+              },
+              "bed_leveling": {
+                "enum": [
+                  "off",
+                  "on",
+                  "auto"
+                ],
+                "type": "string"
+              },
+              "ext_change_assist": {
+                "type": "boolean"
+              },
+              "flow_cali": {
+                "description": "Flow dynamics calibration.",
+                "enum": [
+                  "off",
+                  "on",
+                  "auto"
+                ],
+                "type": "string"
+              },
+              "nozzle_offset_cali": {
+                "enum": [
+                  "off",
+                  "on",
+                  "auto"
+                ],
+                "type": "string"
+              },
+              "pa_value": {
+                "description": "Shared PA profile (printers with pa_mode).",
+                "enum": [
+                  "off",
+                  "on"
+                ],
+                "type": "string"
+              },
+              "timelapse": {
+                "type": "boolean"
+              },
+              "timelapse_storage": {
+                "enum": [
+                  "internal",
+                  "external"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "overrides": {
+            "description": "Manual tray choices that replace the automatic mapping of single filaments, checked by the Print dialog's rules: same filament type, tray not empty, tray on the side of the filament's nozzle, no external spool with a filament switch.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "ams_id": {
+                  "description": "AMS unit id of the tray (\"0\", \"128\" for an AMS-HT...).",
+                  "type": [
+                    "string",
+                    "integer"
+                  ]
+                },
+                "external": {
+                  "description": "Use the external spool of that nozzle instead of an AMS tray.",
+                  "enum": [
+                    "left",
+                    "right",
+                    "main"
+                  ],
+                  "type": "string"
+                },
+                "filament": {
+                  "description": "1-based project filament slot (as print_plan lists it).",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "slot_id": {
+                  "description": "Slot of the tray within its AMS unit.",
+                  "type": [
+                    "string",
+                    "integer"
+                  ]
+                }
+              },
+              "required": [
+                "filament"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "plate": {
+            "description": "0-based plate index; default the current plate.",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "print_plan",
+      "title": "Plan a print"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Print on a printer"
+      },
+      "description": "Send a sliced plate to a printer and start the print, as the Print dialog's Send does. Runs the same plan as print_plan (same arguments: plate, overrides, options) and refuses with the blocking errors in details when it is not sendable; warnings the dialog confirms in a popup (plan needs_confirmation) refuse the call unless confirm_warnings is true. The plate is selected, its sliced 3mf (and for cloud printers its config 3mf) exported like Plater::send_gcode, and the job runs on a worker: on a hotend-rack printer the printer is first asked for a fresh nozzle mapping (up to 10 s). With the timelapse option on, the printer's storage is checked first as the dialog does; when it is low the call refuses until confirm_timelapse_storage is true (the oldest timelapse videos are then deleted), or options.timelapse is false. dry_run builds the plan and the PrintParams the job would send (secrets redacted) and sends nothing: no file is exported, no job is created and the current plate stays. A dry run returns {sendable, errors, warnings, plan, print_params, files} even when the plan is blocked; a real run refuses. Real runs return {started, message}; the Monitor tab is shown afterwards as in the dialog. plate is the 0-based plate index. A LAN printer that rejects the access code or address fails the call instead of opening the dialog's address prompt.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "confirm_timelapse_storage": {
+            "description": "Allow deleting the oldest timelapse videos when the timelapse storage is low.",
+            "type": "boolean"
+          },
+          "confirm_warnings": {
+            "description": "Proceed although the plan has warnings the dialog asks to confirm.",
+            "type": "boolean"
+          },
+          "dev_id": {
+            "description": "Printer id (dev_id from printer_list). Default: the selected printer. A printer that is not selected is selected first, as the Device tab does.",
+            "type": "string"
+          },
+          "dry_run": {
+            "description": "Build and return exactly what would be sent to the printer, and send nothing. Bambu Lab printers only.",
+            "type": "boolean"
+          },
+          "options": {
+            "additionalProperties": false,
+            "description": "Print options. What is left out comes from the app config for this printer model, as in the Print dialog.",
+            "properties": {
+              "acknowledge_nozzle_diameter_mismatch": {
+                "description": "Print although the installed nozzle diameter differs from the slicing file (the dialog's acknowledgement checkbox).",
+                "type": "boolean"
+              },
+              "bed_leveling": {
+                "enum": [
+                  "off",
+                  "on",
+                  "auto"
+                ],
+                "type": "string"
+              },
+              "ext_change_assist": {
+                "type": "boolean"
+              },
+              "flow_cali": {
+                "description": "Flow dynamics calibration.",
+                "enum": [
+                  "off",
+                  "on",
+                  "auto"
+                ],
+                "type": "string"
+              },
+              "nozzle_offset_cali": {
+                "enum": [
+                  "off",
+                  "on",
+                  "auto"
+                ],
+                "type": "string"
+              },
+              "pa_value": {
+                "description": "Shared PA profile (printers with pa_mode).",
+                "enum": [
+                  "off",
+                  "on"
+                ],
+                "type": "string"
+              },
+              "timelapse": {
+                "type": "boolean"
+              },
+              "timelapse_storage": {
+                "enum": [
+                  "internal",
+                  "external"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "overrides": {
+            "description": "Manual tray choices that replace the automatic mapping of single filaments, checked by the Print dialog's rules: same filament type, tray not empty, tray on the side of the filament's nozzle, no external spool with a filament switch.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "ams_id": {
+                  "description": "AMS unit id of the tray (\"0\", \"128\" for an AMS-HT...).",
+                  "type": [
+                    "string",
+                    "integer"
+                  ]
+                },
+                "external": {
+                  "description": "Use the external spool of that nozzle instead of an AMS tray.",
+                  "enum": [
+                    "left",
+                    "right",
+                    "main"
+                  ],
+                  "type": "string"
+                },
+                "filament": {
+                  "description": "1-based project filament slot (as print_plan lists it).",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "slot_id": {
+                  "description": "Slot of the tray within its AMS unit.",
+                  "type": [
+                    "string",
+                    "integer"
+                  ]
+                }
+              },
+              "required": [
+                "filament"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "plate": {
+            "description": "0-based plate index; default the current plate.",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "printer_print",
+      "title": "Print on a printer"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Control the printer"
+      },
+      "description": "Heat, fans, speed, light and motion on the selected (or dev_id) Bambu printer, as the Device tab does. Actions: set_temp {target: nozzle|bed|chamber, value C (0 = off), extruder? (0 right/main, 1 left)}; set_fan {fan: part|aux|chamber, percent 0-100, in steps of 10}; set_speed {level: silent|standard|sport|ludicrous or 1-4} (printing only); light {on, light?: chamber|toolhead_logo}; home; jog {axis: X|Y|Z|E, distance mm +-100, speed? mm/min} (positive X is right, Y back, Z moves the bed down, E extrudes; some printers move in exact steps of 1 or 10 mm only); extrude {length mm, negative retracts; nozzle at least 170 C}; select_extruder {extruder 0|1} (dual-nozzle printers). Temperatures, fans, speed and the light work during a print; home, jog, extrude and select_extruder are refused while printing. Nothing acknowledges: re-read printer_status. dry_run returns the exact messages without sending. A printer error reply may open a dialog.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "What to do.",
+            "enum": [
+              "set_temp",
+              "set_fan",
+              "set_speed",
+              "light",
+              "home",
+              "jog",
+              "extrude",
+              "select_extruder"
+            ],
+            "type": "string"
+          },
+          "axis": {
+            "description": "jog: axis.",
+            "enum": [
+              "X",
+              "Y",
+              "Z",
+              "E"
+            ],
+            "type": "string"
+          },
+          "dev_id": {
+            "description": "Printer id (dev_id from printer_list). Default: the selected printer. A printer that is not selected is selected first, as the Device tab does.",
+            "type": "string"
+          },
+          "distance": {
+            "description": "jog: mm, signed, at most 100.",
+            "type": "number"
+          },
+          "dry_run": {
+            "description": "Build and return exactly what would be sent to the printer, and send nothing. Bambu Lab printers only.",
+            "type": "boolean"
+          },
+          "extruder": {
+            "description": "set_temp / extrude / select_extruder: extruder index (0 right/main, 1 left).",
+            "type": "integer"
+          },
+          "fan": {
+            "description": "set_fan: which fan.",
+            "enum": [
+              "part",
+              "aux",
+              "chamber"
+            ],
+            "type": "string"
+          },
+          "length": {
+            "description": "extrude: mm, negative retracts.",
+            "type": "number"
+          },
+          "level": {
+            "description": "set_speed: silent|standard|sport|ludicrous or 1-4.",
+            "type": [
+              "string",
+              "integer"
+            ]
+          },
+          "light": {
+            "description": "light: which light. Default chamber. toolhead_logo is the lit logo on the toolhead (M960 S5); a new print turns it back on.",
+            "enum": [
+              "chamber",
+              "toolhead_logo"
+            ],
+            "type": "string"
+          },
+          "on": {
+            "description": "light: on or off.",
+            "type": "boolean"
+          },
+          "percent": {
+            "description": "set_fan: 0-100.",
+            "type": "integer"
+          },
+          "speed": {
+            "description": "jog / extrude: mm/min (defaults 3000 for X/Y, 900 otherwise).",
+            "type": "integer"
+          },
+          "target": {
+            "description": "set_temp: what to heat.",
+            "enum": [
+              "nozzle",
+              "bed",
+              "chamber"
+            ],
+            "type": "string"
+          },
+          "value": {
+            "description": "set_temp: target in C.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "name": "printer_control",
+      "title": "Control the printer"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Manage the AMS"
+      },
+      "description": "AMS and external spool management on the selected (or dev_id) Bambu printer. ams_id is the AMS unit (0-3; AMS-HT 128+) or 254/255 for the left/right external spool (slot_id 0). Actions: set_tray {ams_id, slot_id, filament_preset (name) or tray_info_idx, color #RRGGBB[AA], nozzle_temp_min/max (default from the preset), colors?[]} (not for Bambu RFID spools); reset_tray {ams_id, slot_id}; set_k {ams_id, slot_id, cali_idx (printers with K profiles; -1 = default) or k}; refresh_rfid {ams_id, slot_id}; settings {insert_read?, startup_read?, remain_detect?, auto_refill?, air_print_detect?}; load {ams_id, slot_id (or tray_index), extruder? (Filament Track Switch only)}; unload {extruder?}; dry_start {ams_id, hours 1-24, temperature C, filament_type?, rotate_tray?}; dry_stop {ams_id}; control {cmd: resume|reset|pause|done|abort}; calibrate {ams_id}; reset {confirm: true} (resets every AMS id). load, unload, calibrate, reset and refresh_rfid are refused while printing. Read the state with printer_status. dry_run returns the exact messages without sending.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "What to do.",
+            "enum": [
+              "set_tray",
+              "reset_tray",
+              "set_k",
+              "refresh_rfid",
+              "settings",
+              "load",
+              "unload",
+              "dry_start",
+              "dry_stop",
+              "control",
+              "calibrate",
+              "reset"
+            ],
+            "type": "string"
+          },
+          "air_print_detect": {
+            "description": "settings: air-printing detection.",
+            "type": "boolean"
+          },
+          "ams_id": {
+            "description": "AMS unit id, or 254/255 for an external spool.",
+            "type": "integer"
+          },
+          "auto_refill": {
+            "description": "settings: switch to a backup spool.",
+            "type": "boolean"
+          },
+          "cali_idx": {
+            "description": "set_k: K profile index.",
+            "type": "integer"
+          },
+          "cmd": {
+            "description": "control: AMS command.",
+            "enum": [
+              "resume",
+              "reset",
+              "pause",
+              "done",
+              "abort"
+            ],
+            "type": "string"
+          },
+          "color": {
+            "description": "set_tray: #RRGGBB or #RRGGBBAA.",
+            "type": "string"
+          },
+          "color_type": {
+            "description": "set_tray: 0 or 1 for several colours.",
+            "type": "integer"
+          },
+          "colors": {
+            "description": "set_tray: up to 4 colours for a multi-colour spool (supporting firmware).",
+            "items": {
+              "description": "colour",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "confirm": {
+            "description": "reset: confirm.",
+            "type": "boolean"
+          },
+          "cooling_temp": {
+            "description": "dry_start: C, default 50.",
+            "type": "integer"
+          },
+          "dev_id": {
+            "description": "Printer id (dev_id from printer_list). Default: the selected printer. A printer that is not selected is selected first, as the Device tab does.",
+            "type": "string"
+          },
+          "dry_run": {
+            "description": "Build and return exactly what would be sent to the printer, and send nothing. Bambu Lab printers only.",
+            "type": "boolean"
+          },
+          "extruder": {
+            "description": "load / unload: extruder 0 right/main, 1 left.",
+            "type": "integer"
+          },
+          "filament_id": {
+            "description": "set_k: profile's filament id (default the slot's).",
+            "type": "string"
+          },
+          "filament_preset": {
+            "description": "set_tray: filament preset name.",
+            "type": "string"
+          },
+          "filament_type": {
+            "description": "dry_start: filament type (default the first loaded spool's).",
+            "type": "string"
+          },
+          "hours": {
+            "description": "dry_start: 1-24.",
+            "type": "integer"
+          },
+          "insert_read": {
+            "description": "settings: read spool on insert.",
+            "type": "boolean"
+          },
+          "k": {
+            "description": "set_k: K value for printers without profiles.",
+            "type": "number"
+          },
+          "n": {
+            "description": "set_k: N value (old protocol).",
+            "type": "number"
+          },
+          "nozzle_temp_max": {
+            "description": "set_tray: C.",
+            "type": "integer"
+          },
+          "nozzle_temp_min": {
+            "description": "set_tray: C.",
+            "type": "integer"
+          },
+          "override_print_lock": {
+            "description": "set_tray / reset_tray: send during a print even though the printer does not advertise in-print slot edits (experimental).",
+            "type": "boolean"
+          },
+          "remain_detect": {
+            "description": "settings: detect remaining filament.",
+            "type": "boolean"
+          },
+          "rotate_tray": {
+            "description": "dry_start: rotate the spools.",
+            "type": "boolean"
+          },
+          "setting_id": {
+            "description": "set_tray: filament setting id (default from the preset).",
+            "type": "string"
+          },
+          "slot_id": {
+            "description": "Slot 0-3.",
+            "type": "integer"
+          },
+          "startup_read": {
+            "description": "settings: read spools at power up.",
+            "type": "boolean"
+          },
+          "temperature": {
+            "description": "dry_start: C (AMS 2: 45-65, AMS-S: 45-85).",
+            "type": "integer"
+          },
+          "tray_index": {
+            "description": "load: tray 0-15 as ams_id * 4 + slot_id (instead of ams_id and slot_id).",
+            "type": "integer"
+          },
+          "tray_info_idx": {
+            "description": "set_tray: Bambu filament id (instead of filament_preset).",
+            "type": "string"
+          },
+          "tray_type": {
+            "description": "set_tray: filament type such as PLA (default from the preset).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "name": "printer_ams",
+      "title": "Manage the AMS"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Printer options"
+      },
+      "description": "Printer print options. action \"get\" lists every option with whether this printer supports it and its value (AI detections with sensitivity, first layer inspection, build plate detection, auto recovery, prompt sound, filament tangle, save print files to storage, snapshots, purify air, nozzle clumping, camera recording, timelapse, camera resolution). action \"set\" {option, value (boolean; off|on|auto for smart_nozzle_blob_detection; off|inside|outside for purify_air_at_print_end; \"720p\"/\"1080p\" for camera_resolution), sensitivity? low|medium|high for the AI detections, confirm? for snapshot and blob detection prompts} refuses options the printer does not support. dry_run returns the exact messages without sending.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "What to do.",
+            "enum": [
+              "get",
+              "set"
+            ],
+            "type": "string"
+          },
+          "confirm": {
+            "description": "set: confirm snapshot / blob detection prompts.",
+            "type": "boolean"
+          },
+          "dev_id": {
+            "description": "Printer id (dev_id from printer_list). Default: the selected printer. A printer that is not selected is selected first, as the Device tab does.",
+            "type": "string"
+          },
+          "dry_run": {
+            "description": "Build and return exactly what would be sent to the printer, and send nothing. Bambu Lab printers only.",
+            "type": "boolean"
+          },
+          "option": {
+            "description": "set: option name from get.",
+            "type": "string"
+          },
+          "sensitivity": {
+            "description": "set: AI detection sensitivity.",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "type": "string"
+          },
+          "value": {
+            "description": "set: the new value.",
+            "type": [
+              "boolean",
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "name": "printer_options",
+      "title": "Printer options"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Printer calibration data"
+      },
+      "description": "Pressure advance (K) profiles and calibration results stored on the printer. Actions: pa_list {nozzle_diameter?, filament_id?, extruder?} lists the stored profiles [{cali_idx, name, filament_id, k_value, ...}] (waits up to 10 s for the reply); pa_set {entries: [{name, filament_id, setting_id?, k, nozzle_diameter?, extruder?, nozzle_volume_type?, cali_idx? (-1 adds)}], overwrite?} adds or edits profiles; pa_select {ams_id, slot_id, cali_idx} assigns a profile to a slot; pa_delete {cali_idx, filament_id, nozzle_diameter?, extruder?} deletes one (destructive); auto_pa_result and flow_result {nozzle_diameter?} fetch the last automatic calibration's results. Starting a calibration (it prints a test) is not available. dry_run returns the exact messages without sending.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "What to do.",
+            "enum": [
+              "pa_list",
+              "pa_set",
+              "pa_select",
+              "pa_delete",
+              "auto_pa_result",
+              "flow_result"
+            ],
+            "type": "string"
+          },
+          "ams_id": {
+            "description": "pa_select: AMS unit id.",
+            "type": "integer"
+          },
+          "cali_idx": {
+            "description": "pa_select / pa_delete: profile index.",
+            "type": "integer"
+          },
+          "dev_id": {
+            "description": "Printer id (dev_id from printer_list). Default: the selected printer. A printer that is not selected is selected first, as the Device tab does.",
+            "type": "string"
+          },
+          "dry_run": {
+            "description": "Build and return exactly what would be sent to the printer, and send nothing. Bambu Lab printers only.",
+            "type": "boolean"
+          },
+          "entries": {
+            "description": "pa_set: profiles to write.",
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "extruder": {
+            "description": "Extruder index.",
+            "type": "integer"
+          },
+          "filament_id": {
+            "description": "Filament id.",
+            "type": "string"
+          },
+          "nozzle_diameter": {
+            "description": "mm; default the printer's nozzle.",
+            "type": "number"
+          },
+          "nozzle_volume_type": {
+            "description": "Nozzle flow type, default standard.",
+            "enum": [
+              "standard",
+              "high_flow",
+              "hybrid",
+              "tpu_high_flow",
+              "e3d_high_flow"
+            ],
+            "type": "string"
+          },
+          "overwrite": {
+            "description": "pa_set: replace a same-named profile.",
+            "type": "boolean"
+          },
+          "slot_id": {
+            "description": "pa_select: slot.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "name": "printer_calibration",
+      "title": "Printer calibration data"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Printer camera"
+      },
+      "description": "One current frame from the printer's camera, returned as an image (action \"snapshot\"). It connects to the printer over the LAN (the same tunnel the Device tab's live view uses), so the printer needs its IP and access code (printer_list) and LAN live view on; cloud-only access is not supported. A printer that is not the selected one is selected first. The printer serves few viewers at once: close the Device tab's live view if it is refused as busy. format jpeg (default) or png, scaled down to max_width (default 1280); save_path writes the image to an absolute path (overwrite replaces). The camera address and access code are never returned.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "snapshot: one frame.",
+            "enum": [
+              "snapshot"
+            ],
+            "type": "string"
+          },
+          "dev_id": {
+            "description": "Printer id (dev_id from printer_list). Default: the selected printer. A printer that is not selected is selected first, as the Device tab does.",
+            "type": "string"
+          },
+          "format": {
+            "description": "Image format (default jpeg).",
+            "enum": [
+              "jpeg",
+              "png"
+            ],
+            "type": "string"
+          },
+          "max_width": {
+            "description": "Widest the image may be (default 1280).",
+            "maximum": 4096,
+            "minimum": 64,
+            "type": "integer"
+          },
+          "overwrite": {
+            "description": "Replace an existing save_path.",
+            "type": "boolean"
+          },
+          "save_path": {
+            "description": "Absolute path to also write the image to.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "name": "printer_camera",
+      "title": "Printer camera"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Printer files"
+      },
+      "description": "Browse and fetch files on the printer's storage over the LAN (the tunnel the Device tab's file browser uses). action list: files with name, path (the id for the other actions), size, time, paged with limit/offset. thumbnail: the file's preview image. download: saves the file to dest_dir (an existing absolute folder; overwrite replaces; large files take minutes). delete: removes the file from the printer (destructive; dry_run reports what would be deleted and removes nothing; the printer is asked for its list again to confirm). storage: \"sd\" (default when a card is inserted) or \"internal\" (models only); type: model (default), timelapse or video. A printer that is not the selected one is selected first. Needs the printer's IP and access code. Access codes and tunnel URLs are never returned.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "What to do.",
+            "enum": [
+              "list",
+              "thumbnail",
+              "download",
+              "delete"
+            ],
+            "type": "string"
+          },
+          "dest_dir": {
+            "description": "Download: absolute path of an existing folder.",
+            "type": "string"
+          },
+          "dev_id": {
+            "description": "Printer id (dev_id from printer_list). Default: the selected printer. A printer that is not selected is selected first, as the Device tab does.",
+            "type": "string"
+          },
+          "dry_run": {
+            "description": "Build and return exactly what would be sent to the printer, and send nothing. Bambu Lab printers only.",
+            "type": "boolean"
+          },
+          "limit": {
+            "description": "List: page size (default 100).",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "description": "List: first entry.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "overwrite": {
+            "description": "Download: replace an existing local file.",
+            "type": "boolean"
+          },
+          "path": {
+            "description": "The file's path (or name) from list; for thumbnail, download and delete.",
+            "type": "string"
+          },
+          "storage": {
+            "description": "sd, internal, or a storage name the printer reports.",
+            "type": "string"
+          },
+          "type": {
+            "description": "Kind of file (default model).",
+            "enum": [
+              "model",
+              "timelapse",
+              "video"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "name": "printer_files",
+      "title": "Printer files"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Use the Design tab"
+      },
+      "description": "Call a method of the Design (CAD) tab's control surface. Method \"describe_tools\" lists the methods and their params; narrow it with params {\"method\": name or [names]} or {\"query\": text}. Typical calls: describe_scene, describe_feature / set_feature (read and edit a feature as its card does), sketch_begin / sketch_add (entities, polygon, slot, ellipse, spline) / sketch_commit then extrude or revolve {sketch}; in the sketch, sketch_fillet, sketch_trim, sketch_transform (move, rotate, array) and sketch_constrain / sketch_constraints; hole, thread, sweep (along a sketch or helix), loft, split {plane}, fillet, boolean, plane (datum), query_topology (face kinds, adjacency, filters), measure (min_distance), commit (Commit to Plate), undo / redo (the Design history; run_action undo is Prepare's). A method that fails is an error and leaves the design as it was; the older ones in describe_tools' legacy_ok_false answer ok false instead. thread, sweep and loft can take seconds, and their reply may be a job. Pass the \"generation\" from describe_scene or query_topology with face and edge ids so ids read before the model changed are refused. Needs the CAD feature enabled in Preferences (it takes effect after a restart).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "method": {
+            "description": "Method name.",
+            "type": "string"
+          },
+          "params": {
+            "description": "Its parameters.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "method"
+        ],
+        "type": "object"
+      },
+      "name": "cad_call",
+      "title": "Use the Design tab"
+    }
+  ],
+  "version": "02.08.01.55"
+}

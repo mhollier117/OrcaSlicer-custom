@@ -21,6 +21,7 @@ struct HttpRequestView
     std::string content_type;
     std::string authorization;
     std::size_t body_size = 0;
+    std::string incarnation; // Mcp-Orca-Incarnation: the window the client means to talk to
 };
 
 // Status 0 accepts the request; anything else is the HTTP status to reply with.
@@ -32,8 +33,10 @@ struct HttpCheck
 
 // Endpoint rules applied before any JSON is parsed: only POST /mcp, Host must name this loopback
 // port (DNS rebinding), a browser Origin must be loopback, the body must be JSON, and the bearer
-// token must match.
-HttpCheck validate_request(const HttpRequestView& request, uint16_t port, const std::string& token, std::size_t max_body);
+// token must match. A request that names an incarnation other than `incarnation` was addressed to
+// another run of a window (409); one that names none is unaffected.
+HttpCheck validate_request(const HttpRequestView& request, uint16_t port, const std::string& token, std::size_t max_body,
+                           const std::string& incarnation = {});
 
 struct HttpLimits
 {
@@ -60,8 +63,16 @@ public:
     McpHttpServer(const McpHttpServer&)            = delete;
     McpHttpServer& operator=(const McpHttpServer&) = delete;
 
+    // A header sent on every reply. Before start().
+    void set_reply_header(std::string name, std::string value);
+    // This window's incarnation: sent as Mcp-Orca-Incarnation on every reply, and requests that carry
+    // that header with another value are refused with 409. Before start().
+    void set_incarnation(std::string incarnation);
+
     // Binds 127.0.0.1:port (0 picks a free port) and starts serving.
     bool start(uint16_t port, std::string& error);
+    // Whether the last start() failed because the address was already in use.
+    bool last_start_address_in_use() const;
     // Stops accepting, waits (up to stop_timeout) for running handlers, then closes every connection.
     // The owner makes handlers return first (see UiInvoker::shutdown); a handler that still has not
     // returned keeps the server's internals alive until it does, and its reply is dropped.

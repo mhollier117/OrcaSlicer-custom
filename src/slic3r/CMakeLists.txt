@@ -174,8 +174,12 @@ set(SLIC3R_GUI_SOURCES
     GUI/Mcp/McpServicePtr.hpp
     GUI/Mcp/McpSetup.cpp
     GUI/Mcp/McpSetup.hpp
+    GUI/Mcp/McpBridge.cpp
+    GUI/Mcp/McpBridge.hpp
     GUI/Mcp/McpStdioBridge.cpp
     GUI/Mcp/McpStdioBridge.hpp
+    GUI/Mcp/McpInstances.cpp
+    GUI/Mcp/McpInstances.hpp
     GUI/Mcp/McpToken.cpp
     GUI/Mcp/McpToken.hpp
     GUI/Mcp/McpTools.hpp

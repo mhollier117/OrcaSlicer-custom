@@ -3,6 +3,7 @@
 #include "McpService.hpp"
 
 #include "McpHttpServer.hpp"
+#include "McpInstances.hpp"
 #include "McpProtocol.hpp"
 #include "McpRecorder.hpp"
 #include "McpServicePtr.hpp"
@@ -50,6 +51,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <ctime>
 #include <set>
 #include <string>
 #include <thread>
@@ -59,8 +61,12 @@
 #ifdef _WIN32
 #include <process.h>
 #define getpid _getpid
+#include <windows.h>
 #else
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 #endif
 
 namespace Slic3r { namespace GUI { namespace Mcp {
@@ -162,6 +168,24 @@ const char* kInstructions =
     "the system ffmpeg as a job to wait for, and encode_recording encodes any recording later.\n"
     "- export_script saves this session's calls as a replayable script; run_script replays one.";
 
+// This executable's path, UTF-8.
+std::string current_exe_utf8()
+{
+#ifdef _WIN32
+    wchar_t exe[MAX_PATH] = {0};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    return path_to_utf8(fs::path(exe));
+#elif defined(__APPLE__)
+    char     exe[4096] = {0};
+    uint32_t size      = sizeof(exe);
+    return _NSGetExecutablePath(exe, &size) == 0 ? std::string(exe) : std::string();
+#else
+    char    exe[4096] = {0};
+    ssize_t n         = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    return n > 0 ? std::string(exe, std::size_t(n)) : std::string();
+#endif
+}
+
 } // namespace
 
 void McpServiceDeleter::operator()(McpService* service) const
@@ -178,6 +202,22 @@ McpService::McpService() = default;
 // Reached only through McpServiceDeleter, after stop() joined the script thread and drain() saw
 // every thread leave.
 McpService::~McpService() = default;
+
+json McpService::catalog_json()
+{
+    // Registration only adds tool definitions; their handlers, which are what reach the app, never run.
+    // The deleter's stop() and drain() return at once for a service that never started.
+    McpServicePtr service(new McpService);
+    service->register_tools();
+    std::string features;
+#ifdef SLIC3R_CAD
+    features = "cad";
+#endif
+    return {{"version", SLIC3R_VERSION},
+            {"features", features},
+            {"instructions", kInstructions},
+            {"tools", tools_list_json(service->m_registry)}};
+}
 
 int McpService::script_exit_code() { return g_script_exit_code.load(); }
 
@@ -263,6 +303,8 @@ bool McpService::start(const McpLaunchOptions& options, bool serve, std::string&
         m_gate     = std::make_shared<RequestGate>();
         m_gate->protocol = m_protocol.get();
     }
+    if (m_incarnation.empty())
+        m_incarnation = new_incarnation();
     m_http = std::make_unique<McpHttpServer>(token, [gate = m_gate](const PostRequest& r) -> PostReply {
         McpProtocol* protocol = nullptr;
         {
@@ -286,27 +328,44 @@ bool McpService::start(const McpLaunchOptions& options, bool serve, std::string&
         } leave{*gate};
         return protocol->handle_post(r);
     });
+    m_http->set_incarnation(m_incarnation);
+    m_configured_port = port;
+    m_ephemeral       = false;
     if (!m_http->start(uint16_t(port), err)) {
-        err = "MCP server: cannot listen on 127.0.0.1:" + std::to_string(port) + " (" + err + ")";
-        m_http.reset();
-        // Expected with several windows on one configuration folder, and retried until that window
-        // closes, so logged once rather than as an error.
+        const bool in_use      = m_http->last_start_address_in_use();
         const bool held_before = m_port_held_by_other;
         m_port_held_by_other   = discovery_held_by_other(path_from_utf8(data_dir()), port);
-        if (!m_port_held_by_other)
-            BOOST_LOG_TRIVIAL(error) << err;
-        else if (!held_before)
-            BOOST_LOG_TRIVIAL(info) << "MCP server: another OrcaSlicer window serves on port " << port;
-        return false;
+        // Another program or window has the port: serve on one the system picks, so every window is
+        // reachable. Any other bind error fails as before.
+        std::string ephemeral_err;
+        if (in_use && m_http->start(0, ephemeral_err)) {
+            m_ephemeral = true;
+            if (!held_before)
+                BOOST_LOG_TRIVIAL(info) << "MCP server: port " << port << " is in use ("
+                                        << (m_port_held_by_other ? "another OrcaSlicer window" : "another program")
+                                        << "); serving on port " << m_http->port();
+        } else {
+            err = "MCP server: cannot listen on 127.0.0.1:" + std::to_string(port) + " (" + err + ")";
+            m_http.reset();
+            // Expected with several windows on one configuration folder, so logged once rather than as an error.
+            if (!m_port_held_by_other)
+                BOOST_LOG_TRIVIAL(error) << err;
+            else if (!held_before)
+                BOOST_LOG_TRIVIAL(info) << "MCP server: another OrcaSlicer window serves on port " << port;
+            return false;
+        }
     }
-    m_port_held_by_other = false;
+    if (!m_ephemeral)
+        m_port_held_by_other = false;
     {
         std::lock_guard<std::mutex> lock(m_rules_mutex);
         m_endpoint_open = true;
     }
 
     m_discovery_error.clear();
-    if (!write_discovery(path_from_utf8(data_dir()),
+    // An ephemeral window is not what server.json names: that file belongs to the window on the
+    // configured port, and clients find the others through their instance records.
+    if (!m_ephemeral && !write_discovery(path_from_utf8(data_dir()),
                          {{"url", "http://127.0.0.1:" + std::to_string(m_http->port()) + "/mcp"},
                           {"port", m_http->port()},
                           {"pid", int(getpid())},
@@ -316,6 +375,32 @@ bool McpService::start(const McpLaunchOptions& options, bool serve, std::string&
         // Serving anyway: clients configured with the URL and token still connect; the stdio
         // bridge and the harness, which need the file, see the reason in get_state.
         BOOST_LOG_TRIVIAL(warning) << "MCP server: " << m_discovery_error;
+
+    {
+        InstanceRecord record;
+        record.pid         = int(getpid());
+        record.incarnation = m_incarnation;
+        record.port        = m_http->port();
+        record.token       = token;
+        record.version     = SLIC3R_VERSION;
+#ifdef SLIC3R_CAD
+        record.features = "cad";
+#endif
+        record.datadir     = data_dir();
+        record.exe         = current_exe_utf8();
+        record.launched_by = m_options.launched_by;
+        record.started_at  = int64_t(std::time(nullptr));
+        record.primary     = !m_ephemeral;
+        const fs::path base = default_datadir();
+        m_record_error.clear();
+        if (write_instance_record(base, record, m_record_error))
+            m_record_base = base;
+        else
+            BOOST_LOG_TRIVIAL(warning) << "MCP server: " << m_record_error;
+        static std::atomic<bool> pruned{false};
+        if (!pruned.exchange(true))
+            prune_dead_instance_records(base);
+    }
     BOOST_LOG_TRIVIAL(info) << "MCP server listening on http://127.0.0.1:" << m_http->port() << "/mcp";
     return true;
 }
@@ -481,6 +566,11 @@ void McpService::stop_serving()
     // them before the service goes away.
     m_http->stop(false);
     m_http.reset();
+    if (!m_record_base.empty()) {
+        remove_instance_record(m_record_base, int(getpid()), m_incarnation);
+        m_record_base.clear();
+    }
+    m_ephemeral = false;
     remove_discovery(path_from_utf8(data_dir()));
     BOOST_LOG_TRIVIAL(info) << "MCP server endpoint closed";
 }
@@ -551,6 +641,9 @@ json McpService::describe() const
         out["token_source"]   = m_token_source;
         out["token_file"]     = path_to_utf8(mcp_dir(path_from_utf8(data_dir())) / "token");
         out["discovery_file"] = path_to_utf8(discovery_path(path_from_utf8(data_dir())));
+        out["incarnation"]     = m_incarnation;
+        out["ephemeral"]       = m_ephemeral;
+        out["configured_port"] = m_configured_port;
         if (!m_discovery_error.empty())
             out["discovery_error"] = m_discovery_error;
     }

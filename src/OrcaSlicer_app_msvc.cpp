@@ -233,11 +233,16 @@ int wmain(int argc, wchar_t **argv)
     argv_extended.emplace_back(gcodeviewer_param);
 #endif /* SLIC3R_WRAPPER_GCODEVIEWER */
 
+    // --mcp-stdio speaks the MCP protocol on stdout: the wrapper must print nothing and has no window to
+    // show, so the OpenGL probe and Mesa are skipped.
+    bool mcp_stdio = false;
 #ifdef SLIC3R_GUI
     // Here one may push some additional parameters based on the wrapper type.
     bool force_mesa = false;
 #endif /* SLIC3R_GUI */
     for (int i = 1; i < argc; ++ i) {
+        if (wcscmp(argv[i], L"--mcp-stdio") == 0)
+            mcp_stdio = true;
 #ifdef SLIC3R_GUI
         if (wcscmp(argv[i], L"--sw-renderer") == 0)
             force_mesa = true;
@@ -250,11 +255,11 @@ int wmain(int argc, wchar_t **argv)
 
 #ifdef SLIC3R_GUI
     OpenGLVersionCheck opengl_version_check;
-    bool load_mesa =
+    bool load_mesa = ! mcp_stdio && (
         // Forced from the command line.
         force_mesa ||
         // Try to load the default OpenGL driver and test its context version.
-        ! opengl_version_check.load_opengl_dll() || ! opengl_version_check.is_version_greater_or_equal_to(2, 0);
+        ! opengl_version_check.load_opengl_dll() || ! opengl_version_check.is_version_greater_or_equal_to(2, 0));
 #endif /* SLIC3R_GUI */
 
     wchar_t path_to_exe[MAX_PATH + 1] = { 0 };
@@ -298,7 +303,7 @@ int wmain(int argc, wchar_t **argv)
 //	printf("Loading Slic3r library: %S\n", path_to_slic3r);
     HINSTANCE hInstance_Slic3r = LoadLibraryExW(path_to_slic3r, nullptr, 0);
     if (hInstance_Slic3r == nullptr) {
-        printf("OrcaSlicer.dll was not loaded, error=%lu\n", GetLastError());
+        fprintf(mcp_stdio ? stderr : stdout, "OrcaSlicer.dll was not loaded, error=%lu\n", GetLastError());
         return -1;
     }
 
@@ -312,7 +317,7 @@ int wmain(int argc, wchar_t **argv)
 #endif
         );
     if (orcaslicer_main == nullptr) {
-        printf("could not locate the function orcaslicer_main in OrcaSlicer.dll\n");
+        fprintf(mcp_stdio ? stderr : stdout, "could not locate the function orcaslicer_main in OrcaSlicer.dll\n");
         return -1;
     }
     // argc minus the trailing nullptr of the argv
