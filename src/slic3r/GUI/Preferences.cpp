@@ -1513,6 +1513,7 @@ wxBoxSizer *PreferencesDialog::create_item_mcp_transport(wxString title, wxStrin
     // agent, so it stays in view rather than in a tooltip.
     m_mcp_transport      = new RadioGroup(m_parent, {"HTTP", "stdio"}, wxHORIZONTAL);
     m_mcp_transport_hint = new ::Label(m_parent, ::Label::Body_13, wxEmptyString);
+    m_mcp_transport->SetSelection(int(Mcp::Transport::Stdio));
     auto show_transport  = [this]() {
         m_mcp_transport_hint->SetLabel(Mcp::Transport(m_mcp_transport->GetSelection()) == Mcp::Transport::Http ?
                                            _L("The agent connects to the open OrcaSlicer while the MCP server is on. The setup holds "

@@ -2397,7 +2397,7 @@ opens with a line on what agents can do and who can connect, then has five rows:
 - **"Server port"**.
 - **"Server address"**: the URL, dimmed while the server is off, when it shows the port turning
   it on would use.
-- **"Connection type"**: HTTP (the default) or stdio, for the setup the next row copies, with a
+- **"Connection type"**: HTTP or stdio (the default), for the setup the next row copies, with a
   line under it on what the choice means for the agent. It is not saved: it shapes only the copied
   text.
 - **"Add to an agent"**: a picker, "Copy", and a line under them saying what to do with the copied
@@ -2418,12 +2418,12 @@ opens with a line on what agents can do and who can connect, then has five rows:
     `url` and `headers`, or with `command` and `args` for apps that only take a command, such as
     Claude Desktop.
 
-HTTP is the default because its URL stays the same whichever OrcaSlicer build runs. The cost is
-that OrcaSlicer must be running with the server on before the agent connects, only the window on
-the configured port is reachable, and a registration holds the token: a new token (delete the token
-file, then turn the server off and on) or a new port means copying the setup again. Stdio keeps the
-tools listed while OrcaSlicer is closed, opens it on the first call, reaches every window and holds
-no token; its setup names this executable, so it breaks when the program moves. The agent's own
+Stdio is the default: it keeps the tools listed while OrcaSlicer is closed, opens it on the first
+call, reaches every window and holds no token. Its setup names this executable, so it breaks when
+the program moves. HTTP's URL stays the same whichever OrcaSlicer build runs, but OrcaSlicer must be
+running with the server on before the agent connects, only the window on the configured port is
+reachable, and a registration holds the token: a new token (delete the token file, then turn the
+server off and on) or a new port means copying the setup again. The agent's own
 per-call timeout must allow for a cold start (Claude Code: `MCP_TOOL_TIMEOUT`).
 
 ## Testing

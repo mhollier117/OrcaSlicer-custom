@@ -7,11 +7,11 @@ namespace Slic3r { namespace GUI { namespace Mcp {
 // The agents Preferences copies a setup for, in its picker's order.
 enum class Agent { ClaudeCode, Codex, OpenCode, DeepSeekHarness, OtherApps };
 
-// How a setup connects the agent, in Preferences' order. HTTP reaches the running server at an
-// address that stays the same whichever OrcaSlicer build runs, so it is the default. Stdio runs
-// the executable with --mcp-stdio, which reaches every OrcaSlicer window and starts OrcaSlicer on the
-// first tool call when none is running, but breaks when the program moves; it also serves apps that
-// only run servers as commands.
+// How a setup connects the agent, in Preferences' order. Stdio, the default, runs the executable
+// with --mcp-stdio, which keeps the tools listed while OrcaSlicer is closed, reaches every
+// OrcaSlicer window, starts OrcaSlicer on the first tool call when none is running and holds no
+// token, but breaks when the program moves; it also serves apps that only run servers as commands.
+// HTTP reaches the running server at an address that stays the same whichever OrcaSlicer build runs.
 enum class Transport { Http, Stdio };
 
 // The text that adds OrcaSlicer to `agent`, in the form the agent takes it: a command to run or an
