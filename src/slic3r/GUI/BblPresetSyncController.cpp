@@ -105,18 +105,25 @@ BblPresetSyncFirstRunDialog::BblPresetSyncFirstRunDialog(wxWindow* parent, const
         if (!text.empty()) text += "\n";
         text += line;
     };
-    if (!summary.uploads.empty()) add_group(format_wxstr(_L("Upload to Bambu: %1%"), join_names(summary.uploads)));
-    if (!summary.downloads.empty()) add_group(format_wxstr(_L("Download from Bambu: %1%"), join_names(summary.downloads)));
-    if (!summary.links.empty()) add_group(format_wxstr(_L("Already the same on both sides: %1%"), join_names(summary.links)));
+    if (!summary.uploads.empty())
+        add_group(format_wxstr(_L("Upload to Bambu (%1%): %2%"), summary.uploads.size(), join_names(summary.uploads)));
+    if (!summary.downloads.empty())
+        add_group(format_wxstr(_L("Download from Bambu (%1%): %2%"), summary.downloads.size(), join_names(summary.downloads)));
+    if (!summary.links.empty())
+        add_group(format_wxstr(_L("Already the same on both sides (%1%): %2%"), summary.links.size(), join_names(summary.links)));
     if (!summary.conflicts_local_wins.empty())
-        add_group(format_wxstr(_L("Different on both sides, OrcaSlicer's copy is newer and wins: %1%"), join_names(summary.conflicts_local_wins)));
+        add_group(format_wxstr(_L("Different on both sides, OrcaSlicer's copy is newer and wins (%1%): %2%"), summary.conflicts_local_wins.size(),
+                               join_names(summary.conflicts_local_wins)));
     if (!summary.conflicts_remote_wins.empty())
-        add_group(format_wxstr(_L("Different on both sides, Bambu's copy is newer and wins: %1%"), join_names(summary.conflicts_remote_wins)));
+        add_group(format_wxstr(_L("Different on both sides, Bambu's copy is newer and wins (%1%): %2%"), summary.conflicts_remote_wins.size(),
+                               join_names(summary.conflicts_remote_wins)));
+    if (!summary.downloads.empty())
+        add_group(_L("Presets OrcaSlicer cannot load are skipped and stay on Bambu."));
     if (text.empty() && m_candidates.empty()) text = _L("Nothing to sync yet.");
 
     auto* sizer = new wxBoxSizer(wxVERTICAL);
     if (!text.empty()) {
-        auto* box = new wxTextCtrl(this, wxID_ANY, text, wxDefaultPosition, wxSize(FromDIP(520), FromDIP(140)),
+        auto* box = new wxTextCtrl(this, wxID_ANY, text, wxDefaultPosition, wxSize(FromDIP(520), FromDIP(260)),
                                    wxTE_MULTILINE | wxTE_READONLY | wxTE_WORDWRAP);
         sizer->Add(box, 1, wxEXPAND | wxALL, FromDIP(10));
     }
@@ -409,8 +416,6 @@ void BblPresetSyncController::notify(const std::string& code, const std::string&
         text = _u8L("The Bambu cloud holds the maximum number of user presets; new presets are not uploaded to it.");
     else if (code == "auth")
         text = _u8L("The Bambu cloud rejected the sign-in; preset sync with it is paused until you sign in to Bambu again.");
-    else if (code == "unresolvable")
-        text = format(_u8L("A preset from the Bambu cloud could not be loaded: %1%"), detail);
     else {
         BOOST_LOG_TRIVIAL(info) << "bbl preset sync: " << code << ": " << detail;
         return;
@@ -486,29 +491,87 @@ void BblPresetSyncController::refresh_ui()
     if (m_app.plater_ != nullptr) m_app.plater_->sidebar().update_all_preset_comboboxes();
 }
 
-void BblPresetSyncController::apply_pull(sync::PullOp op, std::function<void(sync::OpOutcome)> done)
+void BblPresetSyncController::queue_or_post(QueuedOp op)
 {
-    m_app.CallAfter([this, op = std::move(op), done = std::move(done)] {
-        if (m_app.is_closing() || m_app.user_preset_session() != op.session.generation || m_app.preset_bundle == nullptr) {
-            done(failed("session changed"));
+    {
+        std::lock_guard<std::mutex> lock(m_batch_mutex);
+        if (m_in_batch) {
+            m_batch.push_back(std::move(op));
             return;
         }
-        const sync::OpOutcome outcome = sync::apply_pull(ops_context(op.session.bambu_uid), op);
+    }
+    m_app.CallAfter([this, op = std::move(op)] {
+        const sync::OpOutcome outcome = op.run();
         if (outcome.result == sync::OpResult::Applied) refresh_ui();
-        done(outcome);
+        op.done(outcome);
     });
+}
+
+void BblPresetSyncController::apply_pull(sync::PullOp op, std::function<void(sync::OpOutcome)> done)
+{
+    QueuedOp q;
+    q.name = op.key.name;
+    q.done = std::move(done);
+    q.run  = [this, op = std::move(op)]() -> sync::OpOutcome {
+        if (m_app.is_closing() || m_app.user_preset_session() != op.session.generation || m_app.preset_bundle == nullptr)
+            return failed("session changed");
+        return sync::apply_pull(ops_context(op.session.bambu_uid), op);
+    };
+    queue_or_post(std::move(q));
 }
 
 void BblPresetSyncController::delete_local(sync::DeleteOp op, std::function<void(sync::OpOutcome)> done)
 {
-    m_app.CallAfter([this, op = std::move(op), done = std::move(done)] {
-        if (m_app.is_closing() || m_app.user_preset_session() != op.session.generation || m_app.preset_bundle == nullptr) {
-            done(failed("session changed"));
-            return;
+    QueuedOp q;
+    q.name = op.key.name;
+    q.done = std::move(done);
+    q.run  = [this, op = std::move(op)]() -> sync::OpOutcome {
+        if (m_app.is_closing() || m_app.user_preset_session() != op.session.generation || m_app.preset_bundle == nullptr)
+            return failed("session changed");
+        return sync::delete_local(ops_context(op.session.bambu_uid), op);
+    };
+    queue_or_post(std::move(q));
+}
+
+void BblPresetSyncController::begin_batch()
+{
+    std::lock_guard<std::mutex> lock(m_batch_mutex);
+    m_in_batch = true;
+    m_batch.clear();
+}
+
+void BblPresetSyncController::end_batch()
+{
+    std::vector<QueuedOp> ops;
+    {
+        std::lock_guard<std::mutex> lock(m_batch_mutex);
+        m_in_batch = false;
+        ops.swap(m_batch);
+    }
+    if (ops.empty()) return;
+    m_app.CallAfter([this, ops = std::move(ops)] {
+        std::vector<sync::OpOutcome> outcomes;
+        std::vector<std::string>     unresolvable;
+        bool                         any_applied = false;
+        for (const QueuedOp& op : ops) {
+            outcomes.push_back(op.run());
+            if (outcomes.back().result == sync::OpResult::Applied) any_applied = true;
+            if (outcomes.back().result == sync::OpResult::Unresolvable) unresolvable.push_back(op.name);
         }
-        const sync::OpOutcome outcome = sync::delete_local(ops_context(op.session.bambu_uid), op);
-        if (outcome.result == sync::OpResult::Applied) refresh_ui();
-        done(outcome);
+        if (any_applied && !m_app.is_closing()) refresh_ui();
+        if (!unresolvable.empty() && !m_app.is_closing() && m_app.plater() != nullptr) {
+            if (auto* notifications = m_app.plater()->get_notification_manager()) {
+                constexpr size_t max_names = 8;
+                std::string      names;
+                for (size_t i = 0; i < unresolvable.size() && i < max_names; ++i) names += (i == 0 ? "" : ", ") + unresolvable[i];
+                if (unresolvable.size() > max_names) names += ", \xE2\x80\xA6";
+                const std::string text = format(_u8L("%1% presets from the Bambu cloud could not be loaded in OrcaSlicer (their parent profile is missing): %2%"),
+                                                unresolvable.size(), names);
+                notifications->push_notification(NotificationType::CustomNotification,
+                                                 NotificationManager::NotificationLevel::RegularNotificationLevel, text);
+            }
+        }
+        for (size_t i = 0; i < ops.size(); ++i) ops[i].done(outcomes[i]);
     });
 }
 

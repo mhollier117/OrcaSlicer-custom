@@ -84,6 +84,8 @@ public:
     std::optional<BblPresetSync::LocalSnapshot> snapshot(const BblPresetSync::Session& session) override;
     void apply_pull(BblPresetSync::PullOp op, std::function<void(BblPresetSync::OpOutcome)> done) override;
     void delete_local(BblPresetSync::DeleteOp op, std::function<void(BblPresetSync::OpOutcome)> done) override;
+    void begin_batch() override;
+    void end_batch() override;
 
 private:
     class CloudProxy;
@@ -97,6 +99,19 @@ private:
     // Shows the conversion dialog; false when cancelled. Otherwise converts the checked filaments, declines the others and
     // reports the ones that were not converted.
     bool                           run_conversion_dialog(const BblPresetSync::FirstRunSummary& summary);
+
+    // One queued local change of a batch: what to run on the UI thread, who to tell, and the preset's name for messages.
+    struct QueuedOp
+    {
+        std::function<BblPresetSync::OpOutcome()>     run;
+        std::function<void(BblPresetSync::OpOutcome)> done;
+        std::string                                   name;
+    };
+    void queue_or_post(QueuedOp op);
+
+    std::mutex            m_batch_mutex;
+    bool                  m_in_batch{false};
+    std::vector<QueuedOp> m_batch;
 
     GUI_App&                       m_app;
     std::unique_ptr<CloudProxy>    m_cloud;

@@ -74,6 +74,9 @@ public:
     // Queue the change; `done` is called exactly once, from any thread, possibly later.
     virtual void apply_pull(PullOp op, std::function<void(OpOutcome)> done)     = 0;
     virtual void delete_local(DeleteOp op, std::function<void(OpOutcome)> done) = 0;
+    // A pass brackets its local changes: between the two calls apply_pull and delete_local may be applied together.
+    virtual void begin_batch() = 0;
+    virtual void end_batch()   = 0;
 };
 
 struct FirstRunSummary
@@ -98,7 +101,7 @@ public:
     // Filaments that became conversion candidates after the first run; called when the list changes.
     virtual void on_candidates(const std::vector<Key>& candidates) = 0;
     virtual void on_halt(const std::string& kind, const std::vector<Key>& local_deletes, const std::vector<Key>& remote_deletes) = 0;
-    // "preset_limit", "auth", "unresolvable", "list_failed"
+    // "preset_limit", "auth", "list_failed"
     virtual void notify(const std::string& code, const std::string& detail) = 0;
 };
 

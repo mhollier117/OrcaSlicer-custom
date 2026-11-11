@@ -681,20 +681,25 @@ struct FakeStore : sync::ILocalStore
     sync::OpOutcome                                  outcome{sync::OpResult::Applied, "", "newhash"};
     bool                                             defer{false};
     std::vector<std::function<void(sync::OpOutcome)>> held;
+    std::vector<std::string>                         order; // "begin", "pull", "delete", "end"
 
     std::optional<sync::LocalSnapshot> snapshot(const sync::Session&) override
     {
         ++snapshot_calls;
         return snap;
     }
+    void begin_batch() override { order.push_back("begin"); }
+    void end_batch() override { order.push_back("end"); }
     void apply_pull(sync::PullOp op, std::function<void(sync::OpOutcome)> done) override
     {
+        order.push_back("pull");
         pulls.push_back(std::move(op));
         if (defer) held.push_back(std::move(done));
         else done(outcome);
     }
     void delete_local(sync::DeleteOp op, std::function<void(sync::OpOutcome)> done) override
     {
+        order.push_back("delete");
         deletes.push_back(std::move(op));
         if (defer) held.push_back(std::move(done));
         else done(outcome);
@@ -1558,8 +1563,7 @@ TEST_CASE("Each pull outcome has its effect", "[BblPresetSync]")
         CHECK(entry->reason == "needs a parent");
         CHECK(entry->setting_id == "P5");
         CHECK(entry->update_time == 200);
-        REQUIRE(e.host.notes.size() == 1);
-        CHECK(e.host.notes[0] == std::make_pair(std::string("unresolvable"), std::string("filament/Remote: needs a parent")));
+        CHECK(e.host.notes.empty()); // the controller reports unresolvable presets once per batch
         e.check_disk();
     }
     SECTION("postponed")
@@ -2525,4 +2529,64 @@ TEST_CASE("A lost base merges with an empty base and keeps both sides", "[BblPre
     REQUIRE(e.store.pulls.size() == 1);
     CHECK(e.store.pulls[0].body.at("filament_cost") == "h1");    // local value survives
     CHECK(e.store.pulls[0].body.at("filament_density") == "2");  // remote value arrives
+}
+
+// ---------------------------------------------------------------------------
+// Batching
+// ---------------------------------------------------------------------------
+
+TEST_CASE("A pass brackets its local changes in one batch", "[BblPresetSync]")
+{
+    Env e;
+    e.seed({{fkey("Gone"), [] {
+                 auto x          = linked("P2", 100, "hg");
+                 x.absent_passes = 1;
+                 x.absent_since  = 1000000 - 1000;
+                 return x;
+             }()}});
+    e.add_local("Gone", "hg");
+    e.add_remote("Remote", "P5", 200);
+    e.add_remote("Remote2", "P6", 200);
+
+    SECTION("begin, the ops in order, end")
+    {
+        e.pass();
+        REQUIRE(e.store.order.size() >= 4);
+        CHECK(e.store.order.front() == "begin");
+        CHECK(e.store.order.back() == "end");
+        CHECK(std::count(e.store.order.begin(), e.store.order.end(), "begin") == 1);
+        CHECK(std::count(e.store.order.begin(), e.store.order.end(), "end") == 1);
+        CHECK(std::count(e.store.order.begin(), e.store.order.end(), "pull") == 2);
+        CHECK(std::count(e.store.order.begin(), e.store.order.end(), "delete") == 1);
+    }
+    SECTION("an early stop still ends the batch")
+    {
+        e.host.cancel_after = 1; // the second action sees a cancelled sync
+        e.pass();
+        REQUIRE(e.store.order.size() >= 2);
+        CHECK(e.store.order.front() == "begin");
+        CHECK(e.store.order.back() == "end");
+        CHECK(std::count(e.store.order.begin(), e.store.order.end(), "end") == 1);
+        CHECK(e.mirror.status().last_result == "stopped: cancelled");
+    }
+    SECTION("a pass that does not execute does not open a batch")
+    {
+        e.pass(); // everything done
+        e.store.order.clear();
+        Env idle;
+        idle.seed({});
+        idle.pass();
+        CHECK(idle.store.order.size() <= 2); // at most an empty bracket
+    }
+}
+
+TEST_CASE("The mirror no longer notifies about unresolvable presets itself", "[BblPresetSync]")
+{
+    Env e;
+    e.seed({});
+    e.add_remote("Remote", "P5", 200);
+    e.store.outcome = {sync::OpResult::Unresolvable, "needs a parent", ""};
+    e.pass();
+    CHECK(e.mirror.ledger()->get(fkey("Remote"))->state == "unresolvable");
+    CHECK(e.host.notified("unresolvable") == 0);
 }

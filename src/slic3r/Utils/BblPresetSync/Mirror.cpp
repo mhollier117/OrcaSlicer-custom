@@ -169,7 +169,6 @@ void Mirror::finish_pull(const Session& s, const std::shared_ptr<Ledger>& ledger
     case OpResult::Failed: record_failure(action.key, m_host.now()); break;
     }
     save_ledger(*ledger);
-    if (outcome.result == OpResult::Unresolvable) m_host.notify("unresolvable", action.key.str() + ": " + outcome.reason);
 }
 
 void Mirror::finish_delete(const Session& s, const std::shared_ptr<Ledger>& ledger, const Action& action, const OpOutcome& outcome,
@@ -616,6 +615,7 @@ void Mirror::run_pass(Trigger trigger)
         return false;
     };
 
+    m_store.begin_batch();
     for (const Action& a : actions) {
         if (m_host.cancelled()) {
             stopped = "stopped: cancelled";
@@ -789,6 +789,8 @@ void Mirror::run_pass(Trigger trigger)
         }
         if (!stopped.empty()) break;
     }
+
+    m_store.end_batch();
 
     // 11. Save and finish.
     if (changed) save_ledger(*ledger);
