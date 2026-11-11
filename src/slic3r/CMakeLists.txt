@@ -271,6 +271,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/FilamentManager/FmDevices.hpp
     GUI/FilamentManager/FmPresets.cpp
     GUI/FilamentManager/FmPresets.hpp
+    GUI/FilamentManager/FmRuntime.cpp
+    GUI/FilamentManager/FmRuntime.hpp
     GUI/FilamentManager/FmProtocol.cpp
     GUI/FilamentManager/FmProtocol.hpp
     GUI/FilamentManager/FmViewModel.cpp
@@ -946,6 +948,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/BblPresetSync/Snapshot.cpp
     Utils/BblPresetSync/Snapshot.hpp
     Utils/BblPresetSync/Types.hpp
+    Utils/BblFilament/PluginGate.cpp
+    Utils/BblFilament/PluginGate.hpp
     Utils/BblFilament/Spool.cpp
     Utils/BblFilament/Spool.hpp
     Utils/BblFilament/SpoolCloud.cpp

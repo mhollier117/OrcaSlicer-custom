@@ -20,6 +20,7 @@
 #include "libslic3r/Utils.hpp"
 #include "slic3r/Utils/FileTransferUtils.hpp"
 #include "slic3r/GUI/I18N.hpp"
+#include "slic3r/Utils/BblFilament/PluginGate.hpp"
 #include <cstddef>
 #include <cstring>
 #include <cwchar>
@@ -289,6 +290,7 @@ void* BBLNetworkPlugin::create_agent(const std::string& log_dir)
 {
     if (m_agent) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": reusing existing agent " << m_agent;
+        BblFilament::after_plugin_agent_created();
         return m_agent;
     }
 
@@ -297,11 +299,15 @@ void* BBLNetworkPlugin::create_agent(const std::string& log_dir)
     }
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": created agent " << m_agent;
+    if (m_agent)
+        BblFilament::after_plugin_agent_created();
     return m_agent;
 }
 
 int BBLNetworkPlugin::destroy_agent()
 {
+    // The Filament Manager's worker must not be inside a plugin call while the agent is destroyed.
+    BblFilament::before_plugin_agent_destroyed();
     int ret = 0;
     if (m_agent && m_destroy_agent) {
         // The agent's SSDP discovery threads keep polling the discovery state the agent owns, and

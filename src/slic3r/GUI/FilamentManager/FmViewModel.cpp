@@ -117,9 +117,13 @@ void decorate_tray_label(json& page_spool)
 }
 
 ViewModel::ViewModel(fil::SpoolService& service, Host host, std::function<void(const json& body)> send_report)
-    : m_service(service), m_host(std::move(host)), m_send(std::move(send_report))
+    : m_service(service), m_host(std::move(host)), m_send(std::move(send_report)), m_list_seen(service.status().have_list)
 {
-    fil::ServiceEvents& ev = m_service.events;
+}
+
+fil::ServiceEvents ViewModel::event_handlers()
+{
+    fil::ServiceEvents ev;
     ev.spools_changed      = [this] {
         note_list_state();
         report(k_module, "spool", "list", spools_json());
@@ -151,9 +155,8 @@ ViewModel::ViewModel(fil::SpoolService& service, Host host, std::function<void(c
         note_list_state();
         report(k_module, "config", "fetched", config);
     };
+    return ev;
 }
-
-ViewModel::~ViewModel() { m_service.events = {}; }
 
 void ViewModel::note_list_state()
 {

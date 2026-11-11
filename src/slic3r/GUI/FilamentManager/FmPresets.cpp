@@ -84,6 +84,8 @@ BblFilament::FilamentLookup filament_lookup(const PresetCollection* filaments, T
     BblFilament::FilamentLookup lookup;
     if (filaments != nullptr) {
         auto first_match = [filaments, to_bambu](const std::string& bid) -> const Preset* {
+            if (bid.empty())
+                return nullptr;
             for (const Preset& p : *filaments)
                 if (bambu_of(to_bambu, p.filament_id) == bid)
                     return &p;

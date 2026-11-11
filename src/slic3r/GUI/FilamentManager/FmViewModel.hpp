@@ -34,10 +34,13 @@ class ViewModel
 {
 public:
     ViewModel(BblFilament::SpoolService& service, Host host, std::function<void(const json& body)> send_report);
-    ~ViewModel(); // clears the handlers it set on service.events
+    ~ViewModel() = default;
 
     ViewModel(const ViewModel&)            = delete;
     ViewModel& operator=(const ViewModel&) = delete;
+
+    // The handlers that turn service events into reports. The owner of service.events installs them (see Runtime).
+    BblFilament::ServiceEvents event_handlers();
 
     json handle(const Request& request); // the response body; never throws
     void custom_created(const std::string& client_request_id, bool ok, const json& created);

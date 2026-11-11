@@ -4,6 +4,7 @@
 #include "slic3r/Utils/BblFilament/Spool.hpp"
 #include "slic3r/Utils/BblFilament/SpoolCloud.hpp"
 #include "slic3r/Utils/BblFilament/SpoolService.hpp"
+#include "slic3r/Utils/BblFilament/PluginGate.hpp"
 #include "slic3r/Utils/BblFilament/SpoolWorker.hpp"
 
 #include "bbl_filament_test_utils.hpp"
@@ -1756,4 +1757,22 @@ TEST_CASE("A pull_done handler may request another pull", "[BblFilament]")
     CHECK(calls == 2);
     CHECK(rig.cloud->count("list") == 2);
     CHECK(rig.svc->view().size() == 3);
+}
+
+TEST_CASE("The plugin gate counts agent teardowns and gates the shared worker", "[BblFilament]")
+{
+    const unsigned long long before = fil::plugin_generation();
+    fil::before_plugin_agent_destroyed();
+    CHECK(fil::plugin_generation() == before + 1);
+    CHECK_FALSE(fil::shared_worker().post([] {}));
+    fil::before_plugin_agent_destroyed();
+    CHECK(fil::plugin_generation() == before + 2);
+
+    fil::after_plugin_agent_created();
+    std::promise<void> ran;
+    std::future<void>  done = ran.get_future();
+    const bool         taken = fil::shared_worker().post([&ran] { ran.set_value(); });
+    CHECK(taken);
+    CHECK(done.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    CHECK(fil::shared_worker().accepting());
 }

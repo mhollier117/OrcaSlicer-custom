@@ -473,6 +473,16 @@ TEST_CASE("The filament lookup knows nothing of an unknown id", "[FilamentManage
     CHECK(l.filament_type("GFZ99").empty());
 }
 
+TEST_CASE("The filament lookup knows nothing of an empty id", "[FilamentManager]")
+{
+    auto c = make_filament_collection();
+    add_filament(*c, {"No id preset", "", "Bambu Lab", "PLA-S", false, "", true});
+    add_filament(*c, {"Bambu PLA Basic", "OFAAA", "Bambu Lab", "PLA"});
+    fil::FilamentLookup l = fm::filament_lookup(c.get(), test_to_bambu(), &fixture_colors());
+    CHECK_FALSE(l.is_support("").has_value());
+    CHECK(l.filament_type("").empty());
+}
+
 TEST_CASE("The filament lookup leaves functions unset for null inputs", "[FilamentManager]")
 {
     auto c = make_filament_collection();
@@ -666,7 +676,10 @@ struct VmRig
             };
         }
         vm = std::make_unique<fm::ViewModel>(*rig.svc, host, [this](const json& body) { reports.push_back(body); });
+        rig.svc->events = vm->event_handlers();
     }
+
+    ~VmRig() { rig.svc->events = {}; }
 
     json call(const std::string& submod, const std::string& action, json payload = json::object(), const std::string& module = "filament")
     {
@@ -930,6 +943,7 @@ TEST_CASE("The host decides the text of an error when it has a say", "[FilamentM
     t.host.fail_text = [](fil::FailKind, const std::string& m) { return "host:" + m; };
     t.vm.reset();
     t.vm = std::make_unique<fm::ViewModel>(*t.rig.svc, t.host, [&t](const json& b) { t.reports.push_back(b); });
+    t.rig.svc->events = t.vm->event_handlers();
     t.rig.cloud->fill(1);
     t.pull();
     t.rig.cloud->forced["update"] = {forced_error(fil::CloudError::Rejected, "bad")};
@@ -1128,9 +1142,28 @@ TEST_CASE("Service events send nothing once the view-model is gone", "[FilamentM
 {
     VmRig t;
     t.rig.cloud->fill(1);
+    t.rig.svc->events = {}; // the owner of the events (Runtime::detach) clears them before the view-model goes
     t.vm.reset();
     t.pull();
     CHECK(t.reports.empty());
+}
+
+TEST_CASE("A view-model created on a service that already has a list reports the next pull's added count as it is", "[FilamentManager]")
+{
+    VmRig t;
+    t.rig.cloud->fill(1);
+    t.pull(); // the list is pulled before the panel exists
+    t.rig.svc->events = {};
+    t.rig.cloud->fill(2, 1000002);
+    VmRig& same = t;
+    same.vm.reset();
+    same.vm = std::make_unique<fm::ViewModel>(*same.rig.svc, same.host, [&same](const json& b) { same.reports.push_back(b); });
+    same.rig.svc->events = same.vm->event_handlers();
+    same.reports.clear();
+    same.pull();
+    std::vector<json> done = same.reports_of("sync", "pull_done");
+    REQUIRE(done.size() == 1);
+    CHECK(done[0]["payload"]["added"] == 2);
 }
 
 TEST_CASE("A host function that throws makes the request answer an internal error", "[FilamentManager]")
