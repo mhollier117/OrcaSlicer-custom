@@ -274,6 +274,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/FilamentManager/FmDevices.hpp
     GUI/FilamentManager/FmPresets.cpp
     GUI/FilamentManager/FmPresets.hpp
+    GUI/FilamentManager/FmPrinters.cpp
+    GUI/FilamentManager/FmPrinters.hpp
     GUI/FilamentManager/FmRuntime.cpp
     GUI/FilamentManager/FmRuntime.hpp
     GUI/FilamentManager/FmProtocol.cpp

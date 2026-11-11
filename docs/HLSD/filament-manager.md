@@ -14,7 +14,10 @@ The list lives in the Bambu cloud. OrcaSlicer stores no spool data of its own.
 | Panel | `GUI/FilamentManager/FilamentManagerPanel` | The tab: a web view, the transport in both directions |
 | View-model | `GUI/FilamentManager/FmViewModel` | One handler per page request; turns service events into reports |
 | Data for the page | `FmPresets`, `FmDevices`, `FmColorCodes`, `FmProtocol` | Preset tree, printer and AMS data, Bambu's colour table, packets |
-| Runtime | `GUI/FilamentManager/FmRuntime` | Owns the service for the life of the app; reads the session from the app |
+| Runtime | `GUI/FilamentManager/FmRuntime` | Owns the service, the printer tap and the linker for the life of the app; reads the session from the app; ticks the linker |
+| Printers | `GUI/FilamentManager/FmPrinters` | Hands printer messages to the tap; builds the linker's view of each printer; the link settings |
+| Printer tap | `Utils/BblFilament/PrinterTap` | The tray contents of every printer, from its status messages |
+| Linker | `Utils/BblFilament/Linker`, `LinkDriver` | Plans which spool is in which slot and how much is left on it; runs the plan through the service |
 | Service | `Utils/BblFilament/SpoolService` | The list and the rules for changing it |
 | Cloud | `Utils/BblFilament/SpoolCloud` | The five plugin calls, reply classification, paging |
 | Worker and gate | `Utils/BblFilament/SpoolWorker`, `PluginGate` | The one thread that calls the plugin, and its tie to the plugin's lifetime |
@@ -118,8 +121,44 @@ Bambu's colour table (`filaments_color_codes.json`) supplies the colour names, t
 short colour code from which a spool's `trayIdName` is derived. `FmColorCodes` reads it itself because the app's
 existing reader does not keep the short code.
 
+## Linking spools to printer slots
+
+The cloud records which spool is in which AMS slot and how much is left on it. While the Filament Manager is enabled,
+the app keeps that record current for every Bambu printer of the account, not only the selected one.
+
+- **Printer tap.** The app parses tray contents only for the selected printer. Every status message of every Bambu
+  printer (both message handlers of `GUI_App`) therefore also goes to the tap, which keeps the AMS and external-spool
+  parts of each printer's state, merged the way the app merges them.
+- **Views.** Every two seconds the runtime builds one view per printer of the account, plus the selected printer in
+  LAN mode: bound to the account, LAN-only, selected, busy (printing, or the AMS doing anything but idling), fresh
+  (online, a full state since the tap last forgot it, a message within a minute), the AMS serials from the printer's
+  version reply, and the trays with their filament ids translated to Bambu's. The tap forgets a printer silent for 90
+  seconds; a printer that sends only diffs is asked for a full state at most once a minute. A LAN-only printer takes
+  part only while it is selected.
+- **Matching.** A tray is matched to a spool by its RFID, else by a pending assignment (the user put that spool in
+  that slot; it matches only when the tray reports the spool's filament and colour, and lapses after two minutes),
+  else by the cloud's own record when the tray agrees with it. A tray with an RFID the account does not have never
+  matches anything else.
+- **Changes.** A matched spool not recorded in its slot is mounted there (an RFID spool through the AMS sync, a manual
+  one through the slot mappings). The remaining weight of an RFID spool is sent when the printer measures another
+  value: the grams the printer reports, else its percentage of the full weight. A percentage never overrules a spool
+  whose own weight rounds to the same percentage, and a busy printer gets a new weight at most every ten minutes. A
+  spool recorded in a slot where no tray matched it is unbound only after three different status messages, 30 seconds
+  and a newer list, and never while another spool is matched in that slot, the spool in that slot cannot be identified
+  yet (its tag is being read or was not read since the AMS restarted), or the spool has a change waiting. A new
+  official spool is added to the account. AMS Lite units and external spools get no slot record: the cloud names a
+  slot by its AMS serial.
+- **Rounds.** The driver sends a plan as one round of calls per printer through the service queue, and plans the next
+  round only after the list that follows it has arrived. Something the cloud took, or refused, is not sent again for
+  ten minutes, even when the next list does not show it (the cloud may store a value differently than it is compared).
+  A newly registered spool is retried with a growing delay. An automatic weight push is reported to the page as
+  `sync/auto_push_summary`.
+- **Settings.** `filament_manager_link_enabled` (Preferences, on by default) turns it off; `filament_manager_link_dry_run`
+  plans without sending; `filament_manager_link_only` limits it to a list of slots. While linking is on, the runtime
+  reads the list itself when it has none, so linking does not depend on the tab being open.
+
 ## Not part of this
 
-Linking spools to printer slots (the cloud's AMS sync, slot mappings and the queue of new official spools) is not
-implemented. The page's control for it is removed, and creates and updates never send mount fields. The page has no
-control for favourites, archiving or marking a spool empty; those requests are answered as not supported.
+The page has no control for favourites, archiving or marking a spool empty; those requests are answered as not
+supported. The page's own control for linking is removed, and creates and updates from the page never send mount
+fields.

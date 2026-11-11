@@ -26,6 +26,7 @@
 #include "slic3r/GUI/MultiMachinePage.hpp"
 #include "slic3r/GUI/CalibrationPanel.hpp"
 #include "slic3r/GUI/FilamentManager/FilamentManagerPanel.hpp"
+#include "slic3r/GUI/FilamentManager/FmRuntime.hpp"
 #include "slic3r/GUI/ReleaseNote.hpp"
 #include "slic3r/GUI/GUI.hpp"
 #include <vector>
@@ -1666,6 +1667,7 @@ void MainFrame::init_tabpanel() {
         m_filament_manager_page = new LazyPage<FilamentManagerPanel>(m_tabpanel, TAB_ID_FILAMENT_MANAGER, -1);
         m_lazy_pages.push_back(m_filament_manager_page);
         m_tabpanel->AddPage(TAB_ID_FILAMENT_MANAGER, m_filament_manager_page, _L("Filament Manager"), "tab_filament_active");
+        Fm::Runtime::get().start();
     }
 
     // Plugin pages are appended after the built-in tabs; their ids are namespaced

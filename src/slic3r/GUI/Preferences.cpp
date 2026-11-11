@@ -2627,6 +2627,7 @@ void PreferencesDialog::create_items()
                                               "sync_bbl_user_preset");
     g_sizer->Add(item_bbl_sync);
     g_sizer->Add(create_item_checkbox(_L("Show the Filament Manager tab"), _L("The list of filament spools kept in your Bambu account. Takes effect after a restart."), "filament_manager_enabled"));
+    g_sizer->Add(create_item_checkbox(_L("Keep spool locations and remaining weight up to date"), _L("While a Bambu printer is online, tells your Bambu account which spool is in which slot and how much is left on it."), "filament_manager_link_enabled"));
 
     if (app_config->get_stealth_mode()) {
         if (m_bambu_cloud_checkbox)      m_bambu_cloud_checkbox->Enable(false);

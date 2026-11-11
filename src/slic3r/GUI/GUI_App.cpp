@@ -258,6 +258,7 @@
 #include "slic3r/GUI/HttpServer.hpp"
 #include "slic3r/GUI/Mcp/McpOptions.hpp"
 #include "slic3r/GUI/Mcp/McpService.hpp"
+#include "slic3r/GUI/FilamentManager/FmPrinters.hpp"
 #include "slic3r/GUI/ImGuiWrapper.hpp"
 #include "slic3r/GUI/ParamsDialog.hpp"
 #include "slic3r/GUI/ParamsPanel.hpp"
@@ -2582,6 +2583,7 @@ void GUI_App::init_networking_callbacks()
                     } else {
                         obj->parse_json("cloud", msg, true);
                     }
+                    Fm::on_printer_message(*obj, msg);
                 }
 
                 if (GUI::wxGetApp().plater())
@@ -2624,6 +2626,7 @@ void GUI_App::init_networking_callbacks()
 
                 if (MachineObject* obj = m_device_manager->get_my_machine(dev_id)) {
                     obj->parse_json("lan", msg);
+                    Fm::on_printer_message(*obj, msg);
                     // Orca: skip it if it doesn't support subscription based filament sync
                     if (this->m_device_manager->get_selected_machine() == obj &&
                         m_agent->get_filament_sync_mode() == FilamentSyncMode::subscription) {

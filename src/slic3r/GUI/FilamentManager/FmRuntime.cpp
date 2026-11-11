@@ -1,20 +1,25 @@
 #include "FmRuntime.hpp"
 
 #include "FmPresets.hpp"
+#include "FmPrinters.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "slic3r/GUI/DeviceCore/DevManager.h"
+#include "slic3r/GUI/DeviceManager.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/Utils/BBLPrinterAgent.hpp"
 #include "slic3r/Utils/BblFilament/PluginGate.hpp"
 #include "slic3r/Utils/BblFilament/SpoolCloud.hpp"
 #include "slic3r/Utils/CloudProvider.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
+#include "slic3r/Utils/NetworkAgentFactory.hpp"
 
 #include <wx/app.h>
 
 #include <cstddef>
 #include <ctime>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -27,7 +32,27 @@ namespace fil = BblFilament;
 
 namespace {
 
-constexpr std::size_t k_log_lines = 30;
+constexpr std::size_t k_log_lines          = 30;
+constexpr int         k_tick_ms            = 2000;
+constexpr long long   k_tap_silence_s      = 90; // a printer the tap has heard nothing from for longer is forgotten
+constexpr long long   k_pushall_spacing_s  = 60; // a printer without a full state is asked for one at most this often
+constexpr long long   k_list_retry_s       = 60; // the linker without a list asks for one at most this often
+
+long long unix_now() { return static_cast<long long>(std::time(nullptr)); }
+
+class TickTimer : public wxTimer
+{
+public:
+    explicit TickTimer(std::function<void()> fn) : m_fn(std::move(fn)) {}
+    void Notify() override
+    {
+        if (m_fn)
+            m_fn();
+    }
+
+private:
+    std::function<void()> m_fn;
+};
 
 const char* fail_name(fil::FailKind kind)
 {
@@ -81,18 +106,38 @@ Runtime::Runtime()
     deps.lookup.tray_id_name = [this](const std::string& id, const std::vector<std::string>& hex, int color_type) {
         return tray_id_name_for(colors(), id, hex, color_type);
     };
-    deps.now  = [] { return static_cast<long long>(std::time(nullptr)); };
-    m_service = std::make_unique<fil::SpoolService>(std::move(deps));
+    deps.now  = [] { return unix_now(); };
+
+    // The linker uses the service's filament lookup and clock.
+    fil::LinkDriverDeps link_deps;
+    link_deps.lookup = deps.lookup;
+    link_deps.now    = deps.now;
+
+    m_service         = std::make_unique<fil::SpoolService>(std::move(deps));
+    link_deps.service = m_service.get();
+    m_tap             = std::make_unique<fil::PrinterTap>();
+    m_linker          = std::make_unique<fil::LinkDriver>(std::move(link_deps));
+    m_linker->on_auto_push = [this](const fil::AutoPushSummary& summary) {
+        log_event({{"event", "auto_push"}, {"pushed", summary.pushed}, {"skipped_cooldown", summary.skipped_cooldown}, {"busy", summary.busy}});
+        if (m_vm != nullptr)
+            m_vm->auto_push_summary(summary);
+    };
+    m_linker->on_registered = [this](const fil::SlotKey& slot, const std::string&) {
+        log_event({{"event", "registered"}});
+        m_new_spools.insert(slot);
+    };
 
     // Runtime owns the service's events. Each one is logged, then handed to the open panel's view-model, if any.
     fil::ServiceEvents& ev = m_service->events;
     ev.spools_changed      = [this] {
         log_event({{"event", "spools_changed"}});
+        note_list_state();
         if (auto h = m_vm_handlers.spools_changed)
             h();
     };
     ev.state_changed = [this] {
         log_event({{"event", "state_changed"}});
+        note_list_state();
         if (auto h = m_vm_handlers.state_changed)
             h();
     };
@@ -127,6 +172,108 @@ void Runtime::log_event(json line)
 }
 
 fil::SpoolService& Runtime::service() { return *m_service; }
+fil::PrinterTap&   Runtime::tap() { return *m_tap; }
+fil::LinkDriver&   Runtime::linker() { return *m_linker; }
+
+void Runtime::note_list_state()
+{
+    // The list is gone (signed out, another account, the plugin reloaded): the linker forgets everything.
+    const bool have = m_service->status().have_list;
+    if (m_had_list && !have)
+        m_linker->reset();
+    m_had_list = have;
+}
+
+void Runtime::start()
+{
+    if (!m_timer)
+        m_timer = std::make_unique<TickTimer>([this] { tick(); });
+    if (!m_timer->IsRunning())
+        m_timer->Start(k_tick_ms);
+}
+
+std::vector<fil::PrinterView> Runtime::views() { return printer_views(wxGetApp().getDeviceManager(), *m_tap, unix_now()); }
+
+void Runtime::tick()
+{
+    try {
+        const fil::Session s = session();
+        if (s.closing) {
+            m_timer->Stop();
+            return;
+        }
+        if (!s.signed_in)
+            return;
+        AppConfig* config = wxGetApp().app_config;
+        if (config == nullptr)
+            return;
+        m_linker->config = link_config(config->get_bool("filament_manager_link_enabled"), config->get_bool("filament_manager_link_dry_run"),
+                                       config->get("filament_manager_link_only"));
+        const long long now = unix_now();
+
+        // The linker needs the account's list also while the Filament Manager tab is closed.
+        if (m_linker->config.mode != fil::LinkMode::Off) {
+            const bool changed = m_service->refresh_session();
+            if (changed || (!m_service->status().have_list && !m_service->state().is_syncing && now - m_pull_asked_at >= k_list_retry_s)) {
+                m_pull_asked_at = now;
+                m_service->request_pull();
+            }
+        }
+
+        for (const std::string& dev : m_tap->printers()) {
+            const fil::PrinterFacts* f = m_tap->facts(dev);
+            if (f != nullptr && now - f->last_message_at > k_tap_silence_s) {
+                m_tap->forget(dev);
+                m_pushall_asked_at.erase(dev);
+            }
+        }
+
+        DeviceManager* devices = wxGetApp().getDeviceManager();
+        if (devices != nullptr) {
+            for (const auto& [dev, machine] : devices->get_my_cloud_machine_list(BBL_PRINTER_AGENT_ID)) {
+                if (machine == nullptr || !machine->is_online())
+                    continue;
+                const fil::PrinterFacts* f = m_tap->facts(dev);
+                if (f == nullptr || f->has_full)
+                    continue;
+                long long& asked = m_pushall_asked_at[dev];
+                if (asked != 0 && now - asked < k_pushall_spacing_s)
+                    continue;
+                asked = now;
+                machine->command_request_push_all(); // its own 3-second throttle applies
+            }
+        }
+
+        m_linker->tick(printer_views(devices, *m_tap, now));
+    } catch (...) {
+    }
+}
+
+fil::Accept Runtime::request_soft_match(const fil::PrinterView& printer, int ams_id)
+{
+    auto sn = printer.ams_sn.find(ams_id);
+    if (sn == printer.ams_sn.end() || sn->second.empty())
+        return {false, fil::FailKind::BadRequest};
+    fil::SpoolService::LinkRequest req;
+    req.kind              = fil::SpoolService::LinkRequest::Kind::SoftMatchRead;
+    req.dev_id            = printer.dev_id;
+    req.ams_sn            = sn->second;
+    const std::string name = printer.name;
+    req.done = [this, name, ams_id](const fil::SpoolService::LinkOutcome& out) {
+        // Brand, name, colour and the number of candidates; never an RFID.
+        json j = {{"printer", name}, {"ams_id", ams_id}, {"at", unix_now()}, {"ok", out.ok}, {"kind", out.ok ? "" : fail_name(out.kind)}};
+        if (out.ok) {
+            const fil::SoftMatchQueue queue = fil::parse_soft_match(out.body);
+            json                      items = json::array();
+            for (const fil::SoftMatchEntry& e : queue.entries)
+                items.push_back({{"brand", e.hit.vendor}, {"name", e.hit.name}, {"color", e.hit.color}, {"candidates", e.candidates.size()}});
+            j["entries"] = queue.entries.size();
+            j["items"]   = std::move(items);
+        }
+        m_soft_match = std::move(j);
+    };
+    return m_service->link(std::move(req));
+}
 
 const ColorCodes& Runtime::colors()
 {

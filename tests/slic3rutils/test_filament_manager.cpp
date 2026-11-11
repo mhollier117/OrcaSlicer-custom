@@ -6,8 +6,11 @@
 #include "slic3r/GUI/FilamentManager/FmColorCodes.hpp"
 #include "slic3r/GUI/FilamentManager/FmDevices.hpp"
 #include "slic3r/GUI/FilamentManager/FmPresets.hpp"
+#include "slic3r/GUI/FilamentManager/FmPrinters.hpp"
 #include "slic3r/GUI/FilamentManager/FmProtocol.hpp"
 #include "slic3r/GUI/FilamentManager/FmViewModel.hpp"
+#include "slic3r/Utils/BblFilament/LinkDriver.hpp"
+#include "slic3r/Utils/BblFilament/Linker.hpp"
 
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -18,6 +21,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -1267,4 +1271,51 @@ TEST_CASE("The tray label of a spool follows its place in the printer", "[Filame
     json shelf = {{"in_printer", false}, {"ams_type", 1}, {"ams_id", 1}, {"slot_id", "2"}, {"tray_label", ""}};
     fm::decorate_tray_label(shelf);
     CHECK(shelf["tray_label"] == "");
+}
+
+TEST_CASE("An automatic weight push is reported in the shape of Bambu Studio", "[FilamentManager]")
+{
+    VmRig t;
+    fil::AutoPushSummary busy;
+    busy.pushed           = 2;
+    busy.skipped_cooldown = 1;
+    busy.busy             = true;
+    t.vm->auto_push_summary(busy);
+    fil::AutoPushSummary idle;
+    idle.pushed = 1;
+    t.vm->auto_push_summary(idle);
+
+    auto sent = t.reports_of("sync", "auto_push_summary");
+    REQUIRE(sent.size() == 2);
+    CHECK(sent[0]["module"] == "filament");
+    const json& p = sent[0]["payload"];
+    CHECK(p["trigger"] == "auto");
+    CHECK(p["device_state"] == "busy");
+    CHECK(p["pushed"] == 2);
+    CHECK(p["skipped_cooldown"] == 1);
+    CHECK(p["skipped_no_diff"] == 0);
+    CHECK(p["skipped_no_rfid"] == 0);
+    CHECK(sent[1]["payload"]["device_state"] == "idle");
+    CHECK(sent[1]["payload"]["pushed"] == 1);
+}
+
+TEST_CASE("The link settings map to the linker's mode", "[FilamentManager]")
+{
+    CHECK(fm::link_config(false, false, "").mode == fil::LinkMode::Off);
+    CHECK(fm::link_config(false, true, "").mode == fil::LinkMode::Off);
+    CHECK(fm::link_config(true, true, "").mode == fil::LinkMode::DryRun);
+    CHECK(fm::link_config(true, false, "").mode == fil::LinkMode::On);
+    CHECK(fm::link_config(true, false, "").only_slots.empty());
+    CHECK(fm::link_config(true, false, "dev1:0:1").only_slots == std::set<std::string>{"dev1:0:1"});
+}
+
+TEST_CASE("The chosen slots are read from a comma-separated list", "[FilamentManager]")
+{
+    CHECK(fm::parse_only_slots("").empty());
+    CHECK(fm::parse_only_slots(" , ,").empty());
+    CHECK(fm::parse_only_slots("dev1:0:1, dev2:128:0 ,dev1:0:1") == std::set<std::string>{"dev1:0:1", "dev2:128:0"});
+    const std::set<std::string> slots{"dev2:0:3", "dev1:1:0"};
+    CHECK(fm::join_only_slots(slots) == "dev1:1:0,dev2:0:3");
+    CHECK(fm::parse_only_slots(fm::join_only_slots(slots)) == slots);
+    CHECK(fm::join_only_slots({}).empty());
 }

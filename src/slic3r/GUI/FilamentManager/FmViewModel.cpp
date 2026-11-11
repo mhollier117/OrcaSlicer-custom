@@ -374,6 +374,18 @@ void ViewModel::custom_created(const std::string& client_request_id, bool ok, co
         report(k_module, "preset", "list", presets_or_empty());
 }
 
+void ViewModel::auto_push_summary(const fil::AutoPushSummary& summary)
+{
+    // The shape of Bambu Studio's report; this linker never counts the last two.
+    report(k_module, "sync", "auto_push_summary",
+           {{"trigger", "auto"},
+            {"device_state", summary.busy ? "busy" : "idle"},
+            {"pushed", summary.pushed},
+            {"skipped_cooldown", summary.skipped_cooldown},
+            {"skipped_no_diff", 0},
+            {"skipped_no_rfid", 0}});
+}
+
 void ViewModel::machine_selected_changed()
 {
     const json ams = m_host.ams ? m_host.ams("", false) : default_ams();

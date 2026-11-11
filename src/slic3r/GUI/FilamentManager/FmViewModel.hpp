@@ -2,6 +2,7 @@
 
 #include "FmColorCodes.hpp"
 #include "FmProtocol.hpp"
+#include "slic3r/Utils/BblFilament/LinkDriver.hpp"
 #include "slic3r/Utils/BblFilament/SpoolService.hpp"
 
 #include <nlohmann/json.hpp>
@@ -45,6 +46,8 @@ public:
     json handle(const Request& request); // the response body; never throws
     void custom_created(const std::string& client_request_id, bool ok, const json& created);
     void machine_selected_changed();
+    // Reports sync/auto_push_summary after the linker pushed remaining weights on its own.
+    void auto_push_summary(const BblFilament::AutoPushSummary& summary);
 
     json spools_json() const;
     json state_json() const;
