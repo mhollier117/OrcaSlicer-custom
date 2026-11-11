@@ -1,6 +1,8 @@
 #pragma once
 
+#include "BaseStore.hpp"
 #include "Cloud.hpp"
+#include "Keys.hpp"
 #include "Ledger.hpp"
 #include "Snapshot.hpp"
 #include "Types.hpp"
@@ -41,6 +43,7 @@ struct OpOutcome
     OpResult    result{OpResult::Failed};
     std::string reason;
     std::string new_hash; // upload hash of the preset after a pull
+    ValueMap    new_upload; // the preset upload map after a pull
 };
 
 struct PullOp
@@ -89,6 +92,7 @@ public:
     virtual long long              now()       = 0; // unix seconds
     virtual void                   sleep_ms(int ms) = 0;
     virtual std::string            bundle_version() = 0; // BBL vendor profile version
+    virtual boost::filesystem::path resources_dir() = 0; // holds printers/bambu_studio_option_keys.json
     virtual boost::filesystem::path data_dir()      = 0;
     virtual void                   on_first_run(const FirstRunSummary& summary) = 0;
     // Filaments that became conversion candidates after the first run; called when the list changes.
@@ -137,9 +141,16 @@ private:
 
     LedgerView view_of(const Ledger& ledger) const;
     void       end_pass(const std::string& result, long long now);
+    struct PullFollowUp
+    {
+        ValueMap                   remote_body; // what Bambu holds now: becomes the base
+        bool                       needs_upload{false};
+        std::shared_ptr<BaseStore> base;
+    };
     void       finish_pull(const Session& s, const std::shared_ptr<Ledger>& ledger, const Action& action, long long row_update_time,
-                           const OpOutcome& outcome);
-    void       finish_delete(const Session& s, const std::shared_ptr<Ledger>& ledger, const Action& action, const OpOutcome& outcome);
+                           const OpOutcome& outcome, const PullFollowUp& follow);
+    void       finish_delete(const Session& s, const std::shared_ptr<Ledger>& ledger, const Action& action, const OpOutcome& outcome,
+                             const std::shared_ptr<BaseStore>& base);
     void       record_failure(const Key& key, long long now);
 
     IHost&       m_host;
@@ -149,6 +160,15 @@ private:
     mutable std::mutex      m_mutex;
     std::optional<Session>  m_session;
     std::shared_ptr<Ledger> m_ledger;
+    std::shared_ptr<BaseStore> m_base;
+    StudioKeys              m_studio; // loaded on the first pass; read on the sync thread only
+    bool                    m_studio_loaded{false};
+    struct CachedBody
+    {
+        long long update_time{0};
+        ValueMap  body;
+    };
+    std::map<std::string, CachedBody> m_body_cache; // setting id -> last valid body drained (guarded by m_mutex)
     std::set<Key>           m_pending;
     std::map<Key, Backoff>  m_backoff;
     bool                    m_auth_blocked{false};

@@ -489,25 +489,32 @@ TEST_CASE("Planner handles linked entries", "[BblPresetSync]")
         f.rows   = {remote_row("A", "P1", 1120)};
         auto plan = f.plan();
         REQUIRE(plan.actions.size() == 1);
-        CHECK(plan.actions[0].type == ActionType::Update);
+        CHECK(plan.actions[0].type == ActionType::Pull);
+        CHECK(plan.actions[0].merge_conflict);
+        CHECK(plan.actions[0].local_newer);
+        CHECK(plan.actions[0].backup_local);
         CHECK(plan.actions[0].backup_remote);
 
         f.rows = {remote_row("A", "P1", 1121)};
         plan   = f.plan();
         REQUIRE(plan.actions.size() == 1);
         CHECK(plan.actions[0].type == ActionType::Pull);
+        CHECK(plan.actions[0].merge_conflict);
+        CHECK_FALSE(plan.actions[0].local_newer);
         CHECK(plan.actions[0].backup_local);
+        CHECK(plan.actions[0].backup_remote);
     }
     SECTION("both changed: clock_offset shifts the result")
     {
         f.locals = {local_preset("A", "h1", 1000)};
         f.rows   = {remote_row("A", "P1", 1130)};
-        CHECK(f.plan().actions[0].type == ActionType::Pull);
+        CHECK_FALSE(f.plan().actions[0].local_newer);
         f.view.clock_offset = 10;
-        CHECK(f.plan().actions[0].type == ActionType::Update);
+        CHECK(f.plan().actions[0].type == ActionType::Pull);
+        CHECK(f.plan().actions[0].local_newer);
         f.view.clock_offset = -10;
         f.rows              = {remote_row("A", "P1", 1111)};
-        CHECK(f.plan().actions[0].type == ActionType::Pull);
+        CHECK_FALSE(f.plan().actions[0].local_newer);
     }
     SECTION("both changed without a body gives a note and no action")
     {
@@ -732,7 +739,8 @@ TEST_CASE("Planner pairs and creates for unknown rows and locals", "[BblPresetSy
         f.rows   = {remote_row("A", "P9", 100)};
         auto plan = f.plan();
         REQUIRE(find_action(plan, "A") != nullptr);
-        CHECK(find_action(plan, "A")->type == ActionType::Update);
+        CHECK(find_action(plan, "A")->type == ActionType::Pull);
+        CHECK(find_action(plan, "A")->merge_conflict);
         CHECK(find_action(plan, "A")->setting_id == "P9");
     }
     SECTION("ineligible local with an unknown row: no action")
@@ -750,17 +758,20 @@ TEST_CASE("Planner pairs and creates for unknown rows and locals", "[BblPresetSy
         CHECK(plan.actions[0].type == ActionType::Link);
         CHECK(plan.actions[0].setting_id == "P1");
     }
-    SECTION("pairing with different hashes: local wins updates with remote backup")
+    SECTION("pairing with different hashes: a merging pull with both backups, the local side newer")
     {
         f.locals = {local_preset("A", "h", 1000)};
         f.rows   = {remote_row("A", "P1", 1120, true, "other")};
         auto plan = f.plan();
         REQUIRE(plan.actions.size() == 1);
-        CHECK(plan.actions[0].type == ActionType::Update);
+        CHECK(plan.actions[0].type == ActionType::Pull);
         CHECK(plan.actions[0].setting_id == "P1");
+        CHECK(plan.actions[0].merge_conflict);
+        CHECK(plan.actions[0].local_newer);
+        CHECK(plan.actions[0].backup_local);
         CHECK(plan.actions[0].backup_remote);
     }
-    SECTION("pairing with different hashes: remote wins pulls with local backup")
+    SECTION("pairing with different hashes: a merging pull, the remote side newer")
     {
         f.locals = {local_preset("A", "h", 1000)};
         f.rows   = {remote_row("A", "P1", 1121, true, "other")};
@@ -985,11 +996,13 @@ TEST_CASE("Planner emits at most one action per key in a mixed scenario", "[BblP
     for (const Action& a : plan.actions) {
         CAPTURE(a.key.str());
         CHECK(seen.insert(a.key).second);
+        CHECK_FALSE((a.type == ActionType::Update && a.backup_remote)); // a conflict is a merging pull
     }
     CHECK(find_action(plan, "k0") == nullptr);
     CHECK(find_action(plan, "k1")->type == ActionType::Update);
     CHECK(find_action(plan, "k2")->type == ActionType::Pull);
-    CHECK(find_action(plan, "k3")->type == ActionType::Update);
+    CHECK(find_action(plan, "k3")->type == ActionType::Pull);
+    CHECK(find_action(plan, "k3")->merge_conflict);
     CHECK(find_action(plan, "k4")->type == ActionType::DeleteRemote);
     CHECK(find_action(plan, "k5")->type == ActionType::SetAbsent);
     CHECK(find_action(plan, "k6")->type == ActionType::DeleteLocal);
@@ -1149,14 +1162,15 @@ TEST_CASE("Planner relinks a row re-created under a new id", "[BblPresetSync]")
         CHECK(plan.actions[0].setting_id == "P2");
         CHECK(plan.notes.empty());
     }
-    SECTION("local wins updates with remote backup")
+    SECTION("local wins: a merging pull with both backups")
     {
         f.locals = {local_preset("A", "h", 1000)};
         f.rows   = {remote_row("A", "P2", 1120, true, "x")};
         auto plan = f.plan();
         REQUIRE(plan.actions.size() == 1);
-        CHECK(plan.actions[0].type == ActionType::Update);
+        CHECK(plan.actions[0].type == ActionType::Pull);
         CHECK(plan.actions[0].setting_id == "P2");
+        CHECK(plan.actions[0].local_newer);
         CHECK(plan.actions[0].backup_remote);
     }
     SECTION("remote wins pulls with local backup")

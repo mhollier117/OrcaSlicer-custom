@@ -2,7 +2,10 @@
 
 #include "slic3r/Utils/BblPresetSync/Cloud.hpp"
 #include "slic3r/Utils/BblPresetSync/Eligibility.hpp"
+#include "slic3r/Utils/BblPresetSync/BaseStore.hpp"
 #include "slic3r/Utils/BblPresetSync/Hash.hpp"
+#include "slic3r/Utils/BblPresetSync/Keys.hpp"
+#include "slic3r/Utils/BblPresetSync/Merge.hpp"
 #include "slic3r/Utils/BblPresetSync/Ledger.hpp"
 #include "slic3r/Utils/BblPresetSync/Mirror.hpp"
 #include "slic3r/Utils/BblPresetSync/Snapshot.hpp"
@@ -538,8 +541,8 @@ TEST_CASE("build_snapshot lists user presets with eligibility, upload values and
     const auto* foreign = find(sync::PresetType::Filament, "Foreign");
     REQUIRE(foreign != nullptr);
     CHECK(foreign->cls.eligibility == sync::Eligibility::Ineligible);
-    CHECK(foreign->upload.empty());
-    CHECK(foreign->hash.empty());
+    CHECK_FALSE(foreign->upload.empty()); // every user preset has its upload map
+    CHECK(foreign->hash.size() == 32);
     CHECK(foreign->mtime == 0); // no file
     CHECK_FALSE(foreign->selected);
 
@@ -599,6 +602,8 @@ struct FakeCloud : sync::ICloud
     long long                              server_time{5000};
     std::function<void(const std::string&)> before_update;
     std::vector<sync::ValueMap>            created_values;
+    std::vector<sync::ValueMap>            updated_values;
+    bool                                   drain_wanted_only{false}; // the drain returns only the bodies that were asked for
 
     sync::ListResult list(const std::string&, const std::function<bool(const sync::CloudRow&)>& want_body) override
     {
@@ -614,6 +619,11 @@ struct FakeCloud : sync::ICloud
         r.ok             = true;
         r.rows           = rows;
         r.bodies_by_name = bodies;
+        if (drain_wanted_only) {
+            r.bodies_by_name.clear();
+            for (const auto& k : wanted)
+                if (bodies.count(k.name)) r.bodies_by_name[k.name] = bodies.at(k.name);
+        }
         return r;
     }
     sync::WriteResult create(const std::string& name, sync::ValueMap values) override
@@ -632,9 +642,10 @@ struct FakeCloud : sync::ICloud
         w.update_time = server_time;
         return w;
     }
-    sync::WriteResult update(const std::string& id, const std::string&, sync::ValueMap) override
+    sync::WriteResult update(const std::string& id, const std::string&, sync::ValueMap values) override
     {
         calls.push_back("update " + id);
+        updated_values.push_back(values);
         if (before_update) before_update(id);
         if (!update_script.empty()) {
             auto w = update_script.front();
@@ -702,6 +713,7 @@ struct FakeHost : sync::IHost
     std::vector<int>              sleeps;
     std::string                   bundle{"02.00.00.00"};
     fs::path                      dir;
+    fs::path                      res;
     std::vector<sync::FirstRunSummary> first_runs;
     struct Halt { std::string kind; std::vector<Key> local, remote; };
     std::vector<Halt>             halts;
@@ -723,6 +735,7 @@ struct FakeHost : sync::IHost
     void        sleep_ms(int ms) override { sleeps.push_back(ms); }
     std::string bundle_version() override { return bundle; }
     fs::path    data_dir() override { return dir; }
+    fs::path    resources_dir() override { return res; }
     void        on_first_run(const sync::FirstRunSummary& s) override { first_runs.push_back(s); }
     void        on_candidates(const std::vector<Key>& c) override { candidate_calls.push_back(c); }
     void        on_halt(const std::string& kind, const std::vector<Key>& l, const std::vector<Key>& r) override { halts.push_back({kind, l, r}); }
@@ -752,7 +765,27 @@ struct Env
     FakeStore          store;
     sync::Mirror       mirror{host, cloud, store};
 
-    Env() { host.dir = dir.path(); }
+    // Keys the fake Bambu Studio knows. "filament_flow_ratio" is an OrcaSlicer key it does not know; "studio_only" is not an OrcaSlicer key.
+    static std::vector<std::string> studio_key_list()
+    {
+        return {"filament_cost", "filament_density", "filament_type", "filament_vendor", "layer_height", "studio_only"};
+    }
+    Env()
+    {
+        host.dir = dir.path();
+        host.res = dir.path() / "res";
+        fs::create_directories(host.res / "printers");
+        nlohmann::json j;
+        j["source"]         = "test";
+        j["studio_version"] = "0";
+        j["keys"]           = studio_key_list();
+        boost::nowide::ofstream out((host.res / "printers" / "bambu_studio_option_keys.json").string());
+        out << j.dump();
+    }
+    sync::BaseStore base_store(const std::string& orca = "orca1", const std::string& bambu = "bambu1") const
+    {
+        return sync::BaseStore(sync::BaseStore::dir(dir.path(), orca, bambu));
+    }
 
     fs::path ledger_path(const std::string& orca = "orca1", const std::string& bambu = "bambu1") const
     {
@@ -777,9 +810,19 @@ struct Env
         sync::LocalItem item;
         item.key                 = fkey(name);
         item.cls.eligibility     = sync::Eligibility::Eligible;
-        item.upload              = {{"filament_cost", name}, {"type", "filament"}};
+        item.upload              = {{"filament_cost", hash}, {"type", "filament"}};
         item.hash                = hash;
         item.mtime               = mtime;
+        store.snap->items.push_back(item);
+    }
+    // A local preset whose upload map is exactly `body` (it equals the remote copy).
+    void add_local_body(const std::string& name, const sync::ValueMap& body)
+    {
+        sync::LocalItem item;
+        item.key             = fkey(name);
+        item.cls.eligibility = sync::Eligibility::Eligible;
+        item.upload          = body;
+        item.hash            = sync::upload_hash(body);
         store.snap->items.push_back(item);
     }
     void add_candidate(const std::string& name)
@@ -797,7 +840,10 @@ struct Env
     void set_local_hash(const std::string& name, const std::string& hash)
     {
         for (auto& i : store.snap->items)
-            if (i.key == fkey(name)) i.hash = hash;
+            if (i.key == fkey(name)) {
+                i.hash                  = hash;
+                i.upload["filament_cost"] = hash;
+            }
     }
     void add_remote(const std::string& name, const std::string& id, long long time, bool with_body = true)
     {
@@ -832,12 +878,18 @@ struct Env
     }
 };
 
+// The mirror's change-detection hash of a local preset made by Env::add_local(name, literal).
+std::string H(const std::string& literal)
+{
+    return sync::upload_hash({{"filament_cost", literal}});
+}
+
 sync::LedgerEntry linked(const std::string& id, long long time, const std::string& hash)
 {
     sync::LedgerEntry e;
     e.setting_id  = id;
     e.update_time = time;
-    e.synced_hash = hash;
+    e.synced_hash = H(hash);
     return e;
 }
 
@@ -1066,7 +1118,7 @@ TEST_CASE("The first run is a dry run that shows its summary and executes nothin
     const auto body = valid_body("PD", "d");
     e.cloud.rows.push_back({PresetType::Filament, "Down", "PD", 100});
     e.cloud.bodies["Down"] = body;
-    e.add_local("Same", sync::upload_hash(valid_body("PS", "s")));
+    e.add_local_body("Same", valid_body("PS", "s"));
     e.cloud.rows.push_back({PresetType::Filament, "Same", "PS", 100});
     e.cloud.bodies["Same"] = valid_body("PS", "s");
     sync::LocalItem cand;
@@ -1286,12 +1338,12 @@ TEST_CASE("Create links the new Bambu id and sets the clock offset", "[BblPreset
     e.pass();
 
     REQUIRE(e.cloud.calls.size() == 1);
-    CHECK(e.cloud.created_values[0].at("filament_cost") == "New");
+    CHECK(e.cloud.created_values[0].at("filament_cost") == "hn");
     const auto entry = e.mirror.ledger()->get(fkey("New"));
     REQUIRE(entry.has_value());
     CHECK(entry->setting_id == "PF1");
     CHECK(entry->update_time == 5000);
-    CHECK(entry->synced_hash == "hn");
+    CHECK(entry->synced_hash == H("hn"));
     CHECK(entry->state == "linked");
     CHECK(entry->absent_passes == 0);
     CHECK(entry->absent_since == 0);
@@ -1324,13 +1376,13 @@ TEST_CASE("Update writes the local values to the linked Bambu id", "[BblPresetSy
     REQUIRE(entry.has_value());
     CHECK(entry->setting_id == "P1");
     CHECK(entry->update_time == 5000);
-    CHECK(entry->synced_hash == "h2");
+    CHECK(entry->synced_hash == H("h2"));
     CHECK(entry->state == "linked");
     CHECK(e.mirror.ledger()->clock_offset() == 5000 - e.host.t);
     e.check_disk();
 }
 
-TEST_CASE("Update over a changed remote copy saves that copy first", "[BblPresetSync]")
+TEST_CASE("A change on both sides is a merging pull that saves both copies first", "[BblPresetSync]")
 {
     Env e;
     e.seed({{fkey("Mine"), linked("P1", 100, "h1")}});
@@ -1338,30 +1390,29 @@ TEST_CASE("Update over a changed remote copy saves that copy first", "[BblPreset
     e.add_remote("Mine", "P1", 500);
     const fs::path expected = sync::Ledger::backup_dir(e.dir.path()) / "19700112-134640_filament_Mine_remote.json";
 
-    bool existed_at_call = false;
-    e.cloud.before_update = [&](const std::string&) { existed_at_call = fs::exists(expected); };
-
-    SECTION("the backup is written before the cloud call")
+    SECTION("the backup is written and the pull asks for the local side to win")
     {
         e.pass();
-        CHECK(existed_at_call);
-        CHECK(e.cloud.count("update P1") == 1);
+        CHECK(fs::exists(expected));
+        CHECK(e.cloud.count("update") == 0);
+        REQUIRE(e.store.pulls.size() == 1);
+        CHECK(e.store.pulls[0].backup_local);
+        CHECK(e.store.pulls[0].body.at("filament_cost") == "h2"); // no base: both changed, the local value wins
         std::ifstream in(expected.string());
         const auto    json = nlohmann::json::parse(in);
         CHECK(json.at("filament_cost").get<std::string>() == "Mine");
         CHECK(json.at("setting_id").get<std::string>() == "P1");
-        CHECK(e.mirror.ledger()->get(fkey("Mine"))->synced_hash == "h2");
     }
-    SECTION("an unwritable backup skips the update")
+    SECTION("an unwritable backup skips the pull")
     {
         {
             boost::nowide::ofstream out((sync::Ledger::backup_dir(e.dir.path())).string(), std::ios::binary);
             out << "a file where the folder should be";
         }
         e.pass();
-        CHECK(e.cloud.count("update") == 0);
-        CHECK(has_note(e.mirror.status(), "update skipped for filament/Mine"));
-        CHECK(e.mirror.ledger()->get(fkey("Mine"))->synced_hash == "h1");
+        CHECK(e.store.pulls.empty());
+        CHECK(has_note(e.mirror.status(), "pull skipped for filament/Mine"));
+        CHECK(e.mirror.ledger()->get(fkey("Mine"))->synced_hash == H("h1"));
     }
 }
 
@@ -1374,7 +1425,7 @@ TEST_CASE("A 422 on update leaves the entry and forces a list on the next pass",
     e.cloud.update_script.push_back(sync::WriteResult{false, 422, "", "", 0});
     e.pass();
     CHECK(has_note(e.mirror.status(), "remote copy missing for filament/Mine"));
-    CHECK(e.mirror.ledger()->get(fkey("Mine"))->synced_hash == "h1");
+    CHECK(e.mirror.ledger()->get(fkey("Mine"))->synced_hash == H("h1"));
     CHECK(e.cloud.list_calls == 1);
     e.pass(); // no manual trigger, no interval
     CHECK(e.cloud.list_calls == 2);
@@ -1386,7 +1437,7 @@ TEST_CASE("Link pairs a local preset with an identical remote row", "[BblPresetS
     Env e;
     e.seed({});
     const auto body = valid_body("PL", "x");
-    e.add_local("Same", sync::upload_hash(body));
+    e.add_local_body("Same", body);
     e.cloud.rows.push_back({PresetType::Filament, "Same", "PL", 321});
     e.cloud.bodies["Same"] = body;
     e.pass();
@@ -1471,12 +1522,14 @@ TEST_CASE("A pull marks its key pending until the store is done", "[BblPresetSyn
     CHECK(e.mirror.status().planned.empty());
     CHECK(has_waiting(e.mirror.status(), "filament/Remote: pending"));
 
-    e.store.held[0](sync::OpOutcome{sync::OpResult::Applied, "", "hx"});
+    sync::OpOutcome applied{sync::OpResult::Applied, "", "hx"};
+    applied.new_upload = e.cloud.bodies["Remote"]; // the preset now holds what Bambu holds
+    e.store.held[0](applied);
     const auto entry = e.mirror.ledger()->get(fkey("Remote"));
     REQUIRE(entry.has_value());
     CHECK(entry->setting_id == "P5");
     CHECK(entry->update_time == 200);
-    CHECK(entry->synced_hash == "hx");
+    CHECK(entry->synced_hash == sync::upload_hash(e.cloud.bodies["Remote"])); // a plain download uploads nothing later
     CHECK(entry->state == "linked");
     e.check_disk();
 }
@@ -1489,9 +1542,10 @@ TEST_CASE("Each pull outcome has its effect", "[BblPresetSync]")
 
     SECTION("applied")
     {
-        e.store.outcome = {sync::OpResult::Applied, "", "hx"};
+        e.store.outcome            = {sync::OpResult::Applied, "", "hx"};
+        e.store.outcome.new_upload = e.cloud.bodies["Remote"];
         e.pass();
-        CHECK(e.mirror.ledger()->get(fkey("Remote"))->synced_hash == "hx");
+        CHECK(e.mirror.ledger()->get(fkey("Remote"))->synced_hash == sync::upload_hash(e.cloud.bodies["Remote"]));
         e.check_disk();
     }
     SECTION("unresolvable")
@@ -1727,7 +1781,7 @@ TEST_CASE("A 413 marks the entry too large and is not retried until the hash cha
     const auto entry = e.mirror.ledger()->get(fkey("Big"));
     REQUIRE(entry.has_value());
     CHECK(entry->state == "too_large");
-    CHECK(entry->synced_hash == "hb");
+    CHECK(entry->synced_hash == H("hb"));
     CHECK(entry->setting_id.empty());
     e.check_disk();
 
@@ -2104,7 +2158,8 @@ TEST_CASE("forget erases the entry and the next pass treats the preset as new", 
         e.cloud.rows.clear();
         e.cloud.rows.push_back({PresetType::Filament, "Mine", "P2", 400});
         e.cloud.bodies["Mine"] = valid_body("P2", "x");
-        e.set_local_hash("Mine", sync::upload_hash(valid_body("P2", "x")));
+        e.store.snap->items[0].upload = valid_body("P2", "x");
+        e.store.snap->items[0].hash   = sync::upload_hash(valid_body("P2", "x"));
         e.mirror.forget(fkey("Mine"));
         e.pass();
         const auto entry = e.mirror.ledger()->get(fkey("Mine"));
@@ -2142,4 +2197,332 @@ TEST_CASE("The upload hash of a child ignores filament_id and a root keeps it", 
     sync::ValueMap empty_b = root_b;
     empty_b["inherits"]    = "";
     CHECK(sync::upload_hash(empty_a) != sync::upload_hash(empty_b));
+}
+
+// ---------------------------------------------------------------------------
+// Setting-level merge
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A valid Bambu body (a child of "BBL PLA") with extra settings.
+sync::ValueMap body_with(const std::string& id, const sync::ValueMap& extra)
+{
+    sync::ValueMap b = valid_body(id, "1");
+    for (const auto& [k, v] : extra) b[k] = v;
+    return b;
+}
+
+// The mirror's hash of a preset whose upload map and base are both `body` (nothing left to upload).
+std::string synced_for(const sync::ValueMap& body) { return sync::upload_hash(body); }
+
+sync::LedgerEntry linked_to(const std::string& id, long long time, const sync::ValueMap& body)
+{
+    sync::LedgerEntry e;
+    e.setting_id  = id;
+    e.update_time = time;
+    e.synced_hash = synced_for(body);
+    return e;
+}
+
+void set_upload(Env& e, const std::string& name, const sync::ValueMap& upload)
+{
+    for (auto& i : e.store.snap->items)
+        if (i.key == fkey(name)) {
+            i.upload = upload;
+            i.hash   = sync::upload_hash(upload);
+        }
+}
+
+} // namespace
+
+TEST_CASE("An upload carries the settings only Studio understands from the base", "[BblPresetSync]")
+{
+    Env  e;
+    auto base = body_with("P1", {{"studio_only", "S"}});
+    e.seed({{fkey("Mine"), linked_to("P1", 100, base)}});
+    e.base_store().put("P1", base);
+    e.add_local_body("Mine", valid_body("P1", "1")); // the local map has no studio_only
+    e.add_remote("Mine", "P1", 100, false);
+    // local fingerprint = upload_with_foreign(local, base): equals the synced one, nothing to do yet
+    e.pass(sync::Trigger::Manual);
+    CHECK(e.cloud.calls.empty());
+
+    auto changed             = valid_body("P1", "1");
+    changed["filament_cost"] = "9";
+    set_upload(e, "Mine", changed);
+    e.pass(sync::Trigger::Manual);
+
+    REQUIRE(e.cloud.updated_values.size() == 1);
+    CHECK(e.cloud.updated_values[0].at("studio_only") == "S");
+    CHECK(e.cloud.updated_values[0].at("filament_cost") == "9");
+    const auto stored = e.base_store().get("P1");
+    REQUIRE(stored.has_value());
+    CHECK(stored->at("studio_only") == "S");
+    CHECK(stored->at("filament_cost") == "9");
+    CHECK(e.mirror.ledger()->get(fkey("Mine"))->synced_hash == sync::upload_hash(e.cloud.updated_values[0]));
+
+    e.pass(sync::Trigger::Manual);
+    CHECK(e.cloud.count("update") == 1);
+}
+
+TEST_CASE("A setting Studio dropped is kept locally and not uploaded again", "[BblPresetSync]")
+{
+    Env  e;
+    auto base = body_with("P1", {{"filament_flow_ratio", "0.9"}}); // OrcaSlicer-only key
+    e.seed({{fkey("Mine"), linked_to("P1", 100, base)}});
+    e.base_store().put("P1", base);
+    e.add_local_body("Mine", base);
+    // Studio saved the preset: new cost, flow ratio gone.
+    auto remote             = valid_body("P1", "1");
+    remote["filament_cost"] = "2";
+    e.cloud.rows.push_back({PresetType::Filament, "Mine", "P1", 200});
+    e.cloud.bodies["Mine"] = remote;
+    auto after             = base;
+    after["filament_cost"] = "2";
+    e.store.outcome.new_upload = after;
+
+    e.pass(sync::Trigger::Manual);
+    REQUIRE(e.store.pulls.size() == 1);
+    CHECK(e.store.pulls[0].body.at("filament_flow_ratio") == "0.9");
+    CHECK(e.store.pulls[0].body.at("filament_cost") == "2");
+    CHECK(e.cloud.calls.empty());
+    CHECK(has_note(e.mirror.status(), "kept 1 OrcaSlicer-only settings for filament/Mine"));
+    CHECK(e.base_store().get("P1") == remote);
+
+    set_upload(e, "Mine", after);
+    for (int i = 0; i < 3; ++i) {
+        e.pass(sync::Trigger::Manual);
+        CHECK(e.cloud.calls.empty());
+        CHECK(e.store.pulls.size() == 1);
+    }
+    e.check_disk();
+}
+
+TEST_CASE("A plain download uploads nothing even when the preset holds more Studio-known keys", "[BblPresetSync]")
+{
+    Env e;
+    e.seed({});
+    const auto remote = valid_body("P1", "1");
+    e.cloud.rows.push_back({PresetType::Filament, "New", "P1", 200});
+    e.cloud.bodies["New"] = remote;
+    auto after            = remote;
+    after["filament_density"] = "1.24"; // the preset layout adds a key the body lacks
+    e.store.outcome.new_upload = after;
+    e.add_local_body("Seed", remote); // unrelated preset so the list is not empty-checked
+    e.cloud.rows.push_back({PresetType::Filament, "Seed", "P0", 100});
+    e.cloud.bodies["Seed"] = body_with("P0", {});
+
+    e.pass(sync::Trigger::Manual);
+    REQUIRE(e.store.pulls.size() >= 1);
+    e.add_local_body("New", after);
+    for (int i = 0; i < 3; ++i) {
+        e.pass(sync::Trigger::Manual);
+        CHECK(e.cloud.count("update P1") == 0);
+        CHECK(e.cloud.count("create New") == 0);
+    }
+    // A real local change goes up once.
+    auto edited             = after;
+    edited["filament_cost"] = "77";
+    set_upload(e, "New", edited);
+    e.pass(sync::Trigger::Manual);
+    CHECK(e.cloud.count("update P1") == 1);
+    e.pass(sync::Trigger::Manual);
+    CHECK(e.cloud.count("update P1") == 1);
+}
+
+TEST_CASE("A setting Studio removed is removed from the pulled body", "[BblPresetSync]")
+{
+    Env  e;
+    auto base = body_with("P1", {{"filament_density", "1.3"}});
+    e.seed({{fkey("Mine"), linked_to("P1", 100, base)}});
+    e.base_store().put("P1", base);
+    e.add_local_body("Mine", base);
+    e.cloud.rows.push_back({PresetType::Filament, "Mine", "P1", 200});
+    e.cloud.bodies["Mine"] = valid_body("P1", "1");
+    e.pass(sync::Trigger::Manual);
+    REQUIRE(e.store.pulls.size() == 1);
+    CHECK(e.store.pulls[0].body.count("filament_density") == 0);
+    CHECK(e.store.pulls[0].body.at("filament_cost") == "1");
+    CHECK(e.store.pulls[0].body.at("setting_id") == "P1");
+}
+
+TEST_CASE("Changes to different settings on both sides merge once and then upload once", "[BblPresetSync]")
+{
+    Env  e;
+    auto base = body_with("P1", {{"filament_density", "1.0"}});
+    e.seed({{fkey("Mine"), linked_to("P1", 100, base)}});
+    e.base_store().put("P1", base);
+    e.add_local_body("Mine", base);
+    auto local             = base;
+    local["filament_cost"] = "5";
+    set_upload(e, "Mine", local);
+    auto remote                = base;
+    remote["filament_density"] = "2.0";
+    e.cloud.rows.push_back({PresetType::Filament, "Mine", "P1", 500});
+    e.cloud.bodies["Mine"] = remote;
+    auto merged            = local;
+    merged["filament_density"] = "2.0";
+    e.store.outcome.new_upload = merged;
+
+    e.pass(sync::Trigger::Manual);
+    REQUIRE(e.store.pulls.size() == 1);
+    CHECK(e.store.pulls[0].backup_local);
+    CHECK(e.store.pulls[0].body.at("filament_cost") == "5");
+    CHECK(e.store.pulls[0].body.at("filament_density") == "2.0");
+    CHECK(e.cloud.calls.empty());
+    CHECK(fs::exists(sync::Ledger::backup_dir(e.dir.path()) / "19700112-134640_filament_Mine_remote.json"));
+    CHECK(e.mirror.ledger()->get(fkey("Mine"))->synced_hash == sync::upload_hash(remote)); // the merged preset still has to go up
+    CHECK(e.base_store().get("P1") == remote);
+
+    set_upload(e, "Mine", merged);
+    e.pass(sync::Trigger::Manual);
+    CHECK(e.cloud.count("update P1") == 1);
+    REQUIRE(e.cloud.updated_values.size() == 1);
+    CHECK(e.cloud.updated_values[0].at("filament_cost") == "5");
+    CHECK(e.cloud.updated_values[0].at("filament_density") == "2.0");
+    e.pass(sync::Trigger::Manual);
+    e.pass(sync::Trigger::Manual);
+    CHECK(e.cloud.count("update P1") == 1);
+    CHECK(e.store.pulls.size() == 1);
+}
+
+TEST_CASE("A linked preset that is not eligible still syncs both ways", "[BblPresetSync]")
+{
+    Env  e;
+    auto base = body_with("P1", {});
+    e.seed({{fkey("Mine"), linked_to("P1", 100, base)}});
+    e.base_store().put("P1", base);
+    e.add_local_body("Mine", base);
+    e.store.snap->items[0].cls.eligibility = sync::Eligibility::Ineligible;
+    e.store.snap->items[0].cls.reason      = "parent_not_bambu";
+
+    SECTION("a local change is uploaded")
+    {
+        e.add_remote("Mine", "P1", 100, false);
+        auto changed             = base;
+        changed["filament_cost"] = "8";
+        set_upload(e, "Mine", changed);
+        e.pass(sync::Trigger::Manual);
+        CHECK(e.cloud.count("update P1") == 1);
+    }
+    SECTION("a remote change is pulled")
+    {
+        e.cloud.rows.push_back({PresetType::Filament, "Mine", "P1", 300});
+        auto remote             = base;
+        remote["filament_cost"] = "3";
+        e.cloud.bodies["Mine"]  = remote;
+        e.pass(sync::Trigger::Manual);
+        REQUIRE(e.store.pulls.size() == 1);
+        CHECK(e.store.pulls[0].body.at("filament_cost") == "3");
+    }
+    SECTION("an unlinked ineligible preset is left alone")
+    {
+        Env other;
+        other.seed({});
+        other.add_local("Foreign", "hf");
+        other.store.snap->items[0].cls.eligibility = sync::Eligibility::Ineligible;
+        other.pass(sync::Trigger::Manual);
+        CHECK(other.cloud.calls.empty());
+    }
+}
+
+TEST_CASE("Bodies already downloaded are not asked for again on an unconfirmed first run", "[BblPresetSync]")
+{
+    Env e;
+    e.cloud.drain_wanted_only = true;
+    e.cloud.rows.push_back({PresetType::Filament, "Down", "PD", 100});
+    e.cloud.bodies["Down"] = valid_body("PD", "d");
+
+    e.pass(sync::Trigger::Manual);
+    CHECK(e.cloud.wanted == std::vector<Key>{fkey("Down")});
+    CHECK(e.mirror.status().planned == std::vector<std::string>{"pull filament/Down"});
+    CHECK(e.mirror.status().last_result == "dry run");
+
+    e.pass(sync::Trigger::Manual);
+    CHECK(e.cloud.wanted.empty());
+    CHECK(e.mirror.status().planned == std::vector<std::string>{"pull filament/Down"});
+    CHECK(e.mirror.status().last_result == "dry run");
+
+    // A newer row is downloaded again.
+    e.cloud.rows[0].update_time = 150;
+    e.pass(sync::Trigger::Manual);
+    CHECK(e.cloud.wanted == std::vector<Key>{fkey("Down")});
+
+    // Confirmed: the cached body is used for the real pull.
+    e.mirror.confirm_first_run(true);
+    e.pass(sync::Trigger::Manual);
+    CHECK(e.cloud.wanted.empty());
+    REQUIRE(e.store.pulls.size() == 1);
+    CHECK(e.store.pulls[0].body.at("filament_cost") == "d");
+}
+
+TEST_CASE("The base copy goes away with its entry", "[BblPresetSync]")
+{
+    SECTION("remote delete")
+    {
+        Env  e;
+        auto base = body_with("P1", {});
+        e.seed({{fkey("Mine"), linked_to("P1", 100, base)}});
+        e.base_store().put("P1", base);
+        e.cloud.rows.push_back({PresetType::Filament, "Mine", "P1", 100});
+        e.cloud.bodies["Mine"] = base;
+        e.pass(sync::Trigger::Manual);
+        CHECK(e.cloud.count("remove P1") == 1);
+        CHECK_FALSE(e.base_store().get("P1").has_value());
+    }
+    SECTION("drop entry")
+    {
+        Env  e;
+        auto base = body_with("P1", {});
+        e.seed({{fkey("Mine"), linked_to("P1", 100, base)}});
+        e.base_store().put("P1", base);
+        e.pass(sync::Trigger::Manual); // gone on both sides
+        CHECK_FALSE(e.mirror.ledger()->get(fkey("Mine")).has_value());
+        CHECK_FALSE(e.base_store().get("P1").has_value());
+    }
+    SECTION("local delete")
+    {
+        Env  e;
+        auto base  = body_with("P1", {});
+        auto entry = linked_to("P1", 100, base);
+        entry.absent_passes = 1;
+        entry.absent_since  = 1000000 - 1000;
+        e.seed({{fkey("Gone"), entry}, {fkey("Keep"), linked_to("P2", 100, base)}});
+        e.base_store().put("P1", base);
+        e.base_store().put("P2", base);
+        e.add_local_body("Gone", base);
+        e.add_local_body("Keep", base);
+        e.cloud.rows.push_back({PresetType::Filament, "Keep", "P2", 100});
+        e.pass(sync::Trigger::Manual);
+        REQUIRE(e.store.deletes.size() == 1);
+        CHECK_FALSE(e.base_store().get("P1").has_value());
+        CHECK(e.base_store().get("P2").has_value());
+    }
+    SECTION("forget")
+    {
+        Env  e;
+        auto base = body_with("P1", {});
+        e.seed({{fkey("Mine"), linked_to("P1", 100, base)}});
+        e.base_store().put("P1", base);
+        e.add_local_body("Mine", base);
+        e.pass(); // loads the session
+        e.mirror.forget(fkey("Mine"));
+        CHECK_FALSE(e.base_store().get("P1").has_value());
+    }
+}
+
+TEST_CASE("A lost base merges with an empty base and keeps both sides", "[BblPresetSync]")
+{
+    Env e;
+    e.seed({{fkey("Mine"), linked("P1", 100, "h1")}});
+    e.add_local("Mine", "h1"); // unchanged since the last sync
+    e.cloud.rows.push_back({PresetType::Filament, "Mine", "P1", 200});
+    e.cloud.bodies["Mine"] = body_with("P1", {{"filament_density", "2"}});
+    e.cloud.bodies["Mine"].erase("filament_cost");
+
+    e.pass(sync::Trigger::Manual);
+    REQUIRE(e.store.pulls.size() == 1);
+    CHECK(e.store.pulls[0].body.at("filament_cost") == "h1");    // local value survives
+    CHECK(e.store.pulls[0].body.at("filament_density") == "2");  // remote value arrives
 }

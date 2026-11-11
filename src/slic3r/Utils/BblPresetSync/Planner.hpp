@@ -55,6 +55,8 @@ struct Action
     std::string setting_id;             // Bambu id involved ("" for Create)
     bool        backup_local{false};    // copy the local files to the backup folder first
     bool        backup_remote{false};   // save the remote body to the backup folder first
+    bool        merge_conflict{false};  // Pull: both sides changed (or an unlinked pair differs)
+    bool        local_newer{false};     // Pull with merge_conflict: the local side wins a setting changed on both sides
     bool        rename_from_set{false};
     Key         rename_from{};          // Pull with rename_from_set: afterwards the old local preset rename_from is deleted
     int         absent_passes{0};       // SetAbsent: the new count

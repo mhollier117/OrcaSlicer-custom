@@ -4,6 +4,7 @@ add_executable(${_TEST_NAME}_tests
     test_bambu_filament_ids.cpp
     test_bbl_preset_sync.cpp
     test_bbl_preset_sync_kcopy.cpp
+    test_bbl_preset_sync_merge.cpp
     test_bbl_preset_sync_mirror.cpp
     test_bbl_preset_sync_ops.cpp
     test_bed_exclusion_fields.cpp

@@ -19,8 +19,8 @@ struct LocalItem
 {
     Key         key;                 // from Preset::type
     Classified  cls;
-    ValueMap    upload;              // filled only when Eligible
-    std::string hash;                // upload_hash(upload), only when Eligible
+    ValueMap    upload;              // empty only when get_differed_values_to_update failed
+    std::string hash;                // upload_hash(upload), empty when upload is
     long long   mtime{0};            // last write time of preset.file, unix seconds; 0 when the file is missing
     std::string orca_setting_id;
     std::string filament_id;

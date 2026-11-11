@@ -2,6 +2,7 @@
 
 #include "BodyCheck.hpp"
 #include "Hash.hpp"
+#include "Merge.hpp"
 #include "Planner.hpp"
 
 #include <boost/date_time/posix_time/posix_time.hpp>
@@ -115,7 +116,7 @@ void Mirror::record_failure(const Key& key, long long now)
 }
 
 void Mirror::finish_pull(const Session& s, const std::shared_ptr<Ledger>& ledger, const Action& action, long long row_update_time,
-                         const OpOutcome& outcome)
+                         const OpOutcome& outcome, const PullFollowUp& follow)
 {
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -129,12 +130,26 @@ void Mirror::finish_pull(const Session& s, const std::shared_ptr<Ledger>& ledger
         LedgerEntry e = ledger->get(action.key).value_or(LedgerEntry{});
         e.setting_id    = action.setting_id;
         e.update_time   = row_update_time;
-        e.synced_hash   = outcome.new_hash;
+        if (follow.needs_upload) {
+            // The merged preset differs from Bambu's: the next pass sees a local change and uploads it once.
+            e.synced_hash = upload_hash(follow.remote_body);
+        } else {
+            // Exactly what the pass computes for the unchanged preset, so a plain download uploads nothing.
+            const PresetType type = action.key.type;
+            const KeyTest    orca = [type](const std::string& k) { return orca_knows(type, k); };
+            e.synced_hash = fingerprint(upload_with_foreign(outcome.new_upload, follow.remote_body, orca), follow.remote_body, orca,
+                                        [this](const std::string& k) { return m_studio.knows(k); });
+        }
         e.state         = "linked";
         e.absent_passes = 0;
         e.absent_since  = 0;
         ledger->put(action.key, e);
-        if (action.rename_from_set) ledger->erase(action.rename_from);
+        if (action.rename_from_set) {
+            const auto old = ledger->get(action.rename_from);
+            if (old && !old->setting_id.empty() && old->setting_id != action.setting_id && follow.base) follow.base->erase(old->setting_id);
+            ledger->erase(action.rename_from);
+        }
+        if (follow.base) follow.base->put(action.setting_id, follow.remote_body);
         break;
     }
     case OpResult::Unresolvable: {
@@ -157,7 +172,8 @@ void Mirror::finish_pull(const Session& s, const std::shared_ptr<Ledger>& ledger
     if (outcome.result == OpResult::Unresolvable) m_host.notify("unresolvable", action.key.str() + ": " + outcome.reason);
 }
 
-void Mirror::finish_delete(const Session& s, const std::shared_ptr<Ledger>& ledger, const Action& action, const OpOutcome& outcome)
+void Mirror::finish_delete(const Session& s, const std::shared_ptr<Ledger>& ledger, const Action& action, const OpOutcome& outcome,
+                           const std::shared_ptr<BaseStore>& base)
 {
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -166,7 +182,12 @@ void Mirror::finish_delete(const Session& s, const std::shared_ptr<Ledger>& ledg
         if (outcome.result == OpResult::Applied) m_backoff.erase(action.key);
     }
     switch (outcome.result) {
-    case OpResult::Applied: ledger->erase(action.key); break;
+    case OpResult::Applied: {
+        const auto e = ledger->get(action.key);
+        if (e && !e->setting_id.empty() && base) base->erase(e->setting_id);
+        ledger->erase(action.key);
+        break;
+    }
     case OpResult::Postponed: {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_status.waiting.push_back(action.key.str() + ": " + outcome.reason);
@@ -208,6 +229,8 @@ void Mirror::run_pass(Trigger trigger)
             const bool                  uid_changed = !m_session || m_session->bambu_uid != s.bambu_uid;
             m_session                                = s;
             m_ledger                                 = fresh;
+            m_base                                   = std::make_shared<BaseStore>(BaseStore::dir(m_host.data_dir(), s.orca_user_id, s.bambu_uid));
+            m_body_cache.clear();
             m_pending.clear();
             m_backoff.clear();
             m_creates_blocked      = false;
@@ -224,6 +247,7 @@ void Mirror::run_pass(Trigger trigger)
         }
     }
     std::shared_ptr<Ledger> ledger;
+    std::shared_ptr<BaseStore> base;
     bool                    have_list;
     long long               last_list;
     std::set<Key>           pending;
@@ -231,6 +255,7 @@ void Mirror::run_pass(Trigger trigger)
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         ledger    = m_ledger;
+        base      = m_base;
         have_list = m_have_list;
         last_list = m_last_list;
         pending   = m_pending;
@@ -241,6 +266,12 @@ void Mirror::run_pass(Trigger trigger)
             return;
         }
     }
+
+    if (!m_studio_loaded) {
+        m_studio        = StudioKeys::load(m_host.resources_dir() / "printers" / "bambu_studio_option_keys.json");
+        m_studio_loaded = true;
+    }
+    const KeyTest studio = [this](const std::string& k) { return m_studio.knows(k); };
 
     // 2. Halted.
     if (const std::string halted = ledger->halted(); !halted.empty()) {
@@ -277,6 +308,40 @@ void Mirror::run_pass(Trigger trigger)
         if (announce) m_host.on_candidates(candidates);
     }
 
+    // The planner's view of the local presets. `remote_bodies`: valid bodies by key, for presets that are not linked yet.
+    std::map<Key, std::string> fp_hash; // key -> hash compared with the ledger's synced_hash
+    auto build_locals = [&](const LedgerView& lv, const std::map<Key, const ValueMap*>* remote_bodies) {
+        std::vector<LocalPreset> out;
+        fp_hash.clear();
+        static const ValueMap none;
+        for (const LocalItem& item : snap.items) {
+            LocalPreset l;
+            l.key   = item.key;
+            l.state = LocalState::Ineligible;
+            if (item.upload.empty()) {
+                out.push_back(l);
+                continue;
+            }
+            const auto e      = lv.entries.find(item.key);
+            const bool linked = e != lv.entries.end() && (e->second.state == "linked" || e->second.state == "too_large");
+            ValueMap   ref;
+            if (linked) {
+                if (auto b = base->get(e->second.setting_id)) ref = std::move(*b);
+            } else if (remote_bodies != nullptr) {
+                auto r = remote_bodies->find(item.key);
+                if (r != remote_bodies->end()) ref = *r->second;
+            }
+            const PresetType type = item.key.type;
+            const KeyTest    orca = [type](const std::string& k) { return orca_knows(type, k); };
+            l.state = (item.cls.eligibility == Eligibility::Eligible || linked) ? LocalState::Eligible : LocalState::Ineligible;
+            l.hash  = fingerprint(upload_with_foreign(item.upload, ref, orca), ref, orca, studio);
+            l.mtime = item.mtime;
+            fp_hash[item.key] = l.hash;
+            out.push_back(std::move(l));
+        }
+        return out;
+    };
+
     // 4. Is a list needed?
     const LedgerView view = view_of(*ledger);
     {
@@ -287,11 +352,11 @@ void Mirror::run_pass(Trigger trigger)
         };
         bool need = !have_list || trigger == Trigger::Manual || now - last_list >= LIST_INTERVAL_SECONDS;
         if (!need) {
-            for (const LocalItem& item : snap.items) {
-                if (item.cls.eligibility != Eligibility::Eligible || skip(item.key)) continue;
-                auto e = view.entries.find(item.key);
+            for (const LocalPreset& l : build_locals(view, nullptr)) {
+                if (l.state != LocalState::Eligible || skip(l.key)) continue;
+                auto e = view.entries.find(l.key);
                 if (e == view.entries.end() ||
-                    ((e->second.state == "linked" || e->second.state == "too_large") && e->second.synced_hash != item.hash)) {
+                    ((e->second.state == "linked" || e->second.state == "too_large") && e->second.synced_hash != l.hash)) {
                     need = true;
                     break;
                 }
@@ -311,8 +376,13 @@ void Mirror::run_pass(Trigger trigger)
     }
 
     // 5. List.
-    const ListResult r = m_cloud.list(m_host.bundle_version(), [&view](const CloudRow& row) {
-        return want_body(Key{row.type, row.name}, row.setting_id, row.update_time, view);
+    auto cache_hit = [this](const std::string& setting_id, long long update_time) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto                        it = m_body_cache.find(setting_id);
+        return it != m_body_cache.end() && it->second.update_time == update_time;
+    };
+    const ListResult r = m_cloud.list(m_host.bundle_version(), [&view, &cache_hit](const CloudRow& row) {
+        return want_body(Key{row.type, row.name}, row.setting_id, row.update_time, view) && !cache_hit(row.setting_id, row.update_time);
     });
     if (!r.ok) {
         bool first;
@@ -353,13 +423,22 @@ void Mirror::run_pass(Trigger trigger)
                 auto it = r.bodies_by_name.find(row.name);
                 if (it != r.bodies_by_name.end()) found = &it->second;
             }
-            const bool wanted = want_body(rr.key, row.setting_id, row.update_time, view);
-            if (found != nullptr) {
+            const bool collided = types_by_name[row.name].size() > 1;
+            const bool cached   = !collided && cache_hit(row.setting_id, row.update_time);
+            const bool wanted   = want_body(rr.key, row.setting_id, row.update_time, view) && !cached;
+            if (found == nullptr && cached) {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                body         = m_body_cache[row.setting_id].body;
+                rr.has_body  = true;
+                rr.body_hash = upload_hash(body);
+            } else if (found != nullptr) {
                 const BodyStatus st = check_body(*found, row.type, row.setting_id, body_is_root(*found));
                 if (st == BodyStatus::Valid) {
                     rr.has_body  = true;
                     rr.body_hash = upload_hash(*found);
                     body         = *found;
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    m_body_cache[row.setting_id] = CachedBody{row.update_time, *found};
                 } else if (wanted) {
                     notes.push_back("body unavailable for " + rr.key.str() + ": " + body_status_name(st));
                 }
@@ -381,7 +460,11 @@ void Mirror::run_pass(Trigger trigger)
     };
 
     // 7. Plan.
-    Plan plan = make_plan(to_local_presets(snap), rows, view, now);
+    std::map<Key, const ValueMap*> remote_bodies;
+    for (size_t i = 0; i < rows.size(); ++i)
+        if (rows[i].has_body) remote_bodies.emplace(rows[i].key, &row_bodies[i]);
+    const std::vector<LocalPreset> locals = build_locals(view, &remote_bodies);
+    Plan                           plan   = make_plan(locals, rows, view, now);
     notes.insert(notes.end(), plan.notes.begin(), plan.notes.end());
 
     std::vector<Action>      actions;
@@ -412,9 +495,12 @@ void Mirror::run_pass(Trigger trigger)
         for (const Action& a : plan.actions) {
             switch (a.type) {
             case ActionType::Create: sum.uploads.push_back(a.key); break;
-            case ActionType::Pull: (a.backup_local ? sum.conflicts_remote_wins : sum.downloads).push_back(a.key); break;
+            case ActionType::Pull:
+                if (a.merge_conflict) (a.local_newer ? sum.conflicts_local_wins : sum.conflicts_remote_wins).push_back(a.key);
+                else (a.backup_local ? sum.conflicts_remote_wins : sum.downloads).push_back(a.key);
+                break;
             case ActionType::Link: sum.links.push_back(a.key); break;
-            case ActionType::Update: (a.backup_remote ? sum.conflicts_local_wins : sum.uploads).push_back(a.key); break;
+            case ActionType::Update: sum.uploads.push_back(a.key); break;
             case ActionType::DeleteRemote: sum.remote_deletes.push_back(a.key); break;
             default: break;
             }
@@ -520,7 +606,8 @@ void Mirror::run_pass(Trigger trigger)
         if (w.http_code == 413) {
             LedgerEntry e = ledger->get(key).value_or(LedgerEntry{});
             e.state       = "too_large";
-            e.synced_hash = item != nullptr ? item->hash : std::string();
+            const auto h  = fp_hash.find(key);
+            e.synced_hash = item != nullptr && h != fp_hash.end() ? h->second : std::string();
             ledger->put(key, e);
             changed = true;
             return false;
@@ -558,10 +645,12 @@ void Mirror::run_pass(Trigger trigger)
                 add_waiting(a.key.str() + ": preset limit");
                 break;
             }
-            wrote           = true;
-            WriteResult w   = m_cloud.create(a.key.name, item->upload);
+            wrote                 = true;
+            const ValueMap values = upload_with_foreign(item->upload, ValueMap{}, [t = a.key.type](const std::string& k) { return orca_knows(t, k); });
+            WriteResult    w      = m_cloud.create(a.key.name, values);
             if (w.ok) {
-                link(a.key, w.setting_id, w.update_time, item->hash);
+                base->put(w.setting_id, values);
+                link(a.key, w.setting_id, w.update_time, upload_hash(values));
                 if (w.update_time > 0) ledger->set_clock_offset(w.update_time - now);
                 clear_backoff(a.key);
             } else if (fail(a.key, w, item)) {
@@ -571,35 +660,13 @@ void Mirror::run_pass(Trigger trigger)
         }
         case ActionType::Update: {
             if (item == nullptr) break;
-            if (a.backup_remote) {
-                if (row == nullptr || !row->has_body) {
-                    notes.push_back("remote backup skipped, no body for " + a.key.str());
-                    break;
-                }
-                const fs::path dir  = Ledger::backup_dir(m_host.data_dir());
-                const fs::path file = dir / (utc_stamp(now) + "_" + type_string(a.key.type) + "_" + safe_name(a.key.name) + "_remote.json");
-                bool           ok   = false;
-                try {
-                    boost::system::error_code ec;
-                    fs::create_directories(dir, ec);
-                    boost::nowide::ofstream out(file.string(), std::ios::binary | std::ios::trunc);
-                    if (out) {
-                        out << nlohmann::json(row_bodies[ri]).dump(2);
-                        out.close();
-                        ok = !out.fail();
-                    }
-                } catch (...) {
-                    ok = false;
-                }
-                if (!ok) {
-                    notes.push_back("remote backup failed, update skipped for " + a.key.str());
-                    break;
-                }
-            }
-            wrote         = true;
-            WriteResult w = m_cloud.update(a.setting_id, a.key.name, item->upload);
+            wrote                 = true;
+            const ValueMap values = upload_with_foreign(item->upload, base->get(a.setting_id).value_or(ValueMap{}),
+                                                        [t = a.key.type](const std::string& k) { return orca_knows(t, k); });
+            WriteResult    w      = m_cloud.update(a.setting_id, a.key.name, values);
             if (w.ok) {
-                link(a.key, a.setting_id, w.update_time, item->hash);
+                base->put(a.setting_id, values);
+                link(a.key, a.setting_id, w.update_time, upload_hash(values));
                 if (w.update_time > 0) ledger->set_clock_offset(w.update_time - now);
                 clear_backoff(a.key);
             } else if (w.http_code == 422) {
@@ -614,6 +681,7 @@ void Mirror::run_pass(Trigger trigger)
         case ActionType::DeleteRemote: {
             wrote = true;
             if (m_cloud.remove(a.setting_id)) {
+                if (!a.setting_id.empty()) base->erase(a.setting_id);
                 ledger->erase(a.key);
                 changed = true;
                 clear_backoff(a.key);
@@ -623,9 +691,13 @@ void Mirror::run_pass(Trigger trigger)
             break;
         }
         case ActionType::Link:
-            if (item != nullptr && row != nullptr) link(a.key, a.setting_id, row->update_time, item->hash);
+            if (item != nullptr && row != nullptr && row->has_body) {
+                base->put(a.setting_id, row_bodies[ri]);
+                link(a.key, a.setting_id, row->update_time, upload_hash(row_bodies[ri]));
+            }
             break;
         case ActionType::DropEntry:
+            if (const auto e = ledger->get(a.key); e && !e->setting_id.empty()) base->erase(e->setting_id);
             ledger->erase(a.key);
             changed = true;
             break;
@@ -649,21 +721,56 @@ void Mirror::run_pass(Trigger trigger)
         }
         case ActionType::Pull: {
             if (row == nullptr || !row->has_body) break;
+            const ValueMap& remote_body = row_bodies[ri];
+            if (a.backup_remote) {
+                const fs::path dir  = Ledger::backup_dir(m_host.data_dir());
+                const fs::path file = dir / (utc_stamp(now) + "_" + type_string(a.key.type) + "_" + safe_name(a.key.name) + "_remote.json");
+                bool           ok   = false;
+                try {
+                    boost::system::error_code ec;
+                    fs::create_directories(dir, ec);
+                    boost::nowide::ofstream out(file.string(), std::ios::binary | std::ios::trunc);
+                    if (out) {
+                        out << nlohmann::json(remote_body).dump(2);
+                        out.close();
+                        ok = !out.fail();
+                    }
+                } catch (...) {
+                    ok = false;
+                }
+                if (!ok) {
+                    notes.push_back("remote backup failed, pull skipped for " + a.key.str());
+                    break;
+                }
+            }
+            // A preset that is gone locally is downloaded whole: its base says nothing about what it holds.
+            const ValueMap  base_body = item != nullptr ? base->get(a.setting_id).value_or(ValueMap{}) : ValueMap{};
+            const PresetType type     = a.key.type;
+            const MergeResult m       = merge_bodies(item != nullptr ? item->upload : ValueMap{}, remote_body, base_body, a.local_newer,
+                                                     [type](const std::string& k) { return orca_knows(type, k); }, studio);
             PullOp op;
             op.session             = s;
             op.key                 = a.key;
-            op.body                = row_bodies[ri];
+            op.body                = m.merged;
+            for (const char* k : {"name", "type", "version", "setting_id", "user_id"}) {
+                auto it = remote_body.find(k);
+                if (it != remote_body.end()) op.body[k] = it->second;
+            }
             op.backup_local        = a.backup_local;
             op.rename_from_set     = a.rename_from_set;
             op.rename_from         = a.rename_from;
             op.expected_local_hash = item != nullptr ? item->hash : std::string();
+            if (m.conflicts > 0) notes.push_back("merged " + a.key.str() + ": " + std::to_string(m.conflicts) + " settings differed on both sides");
+            if (!m.kept_unknown_to_studio.empty())
+                notes.push_back("kept " + std::to_string(m.kept_unknown_to_studio.size()) + " OrcaSlicer-only settings for " + a.key.str());
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_pending.insert(a.key);
                 if (a.rename_from_set) m_pending.insert(a.rename_from);
             }
             const long long row_time = row->update_time;
-            m_store.apply_pull(std::move(op), [this, s, ledger, a, row_time](OpOutcome outcome) { finish_pull(s, ledger, a, row_time, outcome); });
+            PullFollowUp    follow{remote_body, m.needs_upload, base};
+            m_store.apply_pull(std::move(op), [this, s, ledger, a, row_time, follow](OpOutcome outcome) { finish_pull(s, ledger, a, row_time, outcome, follow); });
             break;
         }
         case ActionType::DeleteLocal: {
@@ -676,7 +783,7 @@ void Mirror::run_pass(Trigger trigger)
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_pending.insert(a.key);
             }
-            m_store.delete_local(std::move(op), [this, s, ledger, a](OpOutcome outcome) { finish_delete(s, ledger, a, outcome); });
+            m_store.delete_local(std::move(op), [this, s, ledger, a, base](OpOutcome outcome) { finish_delete(s, ledger, a, outcome, base); });
             break;
         }
         }
@@ -737,13 +844,16 @@ void Mirror::set_declined(const Key& key)
 
 void Mirror::forget(const Key& key)
 {
-    std::shared_ptr<Ledger> ledger;
+    std::shared_ptr<Ledger>    ledger;
+    std::shared_ptr<BaseStore> base;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_backoff.erase(key);
         ledger = m_ledger;
+        base   = m_base;
     }
     if (ledger) {
+        if (const auto e = ledger->get(key); e && !e->setting_id.empty() && base) base->erase(e->setting_id);
         ledger->erase(key);
         save_ledger(*ledger);
     }

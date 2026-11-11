@@ -56,15 +56,16 @@ LocalItem make_item(const Preset& preset, PresetCollection& collection, PresetBu
     item.file            = preset.file;
     item.selected        = preset.name == collection.get_selected_preset_name();
 
-    if (item.cls.eligibility == Eligibility::Eligible) {
-        Preset copy = preset;
-        if (bundle.get_differed_values_to_update(copy, item.upload) != 0) {
-            item.upload.clear();
+    // Every user preset gets its upload map: a linked preset stays synced whatever its eligibility.
+    Preset copy = preset;
+    if (bundle.get_differed_values_to_update(copy, item.upload) != 0) {
+        item.upload.clear();
+        if (item.cls.eligibility == Eligibility::Eligible) {
             item.cls.eligibility = Eligibility::Ineligible;
             item.cls.reason      = "no_upload_values";
-        } else {
-            item.hash = upload_hash(item.upload);
         }
+    } else {
+        item.hash = upload_hash(item.upload);
     }
     return item;
 }

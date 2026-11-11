@@ -291,6 +291,11 @@ boost::filesystem::path BblPresetSyncController::data_dir()
     return boost::filesystem::path(Slic3r::data_dir());
 }
 
+boost::filesystem::path BblPresetSyncController::resources_dir()
+{
+    return boost::filesystem::path(Slic3r::resources_dir());
+}
+
 void BblPresetSyncController::on_first_run(const sync::FirstRunSummary& summary)
 {
     const uint64_t generation = m_app.user_preset_session();

@@ -132,6 +132,21 @@ private:
         emit(std::move(a));
     }
 
+    // Both sides changed: the mirror merges setting by setting; the newer side wins a setting changed on both.
+    void merge_pull(const Key& key, const std::string& id, const RemoteRow& r, const LocalPreset& l)
+    {
+        if (!r.has_body) {
+            body_unavailable(r.key);
+            return;
+        }
+        Action a         = make(ActionType::Pull, key, id);
+        a.backup_local   = true;
+        a.backup_remote  = true;
+        a.merge_conflict = true;
+        a.local_newer    = local_wins(l, r);
+        emit(std::move(a));
+    }
+
     void step_a()
     {
         for (const auto& [key, e] : m_ledger.entries) {
@@ -207,12 +222,8 @@ private:
                 } else { // conflict
                     if (!r->has_body) {
                         body_unavailable(key);
-                    } else if (local_wins(*l, *r)) {
-                        Action a        = make(ActionType::Update, key, e.setting_id);
-                        a.backup_remote = true;
-                        emit(std::move(a));
                     } else {
-                        pull(key, e.setting_id, *r, true);
+                        merge_pull(key, e.setting_id, *r, *l);
                     }
                 }
             } else if (ls == LocalState::Missing && r) {
@@ -272,12 +283,8 @@ private:
             }
             if (r->body_hash == l->hash) {
                 emit(make(ActionType::Link, key, r->setting_id));
-            } else if (local_wins(*l, *r)) {
-                Action a        = make(ActionType::Update, key, r->setting_id);
-                a.backup_remote = true;
-                emit(std::move(a));
             } else {
-                pull(key, r->setting_id, *r, true);
+                merge_pull(key, r->setting_id, *r, *l);
             }
         }
     }

@@ -73,6 +73,7 @@ public:
     void                                  sleep_ms(int ms) override;
     std::string                           bundle_version() override;
     boost::filesystem::path               data_dir() override;
+    boost::filesystem::path               resources_dir() override;
     void                                  on_first_run(const BblPresetSync::FirstRunSummary& summary) override;
     void on_candidates(const std::vector<BblPresetSync::Key>& candidates) override;
     void on_halt(const std::string& kind, const std::vector<BblPresetSync::Key>& local_deletes,

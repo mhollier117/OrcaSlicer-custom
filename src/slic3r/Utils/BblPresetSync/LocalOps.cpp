@@ -225,7 +225,13 @@ OpOutcome apply_pull(const LocalOpsContext& ctx, const PullOp& op)
     }
 
     ctx.bundle->update_compatible(PresetSelectCompatibleType::Never);
-    return outcome(OpResult::Applied, "", current_hash(ctx, op.key));
+    OpOutcome done = outcome(OpResult::Applied);
+    if (const Preset* now_saved = find_user_preset(collection, op.key.name)) {
+        const LocalItem item = make_item(*now_saved, collection, *ctx.bundle, make_context(*ctx.bundle, ctx.has_bambu_id));
+        done.new_hash        = item.hash;
+        done.new_upload      = item.upload;
+    }
+    return done;
 }
 
 OpOutcome delete_local(const LocalOpsContext& ctx, const DeleteOp& op)
