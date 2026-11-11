@@ -182,6 +182,10 @@ SpoolPicker::SpoolPicker(wxWindow* parent, std::vector<fil::Spool> spools, const
     SetSizerAndFit(sizer);
     CenterOnParent();
     wxGetApp().UpdateDlgDarkUI(this);
+    // The dark-UI pass leaves the list's rows in the control's default text colour, unreadable on a dark background.
+    m_list->SetBackgroundColour(GetBackgroundColour());
+    m_list->SetTextColour(wxGetApp().get_label_clr_default());
+    m_list->Refresh();
 }
 
 void SpoolPicker::fill()
@@ -196,6 +200,10 @@ void SpoolPicker::fill()
         return false;
     };
 
+    // Rows that cannot be chosen: a grey dimmer than normal text in either theme.
+    const wxColour normal = wxGetApp().get_label_clr_default();
+    const wxColour dimmed = wxGetApp().dark_mode() ? wxColour(110, 110, 110) : wxColour(172, 172, 172);
+
     m_list->Freeze();
     m_list->DeleteAllItems();
     m_rows.clear();
@@ -208,8 +216,7 @@ void SpoolPicker::fill()
         m_list->SetItem(row, 1, wxString::Format(_L("%d of %d g"), static_cast<int>(fil::bounded_grams(s.net_weight)),
                                                  static_cast<int>(fil::bounded_grams(s.total_net_weight))));
         m_list->SetItem(row, 2, utf8(s.note));
-        if (!m_why[i].empty())
-            m_list->SetItemTextColour(row, wxColour(172, 172, 172));
+        m_list->SetItemTextColour(row, m_why[i].empty() ? normal : dimmed);
         m_rows.push_back(i);
     }
     m_list->Thaw();
