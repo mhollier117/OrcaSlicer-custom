@@ -3478,7 +3478,7 @@
         "readOnlyHint": false,
         "title": "Preset sync"
       },
-      "description": "Sync of user presets with the Bambu cloud: what is linked, planned and waiting; confirm the first run, convert a filament to a standalone custom filament, resolve a delete stop.",
+      "description": "Sync of user presets with the Bambu cloud: what is linked, planned and waiting; confirm the first run, convert a filament to a standalone custom filament, copy K profiles to a converted filament, resolve a delete stop.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -3493,6 +3493,7 @@
               "sync_now",
               "confirm_first_run",
               "convert",
+              "copy_k",
               "forget",
               "resolve_halt"
             ],
@@ -3523,8 +3524,12 @@
             },
             "type": "array"
           },
+          "from_filament_id": {
+            "description": "copy_k: the filament id whose K profiles are copied; needed when the filament was not converted by this sync.",
+            "type": "string"
+          },
           "name": {
-            "description": "convert, forget: the preset name.",
+            "description": "convert, copy_k, forget: the preset name.",
             "type": "string"
           },
           "type": {

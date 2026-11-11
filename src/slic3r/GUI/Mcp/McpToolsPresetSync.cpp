@@ -94,6 +94,13 @@ json run_action(const json& args)
         return convert_json(c.convert(name));
     }
 
+    if (action == "copy_k") {
+        const std::string name = arg_string(args, "name");
+        if (name.empty()) throw ToolFailure("copy_k needs name");
+        c.request_k_copy(name, arg_string(args, "from_filament_id"));
+        return {{"requested", true}};
+    }
+
     if (action == "forget") {
         const auto type = sync::parse_type(arg_string(args, "type"));
         const std::string name = arg_string(args, "name");
@@ -126,12 +133,13 @@ void register_preset_sync_tools(McpService& service)
     service.registry().add(mutate_tool(
         "preset_sync", L("Preset sync"),
         "Sync of user presets with the Bambu cloud: what is linked, planned and waiting; confirm the first run, convert a filament to a "
-        "standalone custom filament, resolve a delete stop.",
-        object_schema({{"action", enum_prop({"status", "sync_now", "confirm_first_run", "convert", "forget", "resolve_halt"}, "What to do.")},
+        "standalone custom filament, copy K profiles to a converted filament, resolve a delete stop.",
+        object_schema({{"action", enum_prop({"status", "sync_now", "confirm_first_run", "convert", "copy_k", "forget", "resolve_halt"}, "What to do.")},
                        {"accept", prop("boolean", "confirm_first_run: true to start syncing, false to decline for now.")},
                        {"convert", array_prop({{"type", "string"}}, "confirm_first_run: filament names to convert to standalone custom filaments.")},
                        {"decline", array_prop({{"type", "string"}}, "confirm_first_run: filament names to leave out of the sync.")},
-                       {"name", prop("string", "convert, forget: the preset name.")},
+                       {"name", prop("string", "convert, copy_k, forget: the preset name.")},
+                       {"from_filament_id", prop("string", "copy_k: the filament id whose K profiles are copied; needed when the filament was not converted by this sync.")},
                        {"type", enum_prop({"print", "filament", "printer"}, "forget: the preset type.")},
                        {"choice",
                         enum_prop({"delete_in_orca", "keep_in_orca", "delete_on_bambu", "restore_from_bambu", "later"},

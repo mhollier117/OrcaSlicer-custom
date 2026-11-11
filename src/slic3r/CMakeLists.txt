@@ -917,6 +917,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/BblPresetSync/FilamentId.hpp
     Utils/BblPresetSync/Hash.cpp
     Utils/BblPresetSync/Hash.hpp
+    Utils/BblPresetSync/KCopy.cpp
+    Utils/BblPresetSync/KCopy.hpp
     Utils/BblPresetSync/Ledger.cpp
     Utils/BblPresetSync/Ledger.hpp
     Utils/BblPresetSync/LocalOps.cpp

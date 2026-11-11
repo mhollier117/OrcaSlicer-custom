@@ -10,6 +10,8 @@
 #include <nlohmann/json.hpp>
 
 #include <atomic>
+#include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -55,6 +57,9 @@ public:
     void request_sync();                              // any thread: the next tick is a Manual pass
     BblPresetSync::Mirror& mirror();
 
+    // Any thread: copy the K profiles of an old filament id to the named standalone filament, on the next pass.
+    void request_k_copy(const std::string& filament_name, const std::string& from_filament_id_override);
+
     // UI thread:
     // The linked ledger entry's setting id, else the filament's own.
     std::string                    bbl_setting_id_for(const Preset& filament) const;
@@ -84,6 +89,10 @@ private:
 
     BblPresetSync::LocalOpsContext ops_context(const std::string& bambu_uid) const;
     void                           refresh_ui();
+    void                           k_copy_step();
+    void                           set_k_last(const std::string& key, const std::string& text);
+    // Runs fn on the UI thread and waits for it; nullopt when cancelled first.
+    template<class T> std::optional<T> run_on_ui(std::function<T()> fn);
     // Shows the conversion dialog; false when cancelled. Otherwise converts the checked filaments, declines the others and
     // reports the ones that were not converted.
     bool                           run_conversion_dialog(const BblPresetSync::FirstRunSummary& summary);
@@ -96,6 +105,15 @@ private:
     mutable std::mutex m_token_mutex;
     std::weak_ptr<int> m_token;
     std::atomic<bool>  m_manual_requested{false};
+
+    struct KRequest
+    {
+        std::string name, from;
+    };
+    mutable std::mutex                 m_k_mutex;
+    std::vector<KRequest>              m_k_requests;
+    std::map<std::string, long long>   m_k_retry_after; // dev_id + "|" + key
+    std::map<std::string, std::string> m_k_last;        // key -> last result text
 };
 
 } // namespace GUI

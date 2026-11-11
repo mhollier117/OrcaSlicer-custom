@@ -71,11 +71,12 @@ TEST_CASE("the preset_sync tool takes an action and a closed set of arguments", 
     CHECK(schema.at("required") == json::array({"action"}));
     CHECK(schema.at("additionalProperties") == false);
     CHECK(schema.at("properties").at("action").at("enum") ==
-          json::array({"status", "sync_now", "confirm_first_run", "convert", "forget", "resolve_halt"}));
+          json::array({"status", "sync_now", "confirm_first_run", "convert", "copy_k", "forget", "resolve_halt"}));
     CHECK(schema.at("properties").at("accept").at("type") == "boolean");
     CHECK(schema.at("properties").at("convert").at("type") == "array");
     CHECK(schema.at("properties").at("decline").at("items").at("type") == "string");
     CHECK(schema.at("properties").at("type").at("enum") == json::array({"print", "filament", "printer"}));
     CHECK(schema.at("properties").at("choice").at("enum").size() == 5);
+    CHECK(schema.at("properties").at("from_filament_id").at("type") == "string");
     CHECK(tool->at("annotations").at("readOnlyHint") == false);
 }
