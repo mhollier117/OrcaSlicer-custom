@@ -7,6 +7,7 @@
 #include "slic3r/GUI/FilamentManager/FmDevices.hpp"
 #include "slic3r/GUI/FilamentManager/FmPresets.hpp"
 #include "slic3r/GUI/FilamentManager/FmProtocol.hpp"
+#include "slic3r/GUI/FilamentManager/FmViewModel.hpp"
 
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -17,6 +18,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -616,4 +618,574 @@ TEST_CASE("A device manager that is missing gives empty machine and AMS data", "
     std::string used;
     CHECK_FALSE(fm::request_pushall(nullptr, "", used));
     fm::select_machine(nullptr, "x");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// FmViewModel
+
+namespace {
+
+struct VmRig
+{
+    Rig                              rig;
+    fm::Host                         host;
+    std::vector<json>                reports;
+    std::vector<std::string>         calls;
+    bool                             throw_presets{false};
+    std::unique_ptr<fm::ViewModel>   vm;
+
+    explicit VmRig(bool with_host = true)
+    {
+        if (with_host) {
+            host.dark    = [] { return true; };
+            host.presets = [this] {
+                calls.push_back("presets");
+                if (throw_presets)
+                    throw std::runtime_error("boom");
+                return json{{"vendors", json::array({json{{"name", "V"}}})}};
+            };
+            host.machines = [this] {
+                calls.push_back("machines");
+                return json{{"machines", json::array()}, {"selected_dev_id", "dev1"}};
+            };
+            host.ams = [this](const std::string& dev, bool sw) {
+                calls.push_back(std::string("ams ") + dev + (sw ? " switch" : ""));
+                return json{{"selected_dev_id", "dev1"}, {"ams_units", json::array()}, {"ext_slots", json::array()}, {"is_rack", false}};
+            };
+            host.request_pushall = [this](const std::string& dev, std::string& used) {
+                calls.push_back("pushall " + dev);
+                if (dev == "none")
+                    return false;
+                used = dev.empty() ? "dev1" : dev;
+                return true;
+            };
+            host.create_custom = [this](const std::string& vendor, const std::string& id) { calls.push_back("custom " + vendor + " " + id); };
+            host.decorate_spool = [this](json& row) {
+                calls.push_back("decorate");
+                row["color_name"] = "decorated";
+            };
+        }
+        vm = std::make_unique<fm::ViewModel>(*rig.svc, host, [this](const json& body) { reports.push_back(body); });
+    }
+
+    json call(const std::string& submod, const std::string& action, json payload = json::object(), const std::string& module = "filament")
+    {
+        fm::Request r;
+        r.module  = module;
+        r.submod  = submod;
+        r.action  = action;
+        r.payload = std::move(payload);
+        return vm->handle(r);
+    }
+
+    void pull()
+    {
+        rig.svc->request_pull();
+        rig.settle();
+    }
+
+    std::vector<json> reports_of(const std::string& submod, const std::string& action) const
+    {
+        std::vector<json> out;
+        for (const json& r : reports)
+            if (r["submod"] == submod && r["action"] == action)
+                out.push_back(r);
+        return out;
+    }
+
+    int count_calls(const std::string& text) const { return static_cast<int>(std::count(calls.begin(), calls.end(), text)); }
+};
+
+} // namespace
+
+TEST_CASE("The init answer carries theme, spools, presets, sync state and no debug", "[FilamentManager]")
+{
+    VmRig t;
+    t.rig.cloud->fill(2);
+    t.pull();
+    json a = t.call("init", "init");
+    CHECK(a["error_code"] == 0);
+    CHECK(a["payload"]["theme"] == "dark");
+    CHECK(a["payload"]["spools"].size() == 2);
+    CHECK(a["payload"]["presets"]["vendors"].size() == 1);
+    CHECK(a["payload"]["cloud_sync"]["logged_in"] == true);
+    CHECK(a["payload"]["debug_enabled"] == false);
+}
+
+TEST_CASE("The init answer when signed out has no spools and is not logged in", "[FilamentManager]")
+{
+    VmRig t(false);
+    t.rig.session.signed_in = false;
+    json a                  = t.call("init", "init");
+    CHECK(a["payload"]["theme"] == "light");
+    CHECK(a["payload"]["spools"].empty());
+    CHECK(a["payload"]["presets"] == json{{"vendors", json::array()}});
+    CHECK(a["payload"]["cloud_sync"]["logged_in"] == false);
+}
+
+TEST_CASE("A spool list runs the host decorator on every row", "[FilamentManager]")
+{
+    VmRig t;
+    t.rig.cloud->fill(3);
+    t.pull();
+    t.calls.clear();
+    json a = t.call("spool", "list");
+    CHECK(a["error_code"] == 0);
+    REQUIRE(a["payload"].size() == 3);
+    CHECK(t.count_calls("decorate") == 3);
+    CHECK(a["payload"][0]["color_name"] == "decorated");
+}
+
+TEST_CASE("An added spool is created in the cloud", "[FilamentManager]")
+{
+    VmRig t;
+    json  a = t.call("spool", "add", page_spool());
+    CHECK(a["error_code"] == 0);
+    t.rig.settle();
+    CHECK(t.rig.cloud->count("create") == 1);
+}
+
+TEST_CASE("A batch add with a quantity of three creates three spools", "[FilamentManager]")
+{
+    VmRig t;
+    json  a = t.call("spool", "batch_add", json{{"spool", page_spool()}, {"quantity", 3}});
+    CHECK(a["error_code"] == 0);
+    t.rig.settle();
+    CHECK(t.rig.cloud->count("create") == 3);
+}
+
+TEST_CASE("A batch add without a quantity creates one spool", "[FilamentManager]")
+{
+    VmRig t;
+    t.call("spool", "batch_add", json{{"spool", page_spool()}});
+    t.rig.settle();
+    CHECK(t.rig.cloud->count("create") == 1);
+}
+
+TEST_CASE("A batch create runs its creates and updates", "[FilamentManager]")
+{
+    VmRig t;
+    t.rig.cloud->fill(1);
+    t.pull();
+    json a = t.call("spool", "batch_create", json{{"creates", json::array({page_spool("A")})}, {"updates", json::array({json{{"spool_id", "1000001"}, {"note", "n"}}})}});
+    CHECK(a["error_code"] == 0);
+    t.rig.settle();
+    CHECK(t.rig.cloud->count("create") == 1);
+    CHECK(t.rig.cloud->count("update 1000001") == 1);
+}
+
+TEST_CASE("An update shows in the answer at once", "[FilamentManager]")
+{
+    VmRig t(false);
+    t.rig.cloud->fill(1);
+    t.pull();
+    json a = t.call("spool", "update", json{{"spool_id", "1000001"}, {"note", "hello"}});
+    CHECK(a["error_code"] == 0);
+    REQUIRE(a["payload"].size() == 1);
+    CHECK(a["payload"][0]["note"] == "hello");
+    t.rig.settle();
+    CHECK(t.rig.cloud->count("update 1000001") == 1);
+}
+
+TEST_CASE("A removed spool is deleted in the cloud", "[FilamentManager]")
+{
+    VmRig t;
+    t.rig.cloud->fill(2);
+    t.pull();
+    json a = t.call("spool", "remove", json{{"spool_id", "1000001"}});
+    CHECK(a["error_code"] == 0);
+    CHECK(a["payload"].size() == 1);
+    t.rig.settle();
+    CHECK(t.rig.cloud->count("remove 1000001") == 1);
+}
+
+TEST_CASE("A batch remove deletes the listed spools", "[FilamentManager]")
+{
+    VmRig t;
+    t.rig.cloud->fill(3);
+    t.pull();
+    json a = t.call("spool", "batch_remove", json{{"spool_ids", json::array({"1000001", "1000002"})}});
+    CHECK(a["error_code"] == 0);
+    CHECK(a["payload"].size() == 1);
+    t.rig.settle();
+    CHECK(t.rig.cloud->count("remove") >= 1);
+    CHECK(t.rig.cloud->rows.size() == 1);
+}
+
+TEST_CASE("Every spool write is refused with minus two when signed out", "[FilamentManager]")
+{
+    VmRig t;
+    t.rig.session.signed_in = false;
+    const std::vector<std::pair<std::string, json>> writes{
+        {"add", page_spool()},
+        {"batch_add", json{{"spool", page_spool()}, {"quantity", 2}}},
+        {"batch_create", json{{"creates", json::array({page_spool()})}, {"updates", json::array()}}},
+        {"update", json{{"spool_id", "1000001"}, {"note", "x"}}},
+        {"remove", json{{"spool_id", "1000001"}}},
+        {"batch_remove", json{{"spool_ids", json::array({"1000001"})}}}};
+    for (const auto& [action, payload] : writes) {
+        json a = t.call("spool", action, payload);
+        INFO(action);
+        CHECK(a["error_code"] == -2);
+        CHECK(a["message"] == "cloud sync requires sign-in and network");
+        CHECK(a["payload"].is_array());
+    }
+}
+
+TEST_CASE("A write with a payload of the wrong shape answers three", "[FilamentManager]")
+{
+    VmRig t;
+    t.rig.cloud->fill(1);
+    t.pull();
+    const std::vector<std::pair<std::string, json>> writes{
+        {"batch_add", json{{"spool", "x"}, {"quantity", 2}}},
+        {"batch_create", json{{"creates", 5}, {"updates", json::array()}}},
+        {"update", json::object()},
+        {"remove", json{{"spool_id", 7}}},
+        {"batch_remove", json{{"spool_ids", "x"}}}};
+    for (const auto& [action, payload] : writes) {
+        json a = t.call("spool", action, payload);
+        INFO(action);
+        CHECK(a["error_code"] == 3);
+        CHECK(a["message"] == "bad request");
+        CHECK(a["payload"].is_array());
+    }
+}
+
+TEST_CASE("Actions the page may send but this app does not support answer minus one", "[FilamentManager]")
+{
+    VmRig t;
+    for (const std::string& action : {"mark_empty", "toggle_favorite", "archive"}) {
+        json a = t.call("spool", action, json{{"spool_id", "1"}});
+        INFO(action);
+        CHECK(a["error_code"] == -1);
+        CHECK(a["message"] == "not supported");
+        CHECK(a["payload"].is_array());
+    }
+    json push = t.call("sync", "push_all_now");
+    CHECK(push["error_code"] == -1);
+    CHECK(push["message"] == "not supported");
+    CHECK(push["payload"].contains("logged_in"));
+}
+
+TEST_CASE("An unknown action or submod answers minus one and another module answers one", "[FilamentManager]")
+{
+    VmRig t;
+    CHECK(t.call("spool", "frobnicate")["error_code"] == -1);
+    CHECK(t.call("spool", "frobnicate")["message"] == "unknown action");
+    CHECK(t.call("nothing", "list")["error_code"] == -1);
+    json other = t.call("spool", "list", json::object(), "device");
+    CHECK(other["error_code"] == 1);
+    CHECK(other["message"] == "unknown module");
+    CHECK(other["module"] == "device");
+}
+
+TEST_CASE("A sync pull causes one pull and answers a syncing state", "[FilamentManager]")
+{
+    VmRig t;
+    t.rig.cloud->fill(1);
+    json a = t.call("sync", "pull");
+    CHECK(a["error_code"] == 0);
+    CHECK(a["payload"]["is_syncing"] == true);
+    t.rig.settle();
+    CHECK(t.rig.cloud->count("list 0") == 1);
+}
+
+TEST_CASE("The sync status formats the time of the last sync", "[FilamentManager]")
+{
+    VmRig t;
+    t.rig.clock      = 1700000000;
+    t.rig.clock_step = 0;
+    t.pull();
+    json a = t.call("sync", "status");
+    CHECK(a["payload"]["last_synced_at"] == "2023-11-14T22:13:20Z");
+    CHECK(a["payload"]["last_error"]["code"] == 0);
+    CHECK(a["payload"]["last_error"]["message"] == "");
+}
+
+TEST_CASE("The sync status of a never synced service has an empty time", "[FilamentManager]")
+{
+    VmRig t;
+    CHECK(t.call("sync", "status")["payload"]["last_synced_at"] == "");
+}
+
+TEST_CASE("A rejected write shows its code and the server text in the sync status", "[FilamentManager]")
+{
+    VmRig t(false);
+    t.rig.cloud->fill(1);
+    t.pull();
+    t.rig.cloud->forced["update"] = {forced_error(fil::CloudError::Rejected, "bad")};
+    t.call("spool", "update", json{{"spool_id", "1000001"}, {"note", "x"}});
+    t.rig.settle();
+    json        a    = t.call("sync", "status");
+    const std::string text = a["payload"]["last_error"]["message"].get<std::string>();
+    CHECK(a["payload"]["last_error"]["code"] == 400);
+    CHECK(text.size() > 6);
+    CHECK(text.substr(text.size() - 6) == " (bad)");
+}
+
+TEST_CASE("The host decides the text of an error when it has a say", "[FilamentManager]")
+{
+    VmRig t;
+    t.host.fail_text = [](fil::FailKind, const std::string& m) { return "host:" + m; };
+    t.vm.reset();
+    t.vm = std::make_unique<fm::ViewModel>(*t.rig.svc, t.host, [&t](const json& b) { t.reports.push_back(b); });
+    t.rig.cloud->fill(1);
+    t.pull();
+    t.rig.cloud->forced["update"] = {forced_error(fil::CloudError::Rejected, "bad")};
+    t.call("spool", "update", json{{"spool_id", "1000001"}, {"note", "x"}});
+    t.rig.settle();
+    CHECK(t.call("sync", "status")["payload"]["last_error"]["message"] == "host:bad");
+}
+
+TEST_CASE("A config fetch answers pending and then reports the config", "[FilamentManager]")
+{
+    VmRig t;
+    json  a = t.call("config", "fetch");
+    CHECK(a["message"] == "pending");
+    CHECK(a["payload"] == json::object());
+    t.rig.settle();
+    auto fetched = t.reports_of("config", "fetched");
+    REQUIRE(fetched.size() == 1);
+    CHECK(fetched[0]["payload"] == t.rig.cloud->config_body);
+}
+
+TEST_CASE("A later config fetch answers from the cache unless forced", "[FilamentManager]")
+{
+    VmRig t;
+    t.call("config", "fetch");
+    t.rig.settle();
+    json cached = t.call("config", "fetch");
+    CHECK(cached["message"] == "cached");
+    CHECK(cached["payload"] == t.rig.cloud->config_body);
+    json forced = t.call("config", "fetch", json{{"force", true}});
+    CHECK(forced["message"] == "pending");
+    t.rig.settle();
+    CHECK(t.rig.cloud->count("config") == 2);
+}
+
+TEST_CASE("The service events become reports", "[FilamentManager]")
+{
+    VmRig t;
+    t.rig.cloud->fill(2);
+    t.pull();
+    CHECK_FALSE(t.reports_of("spool", "list").empty());
+    CHECK_FALSE(t.reports_of("sync", "state").empty());
+    auto done = t.reports_of("sync", "pull_done");
+    REQUIRE(done.size() == 1);
+    CHECK(done[0]["module"] == "filament");
+    CHECK(done[0]["payload"]["spools"].size() == 2);
+    CHECK(done[0]["payload"]["state"]["logged_in"] == true);
+    CHECK(t.reports_of("spool", "list")[0]["payload"].is_array());
+}
+
+TEST_CASE("The first pull reports no added spools", "[FilamentManager]")
+{
+    VmRig t;
+    t.rig.cloud->fill(2);
+    t.pull();
+    auto done = t.reports_of("sync", "pull_done");
+    REQUIRE(done.size() == 1);
+    CHECK(done[0]["payload"]["added"] == 0);
+    CHECK(done[0]["payload"]["updated"] == 2);
+}
+
+TEST_CASE("A pull after an add reports one added spool", "[FilamentManager]")
+{
+    VmRig t;
+    t.rig.cloud->fill(2);
+    t.pull();
+    t.call("spool", "add", page_spool());
+    t.rig.settle();
+    auto done = t.reports_of("sync", "pull_done");
+    REQUIRE(done.size() == 2);
+    CHECK(done[1]["payload"]["added"] == 1);
+    CHECK(done[1]["payload"]["updated"] == 2);
+}
+
+TEST_CASE("A pull after a reset again reports no added spools", "[FilamentManager]")
+{
+    VmRig t;
+    t.rig.cloud->fill(2);
+    t.pull();
+    t.rig.session.generation += 1;
+    t.rig.svc->reset();
+    t.pull();
+    auto done = t.reports_of("sync", "pull_done");
+    REQUIRE(done.size() == 2);
+    CHECK(done[1]["payload"]["added"] == 0);
+    CHECK(done[1]["payload"]["updated"] == 2);
+}
+
+TEST_CASE("A finished write reports its operation and spool", "[FilamentManager]")
+{
+    VmRig t;
+    t.rig.cloud->fill(1);
+    t.pull();
+    t.call("spool", "update", json{{"spool_id", "1000001"}, {"note", "x"}});
+    t.rig.settle();
+    auto done = t.reports_of("sync", "push_done");
+    REQUIRE(done.size() == 1);
+    CHECK(done[0]["payload"]["op"] == "update");
+    CHECK(done[0]["payload"]["spool_id"] == "1000001");
+    CHECK(done[0]["payload"].contains("state"));
+}
+
+TEST_CASE("A failed write reports its code and text", "[FilamentManager]")
+{
+    VmRig t(false);
+    t.rig.cloud->fill(1);
+    t.pull();
+    t.rig.cloud->forced["update"] = {forced_error(fil::CloudError::Rejected, "bad")};
+    t.call("spool", "update", json{{"spool_id", "1000001"}, {"note", "x"}});
+    t.rig.settle();
+    auto failed = t.reports_of("sync", "push_failed");
+    REQUIRE(failed.size() == 1);
+    CHECK(failed[0]["payload"]["op"] == "update");
+    CHECK(failed[0]["payload"]["spool_id"] == "1000001");
+    CHECK(failed[0]["payload"]["code"] == 400);
+    CHECK(failed[0]["payload"]["message"].get<std::string>().find("(bad)") != std::string::npos);
+}
+
+TEST_CASE("A custom filament request calls the host and answers pending", "[FilamentManager]")
+{
+    VmRig t;
+    json  a = t.call("preset", "create_custom", json{{"vendor", "Acme"}, {"client_request_id", "c1"}});
+    CHECK(a["error_code"] == 0);
+    CHECK(a["message"] == "pending");
+    CHECK(t.count_calls("custom Acme c1") == 1);
+}
+
+TEST_CASE("A custom filament request without a host answers minus one", "[FilamentManager]")
+{
+    VmRig t(false);
+    CHECK(t.call("preset", "create_custom", json{{"vendor", "Acme"}})["error_code"] == -1);
+}
+
+TEST_CASE("A created custom filament sends the result and then the preset list", "[FilamentManager]")
+{
+    VmRig t;
+    t.vm->custom_created("c1", true, json{{"vendor", "Acme"}, {"filament_id", "P1"}});
+    auto done = t.reports_of("preset", "create_custom_done");
+    REQUIRE(done.size() == 1);
+    CHECK(done[0]["payload"]["ok"] == true);
+    CHECK(done[0]["payload"]["client_request_id"] == "c1");
+    CHECK(done[0]["payload"]["created"]["filament_id"] == "P1");
+    CHECK(t.reports_of("preset", "list").size() == 1);
+}
+
+TEST_CASE("A failed custom filament sends only the result", "[FilamentManager]")
+{
+    VmRig t;
+    t.vm->custom_created("c2", false, json::object());
+    auto done = t.reports_of("preset", "create_custom_done");
+    REQUIRE(done.size() == 1);
+    CHECK(done[0]["payload"]["ok"] == false);
+    CHECK_FALSE(done[0]["payload"].contains("created"));
+    CHECK(t.reports_of("preset", "list").empty());
+}
+
+TEST_CASE("A change of the selected machine sends machines and AMS data", "[FilamentManager]")
+{
+    VmRig t;
+    t.vm->machine_selected_changed();
+    auto sent = t.reports_of("machine", "selected_changed");
+    REQUIRE(sent.size() == 1);
+    CHECK(sent[0]["payload"]["selected_dev_id"] == "dev1");
+    CHECK(sent[0]["payload"]["machines"]["selected_dev_id"] == "dev1");
+    CHECK(sent[0]["payload"]["ams"]["selected_dev_id"] == "dev1");
+}
+
+TEST_CASE("Host members that are unset give the default payloads", "[FilamentManager]")
+{
+    VmRig t(false);
+    t.vm->machine_selected_changed();
+    auto sent = t.reports_of("machine", "selected_changed");
+    REQUIRE(sent.size() == 1);
+    CHECK(sent[0]["payload"]["selected_dev_id"] == "");
+    CHECK(sent[0]["payload"]["machines"]["machines"].empty());
+    CHECK(t.call("machine", "list")["payload"]["machines"].empty());
+    CHECK(t.call("ams", "list")["payload"]["ams_units"].empty());
+    CHECK(t.call("preset", "list")["payload"] == json{{"vendors", json::array()}});
+    CHECK(t.call("colors", "query_for_id", json{{"fila_id", "GFA00"}})["payload"]["candidates"].empty());
+    CHECK(t.call("machine", "request_pushall")["error_code"] == -2);
+}
+
+TEST_CASE("The machine and AMS requests pass their arguments to the host", "[FilamentManager]")
+{
+    VmRig t;
+    json  ams = t.call("ams", "list", json{{"dev_id", "d9"}, {"switch_selected", true}});
+    CHECK(ams["error_code"] == 0);
+    CHECK(t.count_calls("ams d9 switch") == 1);
+    json push = t.call("machine", "request_pushall", json{{"dev_id", "d9"}});
+    CHECK(push["payload"]["dev_id"] == "d9");
+    json gone = t.call("machine", "request_pushall", json{{"dev_id", "none"}});
+    CHECK(gone["error_code"] == -2);
+    CHECK(gone["message"] == "machine not found");
+}
+
+TEST_CASE("Service events send nothing once the view-model is gone", "[FilamentManager]")
+{
+    VmRig t;
+    t.rig.cloud->fill(1);
+    t.vm.reset();
+    t.pull();
+    CHECK(t.reports.empty());
+}
+
+TEST_CASE("A host function that throws makes the request answer an internal error", "[FilamentManager]")
+{
+    VmRig t;
+    t.throw_presets = true;
+    json a          = t.call("init", "init");
+    CHECK(a["error_code"] == 2);
+    CHECK(a["message"] == "internal error");
+}
+
+TEST_CASE("The colour response lists the candidates of a filament", "[FilamentManager]")
+{
+    json r = fm::colors_response(fixture_colors(), "GFA00", "de");
+    CHECK(r["fila_id"] == "GFA00");
+    CHECK(r["fila_type"] == "PLA Basic");
+    REQUIRE(r["candidates"].size() == 3);
+    CHECK(r["candidates"][0]["color_code"] == "10300");
+    CHECK(r["candidates"][0]["name"] == "Orange-de");
+    CHECK(r["candidates"][0]["color_type"] == 2);
+    CHECK(r["candidates"][0]["colors"] == json::array({"#FF6A13FF"}));
+    json none = fm::colors_response(fixture_colors(), "GFZ99", "de");
+    CHECK(none["fila_type"] == "");
+    CHECK(none["candidates"].empty());
+}
+
+TEST_CASE("An empty colour name of a spool is filled from the table", "[FilamentManager]")
+{
+    json spool = {{"setting_id", "GFA00"}, {"color_name", ""}, {"color_code", "#FF6A13FF"}, {"colors", json::array()}, {"color_type", 2}};
+    fm::decorate_color_name(spool, fixture_colors(), "en");
+    CHECK(spool["color_name"] == "Orange");
+    json two = {{"setting_id", "GFA00"}, {"color_name", ""}, {"color_code", "#FF0000FF"}, {"colors", json::array({"#FF0000FF", "#00FF00FF"})}, {"color_type", 1}};
+    fm::decorate_color_name(two, fixture_colors(), "en");
+    CHECK(two["color_name"] == "Red Green");
+}
+
+TEST_CASE("A colour name that is already set is kept", "[FilamentManager]")
+{
+    json spool = {{"setting_id", "GFA00"}, {"color_name", "Mine"}, {"color_code", "#FF6A13FF"}, {"colors", json::array()}, {"color_type", 2}};
+    fm::decorate_color_name(spool, fixture_colors(), "en");
+    CHECK(spool["color_name"] == "Mine");
+    json unknown = {{"setting_id", "GFZ99"}, {"color_name", ""}, {"color_code", "#FF6A13FF"}, {"colors", json::array()}, {"color_type", 2}};
+    fm::decorate_color_name(unknown, fixture_colors(), "en");
+    CHECK(unknown["color_name"] == "");
+}
+
+TEST_CASE("The tray label of a spool follows its place in the printer", "[FilamentManager]")
+{
+    json slot = {{"in_printer", true}, {"ams_type", 1}, {"ams_id", 1}, {"slot_id", "2"}, {"tray_label", ""}};
+    fm::decorate_tray_label(slot);
+    CHECK(slot["tray_label"] == "B3");
+    json ext = {{"in_printer", true}, {"ams_type", 0}, {"ams_id", 0}, {"slot_id", "0"}, {"tray_label", ""}};
+    fm::decorate_tray_label(ext);
+    CHECK(ext["tray_label"] == "Ext");
+    json shelf = {{"in_printer", false}, {"ams_type", 1}, {"ams_id", 1}, {"slot_id", "2"}, {"tray_label", ""}};
+    fm::decorate_tray_label(shelf);
+    CHECK(shelf["tray_label"] == "");
 }

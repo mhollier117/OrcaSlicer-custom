@@ -273,6 +273,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/FilamentManager/FmPresets.hpp
     GUI/FilamentManager/FmProtocol.cpp
     GUI/FilamentManager/FmProtocol.hpp
+    GUI/FilamentManager/FmViewModel.cpp
+    GUI/FilamentManager/FmViewModel.hpp
     GUI/FileArchiveDialog.cpp
     GUI/FileArchiveDialog.hpp
     GUI/format.hpp
