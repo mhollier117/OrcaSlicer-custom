@@ -279,8 +279,14 @@ json ViewModel::dispatch(const Request& r)
                 return bad_request();
             int  quantity = 1;
             auto q        = p.find("quantity");
-            if (q != p.end() && q->is_number_integer())
-                quantity = q->get<int>();
+            if (q != p.end()) {
+                if (!q->is_number_integer())
+                    return bad_request();
+                const long long n = q->get<long long>();
+                if (n < 1 || n > 99)
+                    return bad_request();
+                quantity = static_cast<int>(n);
+            }
             return write_result(m_service.add(*spool, quantity));
         }
         if (r.action == "batch_create") {

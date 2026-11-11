@@ -288,7 +288,17 @@ TEST_CASE("A colour does not match under another colour type", "[FilamentManager
     const fm::ColorCodes& t = fixture_colors();
     CHECK(t.find("GFB00", {"#111111FF", "#222222FF"}, 0) != nullptr);
     CHECK(t.find("GFB00", {"#111111FF", "#222222FF"}, 1) == nullptr);
-    CHECK(t.find("GFA00", {"#FF6A13FF"}, 0) == nullptr);
+    CHECK(t.find("GFA00", {"#FF6A13FF"}, 1) != nullptr);
+}
+
+TEST_CASE("A query with one colour is looked up as a single colour", "[FilamentManager]")
+{
+    const fm::ColorCodes& t = fixture_colors();
+    const fm::ColorEntry* e = t.find("GFA00", {"#FF6A13FF"}, 0);
+    REQUIRE(e != nullptr);
+    CHECK(e->fila_color_code == "10300");
+    CHECK(t.find("GFB00", {"#111111FF", "#222222FF"}, 0) != nullptr);
+    CHECK(t.find("GFB00", {"#111111FF", "#222222FF"}, 2) == nullptr);
 }
 
 TEST_CASE("An unknown filament or colour finds nothing", "[FilamentManager]")
@@ -601,6 +611,19 @@ TEST_CASE("A tray with two colours reports both and its colour type", "[Filament
     CHECK(fm::tray_json(t, "1", "A2", true, tray_context())["color_type"] == 1);
 }
 
+TEST_CASE("A tray with one colour and colour type zero is a single colour tray", "[FilamentManager]")
+{
+    Slic3r::DevAmsTray t = official_tray();
+    t.ctype              = 0;
+    t.cols.clear();
+    json j = fm::tray_json(t, "1", "A2", true, tray_context());
+    CHECK(j["color_type"] == 2);
+    CHECK(j["color_name"] == "Orange-de");
+    CHECK(j["fila_color_code"] == "10300");
+    t.cols = {"FF0000FF", "00FF00FF"};
+    CHECK(fm::tray_json(t, "1", "A2", true, tray_context())["color_type"] == 0);
+}
+
 TEST_CASE("A tray without a colour reports no colours", "[FilamentManager]")
 {
     Slic3r::DevAmsTray t = official_tray();
@@ -765,6 +788,18 @@ TEST_CASE("A batch add with a quantity of three creates three spools", "[Filamen
     CHECK(a["error_code"] == 0);
     t.rig.settle();
     CHECK(t.rig.cloud->count("create") == 3);
+}
+
+TEST_CASE("A batch add with a bad quantity is refused and queues nothing", "[FilamentManager]")
+{
+    const json bad[] = {json("3"), json(1.5), json(0), json(-1), json(100), json(5000000000LL)};
+    for (const json& q : bad) {
+        VmRig t;
+        json  a = t.call("spool", "batch_add", json{{"spool", page_spool()}, {"quantity", q}});
+        CHECK(a["error_code"] == 3);
+        t.rig.settle();
+        CHECK(t.rig.cloud->count("create") == 0);
+    }
 }
 
 TEST_CASE("A batch add without a quantity creates one spool", "[FilamentManager]")

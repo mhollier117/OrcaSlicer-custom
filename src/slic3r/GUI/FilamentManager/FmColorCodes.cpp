@@ -149,7 +149,7 @@ const ColorEntry* ColorCodes::find(const std::string& fila_id, const std::vector
     const std::set<std::string> wanted = normalized_set(colors);
     if (wanted.empty())
         return nullptr;
-    const int wanted_type = BblFilament::normalize_color_type(color_type, wanted.size());
+    const int wanted_type = wanted.size() <= 1 ? 2 : BblFilament::normalize_color_type(color_type, wanted.size());
     for (const ColorEntry& e : *list) {
         if (normalized_set(e.colors) != wanted)
             continue;

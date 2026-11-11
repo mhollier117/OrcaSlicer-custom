@@ -74,7 +74,7 @@ json tray_json(const DevAmsTray& tray, const std::string& slot_id, const std::st
     if (tray.cols.empty() && !color.empty())
         colors.push_back(color);
 
-    const int color_type = (tray.ctype >= 0 && tray.ctype <= 2) ? tray.ctype : (colors.size() > 1 ? 1 : 2);
+    const int color_type = colors.size() <= 1 ? 2 : ((tray.ctype == 0 || tray.ctype == 1) ? tray.ctype : 1);
 
     json remain_weight = nullptr;
     double weight      = 0;
@@ -111,9 +111,7 @@ json machine_list(DeviceManager* mgr)
     if (mgr == nullptr)
         return out;
     try {
-        std::map<std::string, MachineObject*> all = mgr->get_my_machine_list();
-        for (const auto& [id, m] : mgr->get_user_machinelist())
-            all.emplace(id, m);
+        const std::map<std::string, MachineObject*> all = mgr->get_my_machine_list(mgr->get_current_printer_agent_id());
         for (const auto& [id, m] : all)
             if (m != nullptr)
                 machines.push_back(machine_entry(*m));
