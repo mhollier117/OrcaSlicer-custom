@@ -3558,7 +3558,7 @@
         "readOnlyHint": false,
         "title": "Filament Manager"
       },
-      "description": "The filament spools kept in the user's Bambu account (the Filament Manager tab). Writes (add, update, remove) go to the user's Bambu account. Results arrive asynchronously: poll status until is_syncing is false and read recent for what happened. Linking keeps the account's record of which spool is in which AMS slot, and how much is left on it, in step with every Bambu printer of the account: link_status shows per printer what the printers report, what each tray matched, what would be sent and why not, and the last round; link_mode sets on, off or dry_run (dry_run plans without sending anything) and optionally limits linking to some slots; assign puts a spool without RFID into a slot, but binds it only when the printer reports that spool's filament and colour in that slot (within two minutes); unassign clears the slot of a spool without RFID now; sync_now runs the next round at once; soft_match reads the cloud's queue of new official spools of one AMS (shown in link_status). Printers are named by their names.",
+      "description": "The filament spools kept in the user's Bambu account (the Filament Manager tab). Writes (add, update, remove) go to the user's Bambu account. Results arrive asynchronously: poll status until is_syncing is false and read recent for what happened. Linking keeps the account's record of which spool is in which AMS slot, and how much is left on it, in step with every Bambu printer of the account: link_status shows per printer what the printers report, what each tray matched, what would be sent and why not, and the last round; link_mode sets on, off or dry_run (dry_run plans without sending anything) and optionally limits linking to some slots; assign puts a spool without RFID into a slot, but binds it only when the printer reports that spool's filament and colour in that slot (within two minutes); unassign clears the slot of a spool without RFID now; sync_now runs the next round at once; soft_match reads the cloud's queue of new official spools of one AMS (shown in link_status); new_spools lists the slots that show the new-spool marker; soft_match_act answers an entry of that queue (accept the match, link_other to another spool, or create_new; the outcome shows in status recent). Printers are named by their names.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -3576,7 +3576,9 @@
               "assign",
               "unassign",
               "sync_now",
-              "soft_match"
+              "soft_match",
+              "new_spools",
+              "soft_match_act"
             ],
             "type": "string"
           },
@@ -3590,6 +3592,15 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "match_action": {
+            "description": "soft_match_act: accept the match, link the new spool to target_spool_id, or keep it as a new spool.",
+            "enum": [
+              "accept",
+              "link_other",
+              "create_new"
+            ],
+            "type": "string"
           },
           "mode": {
             "description": "link_mode: on, off, or dry_run (plans without sending). Omitted: unchanged.",
@@ -3630,7 +3641,11 @@
             "type": "object"
           },
           "spool_id": {
-            "description": "assign: the spool (without RFID) to put into the slot.",
+            "description": "assign: the spool (without RFID) to put into the slot. soft_match_act: the new spool's id (the queue entry).",
+            "type": "string"
+          },
+          "target_spool_id": {
+            "description": "soft_match_act with link_other: the existing spool the new one is.",
             "type": "string"
           }
         },

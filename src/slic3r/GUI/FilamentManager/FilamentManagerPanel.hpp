@@ -16,6 +16,11 @@ class wxTimerEvent;
 
 namespace Slic3r::GUI {
 
+namespace Fm {
+// The text the Filament Manager shows for a failed cloud call, with the server's short text when there is one.
+std::string fail_text(BblFilament::FailKind kind, const std::string& server_message);
+} // namespace Fm
+
 // The Filament Manager tab: one web view showing the page, and the view-model that answers it.
 // See FilamentManager/page/BRIDGE.md for the page contract.
 class FilamentManagerPanel : public wxPanel

@@ -146,6 +146,8 @@ src/slic3r/GUI/Field.cpp
 src/slic3r/GUI/Field.hpp
 src/slic3r/GUI/FilamentManager/FilamentManagerPanel.cpp
 src/slic3r/GUI/FilamentManager/FmAmsDialogRow.cpp
+src/slic3r/GUI/FilamentManager/FmNewSpool.cpp
+src/slic3r/GUI/FilamentManager/FmNewSpoolDialogs.cpp
 src/slic3r/GUI/FilamentManager/FmSpoolPicker.cpp
 src/slic3r/GUI/GCodeViewer.cpp
 src/slic3r/GUI/GLCanvas3D.cpp

@@ -50,6 +50,9 @@ public:
     // Reads the soft-match queue of one AMS; the result shows in soft_match_json().
     BblFilament::Accept request_soft_match(const BblFilament::PrinterView& printer, int ams_id);
     const json&         soft_match_json() const { return m_soft_match; }
+    // Queues an answer to that queue: "accept", "link_other" (to target_spool_id) or "create_new" for spool_id. The
+    // outcome shows in the recent events.
+    BblFilament::Accept soft_match_act(const std::string& action, const std::string& spool_id, const std::string& target_spool_id);
 
     // Linking is on (not off, not a dry run), the user is signed in and the printer takes part (printer_views).
     bool link_available(const std::string& dev_id) const;

@@ -334,6 +334,19 @@ fil::Accept Runtime::request_soft_match(const fil::PrinterView& printer, int ams
     return m_service->link(std::move(req));
 }
 
+fil::Accept Runtime::soft_match_act(const std::string& action, const std::string& spool_id, const std::string& target_spool_id)
+{
+    fil::SpoolService::LinkRequest req;
+    req.kind            = fil::SpoolService::LinkRequest::Kind::SoftMatchAct;
+    req.action          = action;
+    req.spool_id        = spool_id;
+    req.target_spool_id = target_spool_id;
+    req.done            = [this, action](const fil::SpoolService::LinkOutcome& out) {
+        log_event({{"event", "soft_match_act"}, {"action", action}, {"ok", out.ok}, {"kind", out.ok ? "" : fail_name(out.kind)}, {"message", out.message}});
+    };
+    return m_service->link(std::move(req));
+}
+
 const ColorCodes& Runtime::colors()
 {
     if (!m_colors)

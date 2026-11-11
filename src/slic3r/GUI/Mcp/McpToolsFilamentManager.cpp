@@ -12,8 +12,10 @@
 #include "slic3r/GUI/I18N.hpp"
 #include "slic3r/Utils/BblFilament/LinkDriver.hpp"
 #include "slic3r/Utils/BblFilament/Linker.hpp"
+#include "slic3r/Utils/BblFilament/NewSpools.hpp"
 #include "slic3r/Utils/BblFilament/PrinterTap.hpp"
 #include "slic3r/Utils/BblFilament/Spool.hpp"
+#include "slic3r/Utils/BblFilament/SpoolCloud.hpp"
 #include "slic3r/Utils/BblFilament/SpoolService.hpp"
 
 #include <cstddef>
@@ -286,6 +288,38 @@ json soft_match(const json& args)
     return {{"requested", true}};
 }
 
+// The slots that show the new-spool marker; never an RFID.
+json new_spools()
+{
+    Fm::Runtime&                        runtime = Fm::Runtime::get();
+    const std::vector<fil::PrinterView> views   = runtime.views();
+    json                                slots   = json::array();
+    for (const fil::PrinterView& v : views)
+        for (const fil::SlotKey& slot : runtime.new_spools().of_printer(v.dev_id))
+            slots.push_back({{"printer", v.name}, {"ams_id", slot.ams_id}, {"slot_id", slot.slot_id}});
+    return {{"slots", std::move(slots)}};
+}
+
+std::string id_arg(const json& args, const char* key)
+{
+    auto        it = args.find(key);
+    std::string id;
+    if (it != args.end() && it->is_number_integer()) id = std::to_string(it->get<long long>());
+    else if (it != args.end() && it->is_string()) id = it->get<std::string>();
+    if (!fil::spool_id_as_int(id)) throw ToolFailure(std::string(key) + " must be a spool id");
+    return id;
+}
+
+json soft_match_act(const json& args)
+{
+    const std::string action = arg_string(args, "match_action");
+    if (action != "accept" && action != "link_other" && action != "create_new")
+        throw ToolFailure("match_action must be accept, link_other or create_new");
+    const std::string spool_id = id_arg(args, "spool_id");
+    const std::string target   = action == "link_other" ? id_arg(args, "target_spool_id") : std::string();
+    return accept_json(Fm::Runtime::get().soft_match_act(action, spool_id, target));
+}
+
 json run_action(const json& args)
 {
     const std::string action  = arg_string(args, "action");
@@ -304,6 +338,8 @@ json run_action(const json& args)
         return {{"requested", true}};
     }
     if (action == "soft_match") return soft_match(args);
+    if (action == "new_spools") return new_spools();
+    if (action == "soft_match_act") return soft_match_act(args);
     if (action == "list") return spool_list();
 
     if (action == "pull") {
@@ -341,9 +377,11 @@ void register_filament_manager_tools(McpService& service)
         "the last round; link_mode sets on, off or dry_run (dry_run plans without sending anything) and optionally limits linking to some "
         "slots; assign puts a spool without RFID into a slot, but binds it only when the printer reports that spool's filament and colour in "
         "that slot (within two minutes); unassign clears the slot of a spool without RFID now; sync_now runs the next round at once; "
-        "soft_match reads the cloud's queue of new official spools of one AMS (shown in link_status). Printers are named by their names.",
+        "soft_match reads the cloud's queue of new official spools of one AMS (shown in link_status); new_spools lists the slots that show the "
+        "new-spool marker; soft_match_act answers an entry of that queue (accept the match, link_other to another spool, or create_new; the "
+        "outcome shows in status recent). Printers are named by their names.",
         object_schema({{"action", enum_prop({"status", "list", "pull", "add", "update", "remove", "link_status", "link_mode", "assign", "unassign",
-                                             "sync_now", "soft_match"},
+                                             "sync_now", "soft_match", "new_spools", "soft_match_act"},
                                             "What to do.")},
                        {"spool", prop("object", "add: the new spool in the page's shape (brand, material_type, series, setting_id, color_code, colors, color_type, initial_weight, net_weight, note, ...).")},
                        {"quantity", [] {
@@ -356,7 +394,9 @@ void register_filament_manager_tools(McpService& service)
                        {"ids", array_prop({{"type", "string"}}, "remove: the spool_id values to delete.")},
                        {"mode", enum_prop({"on", "off", "dry_run"}, "link_mode: on, off, or dry_run (plans without sending). Omitted: unchanged.")},
                        {"only", array_prop({{"type", "string"}}, "link_mode: the only slots linking may touch, each \"<printer name>:<ams id>:<slot id>\"; an empty array lifts the limit. Omitted: unchanged.")},
-                       {"spool_id", prop("string", "assign: the spool (without RFID) to put into the slot.")},
+                       {"spool_id", prop("string", "assign: the spool (without RFID) to put into the slot. soft_match_act: the new spool's id (the queue entry).")},
+                       {"match_action", enum_prop({"accept", "link_other", "create_new"}, "soft_match_act: accept the match, link the new spool to target_spool_id, or keep it as a new spool.")},
+                       {"target_spool_id", prop("string", "soft_match_act with link_other: the existing spool the new one is.")},
                        {"printer", prop("string", "assign, unassign, soft_match: the printer's name (default: the selected printer).")},
                        {"ams_id", prop("integer", "assign, unassign, soft_match: the AMS id (0 to 3 for AMS units, 128 and up for AMS HT).")},
                        {"slot_id", prop("integer", "assign, unassign: the slot of that AMS, from 0.")}},

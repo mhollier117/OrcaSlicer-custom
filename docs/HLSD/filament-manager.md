@@ -18,10 +18,11 @@ The list lives in the Bambu cloud. OrcaSlicer stores no spool data of its own.
 | Printers | `GUI/FilamentManager/FmPrinters` | Hands printer messages to the tap; builds the linker's view of each printer; the link settings |
 | Printer tap | `Utils/BblFilament/PrinterTap` | The tray contents of every printer, from its status messages |
 | Linker | `Utils/BblFilament/Linker`, `LinkDriver` | Plans which spool is in which slot and how much is left on it; runs the plan through the service |
+| New spools | `Utils/BblFilament/NewSpools`, `GUI/FilamentManager/FmNewSpool`, `FmNewSpoolDialogs` | The marker on a slot that holds a newly registered official spool, and the two dialogs behind it (ported from Bambu Studio) |
 | Service | `Utils/BblFilament/SpoolService` | The list and the rules for changing it |
 | Cloud | `Utils/BblFilament/SpoolCloud` | The five plugin calls, reply classification, paging |
 | Worker and gate | `Utils/BblFilament/SpoolWorker`, `PluginGate` | The one thread that calls the plugin, and its tie to the plugin's lifetime |
-| MCP tool | `GUI/Mcp/McpToolsFilamentManager.cpp` | `filament_manager`: status, list, pull, add, update, remove; for linking link_status, link_mode, assign, unassign, sync_now, soft_match (printers by name, never by serial) |
+| MCP tool | `GUI/Mcp/McpToolsFilamentManager.cpp` | `filament_manager`: status, list, pull, add, update, remove; for linking link_status, link_mode, assign, unassign, sync_now, soft_match, new_spools, soft_match_act (printers by name, never by serial) |
 
 `Utils/BblFilament` has no window code and is covered by unit tests with a fake cloud and a hand-driven executor.
 
@@ -159,6 +160,16 @@ the app keeps that record current for every Bambu printer of the account, not on
   `ORCA_FM_LINK_MODE` (`off`, `dry_run` or `on`, read once at start-up) decides the mode in place of the first two
   settings, so a new build can be tried against a real account in report-only mode from its first second; the MCP
   `link_status` shows it as `mode_source: "env"`.
+
+## A new official spool
+
+When the linker registers a new official spool, the slot gets a marker on the Device tab (`AMSLib`, as in Bambu
+Studio). The runtime keeps the marked slots in memory, forgets them when the list goes away, and drops a marker when
+its slot is empty or reports another spool on a printer with fresh data. Clicking the marker reads the cloud's queue of
+new spools for that AMS. When the queue has no entry for the spool, a dialog says the spool was recorded. Otherwise a
+dialog offers to add it as a new spool or to confirm the match, the spool the cloud proposes or one of its candidates;
+the answer is sent as `create_new`, `link_other` or `accept`, and the list is read again. Either way the marker goes;
+closing the dialog keeps it. A failed call is shown with the Filament Manager's failure texts and keeps the marker.
 
 ## Not part of this
 

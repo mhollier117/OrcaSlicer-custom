@@ -41,6 +41,22 @@ namespace Slic3r::GUI {
 namespace fil = BblFilament;
 using Fm::json;
 
+std::string Fm::fail_text(fil::FailKind kind, const std::string& server_message)
+{
+    std::string text;
+    switch (kind) {
+    case fil::FailKind::NotSignedIn: text = _u8L("Sign in to your Bambu account to use the Filament Manager."); break;
+    case fil::FailKind::Unavailable: text = _u8L("The Bambu network plug-in is not available."); break;
+    case fil::FailKind::BadRequest: text = _u8L("The request was not valid."); break;
+    case fil::FailKind::NotFound: text = _u8L("This spool no longer exists in the cloud."); break;
+    case fil::FailKind::Rejected: text = _u8L("The cloud refused the change."); break;
+    default: text = _u8L("No answer from the cloud. The change may or may not have been applied, so the list was refreshed."); break;
+    }
+    if (!server_message.empty())
+        text += " (" + server_message + ")";
+    return text;
+}
+
 namespace {
 
 std::string to_utf8(const wxString& s) { return std::string(s.ToUTF8().data()); }
@@ -256,20 +272,7 @@ Fm::Host FilamentManagerPanel::make_host()
     host.now_ms = [] {
         return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
     };
-    host.fail_text = [](fil::FailKind kind, const std::string& server_message) {
-        std::string text;
-        switch (kind) {
-        case fil::FailKind::NotSignedIn: text = _u8L("Sign in to your Bambu account to use the Filament Manager."); break;
-        case fil::FailKind::Unavailable: text = _u8L("The Bambu network plug-in is not available."); break;
-        case fil::FailKind::BadRequest: text = _u8L("The request was not valid."); break;
-        case fil::FailKind::NotFound: text = _u8L("This spool no longer exists in the cloud."); break;
-        case fil::FailKind::Rejected: text = _u8L("The cloud refused the change."); break;
-        default: text = _u8L("No answer from the cloud. The change may or may not have been applied, so the list was refreshed."); break;
-        }
-        if (!server_message.empty())
-            text += " (" + server_message + ")";
-        return text;
-    };
+    host.fail_text = &Fm::fail_text;
     host.create_custom = [this](const std::string& vendor, const std::string& client_request_id) { create_custom(vendor, client_request_id); };
     host.create_and_assign = [](const json& page_spool, const std::string& dev_id, int ams_id, const std::string& slot_id) {
         return Fm::Runtime::get().create_and_assign(page_spool, fil::SlotKey{dev_id, ams_id, slot_id});

@@ -1,8 +1,11 @@
-// NewSpools::reconcile follows calibrate_pending_badges of Bambu Studio (src/slic3r/GUI/fila_manager/wgtFilaManagerSync.cpp,
-// tag v02.09.01.70), GNU AGPL v3, copyright Bambu Lab; adapted for OrcaSlicer.
+// NewSpools::reconcile follows calibrate_pending_badges of Bambu Studio (src/slic3r/GUI/fila_manager/wgtFilaManagerSync.cpp),
+// soft_match_act_for and spool_from_tray follow StatusPanel::show_new_official_filament_dlg and
+// open_new_official_filament_hint (src/slic3r/GUI/StatusPanel.cpp); tag v02.09.01.70, GNU AGPL v3, copyright Bambu Lab;
+// adapted for OrcaSlicer.
 
 #include "NewSpools.hpp"
 
+#include <algorithm>
 #include <iterator>
 
 namespace Slic3r::BblFilament {
@@ -51,5 +54,45 @@ std::string NewSpools::rfid(const SlotKey& slot) const
 }
 
 void NewSpools::clear() { m_slots.clear(); }
+
+const SoftMatchEntry* entry_for_rfid(const SoftMatchQueue& queue, const std::string& rfid)
+{
+    if (rfid.empty())
+        return nullptr;
+    for (const SoftMatchEntry& e : queue.entries)
+        if (e.hit.rfid == rfid)
+            return &e;
+    return nullptr;
+}
+
+std::optional<SoftMatchAct> soft_match_act_for(NewSpoolChoice choice, const std::string& hit_id, const std::string& candidate_id)
+{
+    if (hit_id.empty())
+        return std::nullopt;
+    if (choice == NewSpoolChoice::AddNew)
+        return SoftMatchAct{"create_new", hit_id, {}};
+    if (!candidate_id.empty() && candidate_id != hit_id)
+        return SoftMatchAct{"link_other", hit_id, candidate_id};
+    return SoftMatchAct{"accept", hit_id, {}};
+}
+
+Spool spool_from_tray(const TrayFacts& tray)
+{
+    Spool s;
+    s.rfid             = valid_rfid(tray.uuid) ? tray.uuid : std::string();
+    s.filament_id      = tray.filament_id;
+    s.name             = tray.sub_brands;
+    s.type             = tray.type;
+    s.tray_id_name     = tray.tray_id_name;
+    s.color            = tray.color;
+    s.colors           = tray.colors;
+    s.color_type       = tray.color_type;
+    s.total_net_weight = static_cast<double>(tray.total_g);
+    if (tray.remain_g >= 0)
+        s.net_weight = tray.remain_g;
+    else if (tray.total_g > 0 && tray.remain >= 0)
+        s.net_weight = static_cast<double>(tray.total_g) * std::min(tray.remain, 100) / 100.0;
+    return s;
+}
 
 } // namespace Slic3r::BblFilament

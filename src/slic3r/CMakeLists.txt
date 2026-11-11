@@ -276,6 +276,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/FilamentManager/FmDevices.hpp
     GUI/FilamentManager/FmNewSpool.cpp
     GUI/FilamentManager/FmNewSpool.hpp
+    GUI/FilamentManager/FmNewSpoolDialogs.cpp
+    GUI/FilamentManager/FmNewSpoolDialogs.hpp
     GUI/FilamentManager/FmPresets.cpp
     GUI/FilamentManager/FmPresets.hpp
     GUI/FilamentManager/FmPrinters.cpp
