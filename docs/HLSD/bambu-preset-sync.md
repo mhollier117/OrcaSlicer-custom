@@ -135,7 +135,11 @@ and adds a copy of each entry of the old id under the new id (`plan_k_copy`). A 
 selected may lack its PA flag in the app, and the app refreshes nozzle diameters only for the
 selected printer; the Filament Manager's printer tap, which is fed while this sync is on even with
 the Filament Manager tab off, supplies the flag when it is missing and, for a printer that is not
-selected, the nozzle diameter it heard in place of the app's. A printer that fails or goes away does not stop the others. It never deletes or
+selected, the nozzle diameter it heard in place of the app's. A printer that fails or goes away does not stop the others. A table
+read that fails ends that printer's part of the pass, so its other copies are not asked for one by
+one; they are tried again ten minutes later. A printer that answers but refuses to list its table
+(seen with custom firmware) is not asked again by the automatic copy while the app runs; a manual
+request still asks it. It never deletes or
 changes an entry, and respects the table limit. Which profile a slot uses is not part of the table
 and is chosen when the slot is set.
 
