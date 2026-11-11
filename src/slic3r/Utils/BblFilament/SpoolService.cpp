@@ -91,8 +91,11 @@ SyncState SpoolService::state() const
     st.signed_in    = is_signed_in(s);
     st.is_pulling   = job_running_ && running_kind_ == JobKind::Pull;
     // A config fetch fires no state_changed when it ends, so it must not count as "syncing".
-    const bool write_queued = std::any_of(ops_.begin(), ops_.end(), [](const Op& o) { return o.kind != Op::Kind::Config && o.state == Op::State::Queued; });
-    st.is_syncing           = (job_running_ && running_kind_ != JobKind::Config) || write_queued || pull_wanted_;
+    // A soft-match read counts neither queued nor running: it fires no event when it ends.
+    const bool write_queued = std::any_of(ops_.begin(), ops_.end(), [](const Op& o) {
+        return o.kind != Op::Kind::Config && !(o.kind == Op::Kind::Link && o.link.kind == LinkRequest::Kind::SoftMatchRead) && o.state == Op::State::Queued;
+    });
+    st.is_syncing = (job_running_ && running_kind_ != JobKind::Config && running_kind_ != JobKind::LinkRead) || write_queued || pull_wanted_;
     st.last_synced_at = last_synced_at_;
     st.has_error      = has_error_;
     st.error_kind     = error_kind_;
@@ -107,12 +110,31 @@ ServiceStatus SpoolService::status() const
     st.have_list      = have_list_;
     st.spool_count    = static_cast<int>(view().size());
     st.pending_writes = static_cast<int>(std::count_if(ops_.begin(), ops_.end(), [](const Op& o) {
-        return o.kind != Op::Kind::Config && o.state != Op::State::Settled;
+        return o.kind != Op::Kind::Config && !(o.kind == Op::Kind::Link && o.link.kind == LinkRequest::Kind::SoftMatchRead) &&
+               o.state != Op::State::Settled;
     }));
     st.pull_wanted    = pull_wanted_;
     st.paging_suspect = paging_suspect_;
     st.skipped_rows   = skipped_rows_;
     return st;
+}
+
+const std::vector<Spool>& SpoolService::confirmed() const
+{
+    static const std::vector<Spool> none;
+    const Session                   s = deps_.session ? deps_.session() : Session{};
+    if (!is_signed_in(s) || !session_matches(s)) return none;
+    return truth_;
+}
+
+std::set<std::string> SpoolService::busy_ids() const
+{
+    std::set<std::string> ids;
+    for (const Op& op : ops_) {
+        if (op.kind == Op::Kind::Update) ids.insert(op.id);
+        else if (op.kind == Op::Kind::Delete) ids.insert(op.ids.begin(), op.ids.end());
+    }
+    return ids;
 }
 
 const json* SpoolService::cached_config() const { return have_config_ ? &config_ : nullptr; }
@@ -148,6 +170,9 @@ bool SpoolService::do_reset(bool fire, const Session& s)
     if (cancel_) cancel_->store(true);
     cancel_.reset();
     truth_.clear();
+    std::vector<std::function<void(const LinkOutcome&)>> dropped; // link ops that never finished
+    for (const Op& op : ops_)
+        if (op.kind == Op::Kind::Link && op.link.done) dropped.push_back(op.link.done);
     ops_.clear();
     pull_wanted_ = false;
     config_      = json();
@@ -167,6 +192,11 @@ bool SpoolService::do_reset(bool fire, const Session& s)
     if (fire) {
         if (!fire_spools_changed()) return false;
         if (!fire_state_changed()) return false;
+    }
+    for (const auto& done : dropped) {
+        LinkOutcome out;
+        out.kind = FailKind::NotSignedIn;
+        if (!call_event(done, out)) return false;
     }
     return true;
 }
@@ -307,6 +337,21 @@ Accept SpoolService::remove(const std::vector<std::string>& ids)
     return {};
 }
 
+Accept SpoolService::link(LinkRequest request)
+{
+    sync_session();
+    if (!is_signed_in(deps_.session ? deps_.session() : Session{})) return {false, FailKind::NotSignedIn};
+    if (request.kind == LinkRequest::Kind::AmsSync && !request.build_ams) return {false, FailKind::BadRequest};
+    if (request.kind == LinkRequest::Kind::SlotSync && !request.build_slots) return {false, FailKind::BadRequest};
+    Op op;
+    op.kind = Op::Kind::Link;
+    op.link = std::move(request);
+    queue_op(std::move(op));
+    if (!fire_state_changed()) return {};
+    pump();
+    return {};
+}
+
 void SpoolService::request_config(bool force)
 {
     sync_session();
@@ -407,11 +452,62 @@ bool SpoolService::start_op(std::size_t index)
         std::vector<std::string> ids = op.ids;
         return launch([ids](ISpoolCloud& cloud, const std::function<bool()>&) { return from_reply(cloud.remove(ids)); }, JobKind::Write, serial, s);
     }
+    case Op::Kind::Link: return start_link(index, s);
     case Op::Kind::Config:
         op.state = Op::State::Running;
         return launch([](ISpoolCloud& cloud, const std::function<bool()>&) { return from_reply(cloud.config()); }, JobKind::Config, serial, s);
     }
     return true;
+}
+
+bool SpoolService::start_link(std::size_t index, const Session& s)
+{
+    const unsigned long long serial = ops_[index].serial;
+    const LinkRequest        req    = ops_[index].link;
+    using K                         = LinkRequest::Kind;
+
+    std::vector<AmsItem>  ams;
+    std::vector<SlotItem> slots;
+    if (req.kind == K::AmsSync || req.kind == K::SlotSync) {
+        // The builder sees the rows as they are now. It may do anything, even destroy the service.
+        std::weak_ptr<int>          weak = alive_;
+        const std::vector<Spool>    rows = truth_;
+        const std::set<std::string> busy = busy_ids();
+        if (req.kind == K::AmsSync) ams = req.build_ams ? req.build_ams(rows, busy) : std::vector<AmsItem>();
+        else slots = req.build_slots ? req.build_slots(rows, busy) : std::vector<SlotItem>();
+        if (weak.expired()) return false;
+        auto it = std::find_if(ops_.begin(), ops_.end(), [&](const Op& o) { return o.serial == serial; });
+        if (it == ops_.end()) return true; // the builder reset the service
+        if (ams.empty() && slots.empty()) {
+            ops_.erase(it);
+            LinkOutcome out;
+            out.kind = FailKind::BadRequest;
+            if (!fire_state_changed()) return false;
+            return call_event(req.done, out);
+        }
+        it->ams_sent   = ams;
+        it->slots_sent = slots;
+    }
+    auto it = std::find_if(ops_.begin(), ops_.end(), [&](const Op& o) { return o.serial == serial; });
+    if (it == ops_.end()) return true;
+    it->state = Op::State::Running;
+
+    const std::string dev = req.dev_id, ams_sn = req.ams_sn, action = req.action, spool_id = req.spool_id, target = req.target_spool_id;
+    const K           kind = req.kind;
+    return launch(
+        [kind, dev, ams_sn, action, spool_id, target, ams, slots](ISpoolCloud& cloud, const std::function<bool()>&) {
+            CloudReply reply;
+            switch (kind) {
+            case K::AmsSync: reply = cloud.sync_ams(dev, ams); break;
+            case K::SlotSync: reply = cloud.sync_slots(dev, slots); break;
+            case K::SoftMatchRead: reply = cloud.soft_match_pending(dev, ams_sn); break;
+            case K::SoftMatchAct: reply = cloud.soft_match_action(action, spool_id, target); break;
+            }
+            JobResult r = from_reply(reply);
+            r.sent      = reply.error != CloudError::Unavailable;
+            return r;
+        },
+        kind == K::SoftMatchRead ? JobKind::LinkRead : JobKind::Write, serial, s);
 }
 
 bool SpoolService::launch(Work work, JobKind kind, unsigned long long serial, const Session& s)
@@ -521,6 +617,7 @@ bool SpoolService::finish_pull(const JobResult& r)
     for (const Spool& s : r.list.spools) (old_ids.count(s.id) ? kept : added) += 1;
 
     truth_ = r.list.spools;
+    ++list_serial_;
     ops_.erase(std::remove_if(ops_.begin(), ops_.end(), [](const Op& o) { return o.state == Op::State::Settled; }), ops_.end());
     have_list_      = true;
     last_synced_at_ = now();
@@ -533,11 +630,46 @@ bool SpoolService::finish_pull(const JobResult& r)
     return fire_state_changed();
 }
 
+bool SpoolService::finish_link(const Op& op, const JobResult& r)
+{
+    using K = LinkRequest::Kind;
+    LinkOutcome out;
+    out.sent    = r.sent;
+    out.ok      = r.ok;
+    out.kind    = r.kind;
+    out.message = r.message;
+    if (r.ok) out.body = r.body;
+    out.ams_sent   = op.ams_sent;
+    out.slots_sent = op.slots_sent;
+
+    // A read of the queue changes nothing and says nothing.
+    if (op.link.kind == K::SoftMatchRead) return call_event(op.link.done, out);
+
+    const std::string name = op.link.kind == K::SoftMatchAct ? "soft_match" : op.link.kind == K::SlotSync ? "slot_mappings" : "sync_ams";
+    if (r.ok) {
+        last_synced_at_ = now();
+        clear_error();
+        pull_wanted_ = true;
+        if (!call_event(events.push_done, name, std::string())) return false;
+    } else {
+        set_error(r.kind, r.message);
+        if (r.kind == FailKind::Unknown) pull_wanted_ = true;
+        if (!call_event(events.push_failed, name, std::string(), r.kind, r.message)) return false;
+    }
+    if (!fire_state_changed()) return false;
+    return call_event(op.link.done, out);
+}
+
 bool SpoolService::finish_op(unsigned long long serial, const JobResult& r)
 {
     auto it = std::find_if(ops_.begin(), ops_.end(), [&](const Op& o) { return o.serial == serial; });
     if (it == ops_.end()) return true;
     const Op op = *it;
+
+    if (op.kind == Op::Kind::Link) {
+        ops_.erase(it);
+        return finish_link(op, r);
+    }
 
     if (op.kind == Op::Kind::Config) {
         ops_.erase(it);

@@ -3,6 +3,7 @@ add_executable(${_TEST_NAME}_tests
     ${_TEST_NAME}_tests_main.cpp
     test_bambu_filament_ids.cpp
     test_bbl_filament.cpp
+    test_bbl_filament_link.cpp
     test_bbl_preset_sync.cpp
     test_bbl_preset_sync_kcopy.cpp
     test_bbl_preset_sync_merge.cpp

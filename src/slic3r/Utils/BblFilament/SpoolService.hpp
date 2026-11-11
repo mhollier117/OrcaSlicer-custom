@@ -7,6 +7,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -88,6 +89,36 @@ public:
     SyncState          state() const;
     ServiceStatus      status() const;
 
+    const std::vector<Spool>& confirmed() const;  // the rows of the last complete list (empty before one, or when signed out)
+    std::set<std::string>     busy_ids() const;   // spool ids with an update or delete op queued, running or settled
+    unsigned long long        list_serial() const { return list_serial_; } // grows with every complete list that replaced the rows; 0 = none yet
+
+    struct LinkOutcome
+    {
+        bool                  sent{false}; // a cloud call was made
+        bool                  ok{false};
+        FailKind              kind{FailKind::Unknown};
+        std::string           message;
+        json                  body; // the reply when ok
+        std::vector<AmsItem>  ams_sent;
+        std::vector<SlotItem> slots_sent;
+    };
+    struct LinkRequest
+    {
+        enum class Kind { AmsSync, SlotSync, SoftMatchRead, SoftMatchAct };
+        Kind        kind{Kind::AmsSync};
+        std::string dev_id;
+        // Called when the op starts, with the confirmed rows and the busy ids of that moment. An empty result drops the op.
+        std::function<std::vector<AmsItem>(const std::vector<Spool>&, const std::set<std::string>&)>  build_ams;
+        std::function<std::vector<SlotItem>(const std::vector<Spool>&, const std::set<std::string>&)> build_slots;
+        std::string                                                                                   ams_sn;                                   // SoftMatchRead
+        std::string                                                                                   action, spool_id, target_spool_id;        // SoftMatchAct
+        std::function<void(const LinkOutcome&)> done; // called exactly once on the service's thread, unless the service is destroyed first
+    };
+    // Refused like a write when not signed in ({false, NotSignedIn}; `done` is not called then). Link ops share the queue
+    // with the other ops and are not part of view().
+    Accept link(LinkRequest request);
+
     void   request_pull();
     Accept add(const json& page_spool, int quantity = 1);
     Accept batch(const json& creates, const json& updates);
@@ -105,7 +136,7 @@ public:
 private:
     struct Op
     {
-        enum class Kind { Create, Update, Delete, Config };
+        enum class Kind { Create, Update, Delete, Config, Link };
         enum class State { Queued, Running, Settled };
 
         Kind                     kind{Kind::Create};
@@ -115,6 +146,9 @@ private:
         std::string              id;    // update
         json                     patch; // update
         std::vector<std::string> ids;   // delete
+        LinkRequest              link;  // link
+        std::vector<AmsItem>     ams_sent;   // link: what the builder produced
+        std::vector<SlotItem>    slots_sent; // link: what the builder produced
     };
 
     struct JobResult
@@ -124,13 +158,14 @@ private:
         std::string message;
         json        body;
         ListResult  list;
+        bool        sent{false}; // link ops: a cloud call was made
     };
 
     static JobResult from_reply(const CloudReply& reply);
 
     using Work = std::function<JobResult(ISpoolCloud&, const std::function<bool()>&)>;
 
-    enum class JobKind { None, Pull, Write, Config };
+    enum class JobKind { None, Pull, Write, Config, LinkRead };
 
     std::vector<Spool> compute_view(std::size_t op_count) const;
     bool               session_matches(const Session& s) const;
@@ -145,6 +180,8 @@ private:
     bool pump();
     bool start_op(std::size_t index);
     bool start_pull();
+    bool start_link(std::size_t index, const Session& s);
+    bool finish_link(const Op& op, const JobResult& r);
     bool launch(Work work, JobKind kind, unsigned long long serial, const Session& s);
     void on_completion(unsigned long long epoch, const Session& started, bool is_pull, unsigned long long serial, unsigned long long ticket, JobResult result);
     bool finish(bool is_pull, unsigned long long serial, JobResult result);
@@ -180,6 +217,7 @@ private:
     std::string         error_message_;
     unsigned long long  epoch_{0};
     unsigned long long  next_serial_{1};
+    unsigned long long  list_serial_{0};
     long long           last_synced_at_{0};
     bool                paging_suspect_{false};
     int                 skipped_rows_{0};

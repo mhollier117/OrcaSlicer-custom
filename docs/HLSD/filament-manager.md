@@ -52,6 +52,7 @@ not log.
 ## The cloud calls
 
 The network plugin offers five calls: list (paged), create, update, delete and the catalogue of Bambu's own filaments.
+Four more calls link spools to printer slots: the AMS sync, the slot mappings, and the queue of new official spools with its decision call. The first is a wrapped plugin function; the other three are resolved by name at every call (the plugin can be reloaded) and take structs by value, whose layout is fixed in `PluginLinkStructs.hpp`. They run as ops in the service queue (`link`), one call at a time, and the service never shows them in `view()`. A spool id that does not fit the plugin's 32-bit field is refused, because 0 would unbind the slot.
 Three properties of these calls shape the service:
 
 - **A call returns a code and the raw response body, never the HTTP status.** A reply is classified from both: success;

@@ -127,6 +127,87 @@ public:
         return ok(config_body);
     }
 
+    // The link calls. They record what they got; `apply_mounts` makes sync_slots / sync_ams change the rows, so that a
+    // following list shows the mount.
+    std::vector<std::vector<fil::AmsItem>>  ams_got;
+    std::vector<std::vector<fil::SlotItem>> slots_got;
+    std::vector<std::string>                actions_got; // "action spool target"
+    bool                                    apply_mounts = false;
+    json                                    soft_queue   = json{{"hits", json::array()}, {"candidates", json::array()}};
+
+    fil::CloudReply sync_ams(const std::string& dev_id, const std::vector<fil::AmsItem>& items) override
+    {
+        log.push_back("sync_ams " + dev_id);
+        ams_got.push_back(items);
+        if (auto f = take("sync_ams")) return *f;
+        json results = json::array();
+        for (const auto& it : items) {
+            json r = {{"amsSn", it.ams_sn}, {"slotId", it.slot_id}, {"spoolId", nullptr}};
+            for (json& row : rows) {
+                if (!it.rfid.empty() && row.value("RFID", std::string()) == it.rfid) {
+                    r["spoolId"] = row["id"];
+                    if (apply_mounts) mount(row, dev_id, it.ams_sn, it.slot_id, it.ams_id, it.ams_type);
+                }
+            }
+            results.push_back(r);
+        }
+        return ok(json{{"createdRFIDs", nullptr}, {"results", results}});
+    }
+
+    fil::CloudReply sync_slots(const std::string& dev_id, const std::vector<fil::SlotItem>& items) override
+    {
+        log.push_back("sync_slots " + dev_id);
+        slots_got.push_back(items);
+        if (auto f = take("sync_slots")) return *f;
+        json results = json::array();
+        for (const auto& it : items) {
+            if (apply_mounts) {
+                for (json& row : rows) {
+                    const bool here = row.value("amsSn", std::string()) == it.ams_sn && row.value("slotId", std::string()) == it.slot_id;
+                    if (here || row["id"].dump() == it.spool_id) unmount(row);
+                }
+                for (json& row : rows)
+                    if (!it.spool_id.empty() && row["id"].dump() == it.spool_id) mount(row, dev_id, it.ams_sn, it.slot_id, it.ams_id, it.ams_type);
+            }
+            results.push_back(json{{"amsSn", it.ams_sn}, {"slotId", it.slot_id}, {"code", 0}});
+        }
+        return ok(json{{"results", results}});
+    }
+
+    fil::CloudReply soft_match_pending(const std::string&, const std::string&) override
+    {
+        log.push_back("soft_match_pending");
+        if (auto f = take("soft_match_pending")) return *f;
+        return ok(soft_queue);
+    }
+
+    fil::CloudReply soft_match_action(const std::string& action, const std::string& spool_id, const std::string& target) override
+    {
+        log.push_back("soft_match_action " + action);
+        actions_got.push_back(action + " " + spool_id + " " + target);
+        if (auto f = take("soft_match_action")) return *f;
+        return ok(json::object());
+    }
+
+    static void mount(json& row, const std::string& dev, const std::string& sn, const std::string& slot, int ams_id, int ams_type)
+    {
+        row["inPrinter"] = true;
+        row["devId"]     = dev;
+        row["amsSn"]     = sn;
+        row["slotId"]    = slot;
+        row["amsId"]     = ams_id;
+        row["amsType"]   = ams_type;
+    }
+    static void unmount(json& row)
+    {
+        row["inPrinter"] = false;
+        row["devId"]     = "";
+        row["amsSn"]     = "";
+        row["slotId"]    = "";
+        row["amsId"]     = 0;
+        row["amsType"]   = 0;
+    }
+
     static fil::CloudReply ok(json body)
     {
         fil::CloudReply r;
