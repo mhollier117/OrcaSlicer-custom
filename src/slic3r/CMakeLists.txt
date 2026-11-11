@@ -908,12 +908,16 @@ set(SLIC3R_GUI_SOURCES
     Utils/BblPresetSync/Eligibility.cpp
     Utils/BblPresetSync/Eligibility.hpp
     Utils/BblPresetSync/BodyCheck.hpp
+    Utils/BblPresetSync/Cloud.cpp
+    Utils/BblPresetSync/Cloud.hpp
     Utils/BblPresetSync/FilamentId.cpp
     Utils/BblPresetSync/FilamentId.hpp
     Utils/BblPresetSync/Hash.cpp
     Utils/BblPresetSync/Hash.hpp
     Utils/BblPresetSync/Ledger.cpp
     Utils/BblPresetSync/Ledger.hpp
+    Utils/BblPresetSync/Mirror.cpp
+    Utils/BblPresetSync/Mirror.hpp
     Utils/BblPresetSync/Planner.cpp
     Utils/BblPresetSync/Planner.hpp
     Utils/BblPresetSync/Snapshot.cpp
