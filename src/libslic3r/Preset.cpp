@@ -2581,7 +2581,7 @@ void PresetCollection::save_user_presets(const std::string& dir_path, const std:
 }
 
 //BBS: load one user preset from key-values
-bool PresetCollection::load_user_preset(std::string name, std::map<std::string, std::string> preset_values, PresetsConfigSubstitutions& substitutions, ForwardCompatibilitySubstitutionRule rule, const PresetOrigin &load_origin)
+bool PresetCollection::load_user_preset(std::string name, std::map<std::string, std::string> preset_values, PresetsConfigSubstitutions& substitutions, ForwardCompatibilitySubstitutionRule rule, const PresetOrigin &load_origin, DynamicPrintConfig* materialize_only)
 {
     std::string errors_cummulative;
     // Store the loaded presets into a new vector, otherwise the binary search for already existing presets would be broken.
@@ -2633,7 +2633,7 @@ bool PresetCollection::load_user_preset(std::string name, std::map<std::string, 
     //std::string name = preset->name;
     auto iter = this->find_preset_internal(canonical_name);
     bool need_update = false;
-    if ((iter != m_presets.end()) && (iter->name == canonical_name)) {
+    if (materialize_only == nullptr && (iter != m_presets.end()) && (iter->name == canonical_name)) {
         BOOST_LOG_TRIVIAL(info) << "Found the Preset locally: " << canonical_name;
         //BBS: we should compare the time between cloud and local
         if ((cloud_update_time == 0) || (cloud_update_time <= iter->updated_time)) {
@@ -2762,6 +2762,11 @@ bool PresetCollection::load_user_preset(std::string name, std::map<std::string, 
             ++m_errors;
             BOOST_LOG_TRIVIAL(error) << "Error in a preset file: The preset \"" << canonical_name
                                      << "\" contains the following incorrect keys: " << incorrect_keys << ", which were removed";
+        }
+        if (materialize_only != nullptr) {
+            *materialize_only = std::move(new_config);
+            unlock();
+            return true;
         }
         if (need_update) {
             if (iter->name == m_edited_preset.name && iter->is_dirty) {

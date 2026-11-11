@@ -905,6 +905,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/BBLCloudServiceAgent.cpp
     Utils/BBLCloudServiceAgent.hpp
     Utils/BblPresetSync/BodyCheck.cpp
+    Utils/BblPresetSync/Eligibility.cpp
+    Utils/BblPresetSync/Eligibility.hpp
     Utils/BblPresetSync/BodyCheck.hpp
     Utils/BblPresetSync/FilamentId.cpp
     Utils/BblPresetSync/FilamentId.hpp
@@ -914,6 +916,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/BblPresetSync/Ledger.hpp
     Utils/BblPresetSync/Planner.cpp
     Utils/BblPresetSync/Planner.hpp
+    Utils/BblPresetSync/Snapshot.cpp
+    Utils/BblPresetSync/Snapshot.hpp
     Utils/BblPresetSync/Types.hpp
     Utils/BBLPrinterAgent.cpp
     Utils/BBLPrinterAgent.hpp
