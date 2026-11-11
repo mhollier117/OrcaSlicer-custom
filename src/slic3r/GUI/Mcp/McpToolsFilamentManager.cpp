@@ -323,9 +323,10 @@ json unassign(const json& args)
     const std::vector<fil::PrinterView> views   = runtime.views();
     const fil::SlotKey                  slot    = slot_arg(args, views);
     check_write("unassign", &slot, true);
-    std::string       would_unbind;
-    const fil::Accept a = runtime.unassign(slot, &would_unbind);
-    json              reply = accept_json(a);
+    std::string       would_unbind, why;
+    const fil::Accept a = runtime.unassign(slot, &would_unbind, &why);
+    if (!a.ok) throw ToolFailure(why.empty() ? "unassign refused: " + std::string(kind_name(a.kind)) : why);
+    json reply = accept_json(a);
     if (a.ok && runtime.link_settings().mode == fil::LinkMode::DryRun) {
         reply["dry_run"]    = true;
         reply["would_send"] = {{"unbind", {{"printer", printer_name(slot.dev_id, views)}, {"ams_id", slot.ams_id}, {"slot_id", slot.slot_id}, {"spool_id", would_unbind}}}};

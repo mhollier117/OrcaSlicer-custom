@@ -57,8 +57,11 @@ public:
     // plain add when write_refusal() names a reason.
     Accept          create_and_assign(const json& page_spool, const SlotKey& slot);
     // Unbinds a manual spool from its slot now. Refused (Rejected) when write_refusal() names a reason; in a dry run it
-    // sends nothing and, when `would_unbind` is given, sets it to the spool it would unbind.
-    Accept          unassign(const SlotKey& slot, const std::vector<PrinterView>& printers, std::string* would_unbind = nullptr);
+    // sends nothing and, when `would_unbind` is given, sets it to the spool it would unbind. When it refuses for a reason
+    // of its own (no service, write_refusal, no spool in the slot, an RFID spool, an unknown AMS) and `why` is given,
+    // sets it to a plain sentence that names no serial and no RFID.
+    Accept          unassign(const SlotKey& slot, const std::vector<PrinterView>& printers, std::string* would_unbind = nullptr,
+                             std::string* why = nullptr);
     void            sync_now();                                     // forget the round spacing, the busy cooldowns and what was sent lately, once
     void            reset();                                        // session changed: forget everything; ops still queued send nothing
     const LinkPlan& last_plan() const { return last_plan_; }

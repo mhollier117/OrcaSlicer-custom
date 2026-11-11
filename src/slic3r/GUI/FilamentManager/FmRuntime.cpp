@@ -325,10 +325,10 @@ fil::Accept Runtime::assign(const std::string& spool_id, const fil::SlotKey& slo
     return accepted;
 }
 
-fil::Accept Runtime::unassign(const fil::SlotKey& slot, std::string* would_unbind)
+fil::Accept Runtime::unassign(const fil::SlotKey& slot, std::string* would_unbind, std::string* why)
 {
     m_linker->config = link_settings();
-    return m_linker->unassign(slot, views(), would_unbind);
+    return m_linker->unassign(slot, views(), would_unbind, why);
 }
 
 fil::Accept Runtime::create_and_assign(const json& page_spool, const fil::SlotKey& slot)

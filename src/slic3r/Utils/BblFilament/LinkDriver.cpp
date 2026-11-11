@@ -425,18 +425,24 @@ void LinkDriver::resolve_creations()
     creations_ = std::move(keep);
 }
 
-Accept LinkDriver::unassign(const SlotKey& slot, const std::vector<PrinterView>& printers, std::string* would_unbind)
+Accept LinkDriver::unassign(const SlotKey& slot, const std::vector<PrinterView>& printers, std::string* would_unbind, std::string* why)
 {
+    const auto refuse = [why](FailKind kind, std::string text) {
+        if (why != nullptr) *why = std::move(text);
+        return Accept{false, kind};
+    };
     SpoolService* svc = deps_.service;
-    if (svc == nullptr) return {false, FailKind::Unavailable};
-    if (!write_refusal(config, &slot, true).empty()) return {false, FailKind::Rejected};
+    if (svc == nullptr) return refuse(FailKind::Unavailable, "The Filament Manager is not available.");
+    if (std::string w = write_refusal(config, &slot, true); !w.empty()) return refuse(FailKind::Rejected, std::move(w));
     const Spool* row = nullptr;
     for (const Spool& r : svc->confirmed())
         if (claims_slot(r, slot)) {
             row = &r;
             break;
         }
-    if (row == nullptr || !row->rfid.empty()) return {false, FailKind::BadRequest}; // the printer decides where an RFID spool is
+    if (row == nullptr) return refuse(FailKind::BadRequest, "No spool is linked to that slot.");
+    if (!row->rfid.empty()) // the printer decides where an RFID spool is
+        return refuse(FailKind::BadRequest, "The spool in that slot has an RFID tag: the printer reports where it is.");
 
     std::string ams_sn   = row->ams_sn;
     int         ams_type = row->ams_type;
@@ -451,7 +457,7 @@ Accept LinkDriver::unassign(const SlotKey& slot, const std::vector<PrinterView>&
                     break;
                 }
     }
-    if (ams_sn.empty() || ams_type < 0) return {false, FailKind::BadRequest};
+    if (ams_sn.empty() || ams_type < 0) return refuse(FailKind::BadRequest, "The AMS of that slot is not known yet.");
     if (config.mode == LinkMode::DryRun) { // what it would send, and nothing more
         if (would_unbind != nullptr) *would_unbind = row->id;
         return {};
@@ -478,7 +484,9 @@ Accept LinkDriver::unassign(const SlotKey& slot, const std::vector<PrinterView>&
         if (weak.expired() || gen != generation_) return;
         if (out.ok) record_slot_results(dev, out);
     };
-    return svc->link(std::move(req));
+    const Accept sent = svc->link(std::move(req));
+    if (!sent.ok && sent.kind == FailKind::Unavailable) return refuse(sent.kind, "The Filament Manager is not available.");
+    return sent;
 }
 
 void LinkDriver::sync_now()

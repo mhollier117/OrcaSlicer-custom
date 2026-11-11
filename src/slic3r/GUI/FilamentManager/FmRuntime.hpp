@@ -81,7 +81,7 @@ public:
     // for that printer or that slot, or the spool has no filament id or colour.
     BblFilament::Accept create_and_assign(const json& page_spool, const BblFilament::SlotKey& slot);
     // LinkDriver::unassign with the current settings and printers.
-    BblFilament::Accept unassign(const BblFilament::SlotKey& slot, std::string* would_unbind = nullptr);
+    BblFilament::Accept unassign(const BblFilament::SlotKey& slot, std::string* would_unbind = nullptr, std::string* why = nullptr);
 
     json status_json(); // for the MCP tool
 

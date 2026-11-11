@@ -1933,6 +1933,68 @@ TEST_CASE("Unassign refuses an RFID spool and an empty slot", "[BblFilament]")
     CHECK(d.rig.cloud->log.empty());
 }
 
+TEST_CASE("Unassign says why it refused", "[BblFilament]")
+{
+    const auto check_clean = [](const std::string& why) {
+        CHECK(why.find("sn0") == std::string::npos);
+        CHECK(why.find("UUID1") == std::string::npos);
+        CHECK(why.find("dev1") == std::string::npos);
+    };
+    SECTION("linking may not write there")
+    for (int variant = 0; variant < 2; ++variant) { // Off; another slot allowed
+        DriverRig d;
+        d.rig.cloud->rows.push_back(mounted_json(row_with(1000002), "dev1", "sn0", 0, "1"));
+        d.load();
+        if (variant == 0) d.driver->config.mode = fil::LinkMode::Off;
+        if (variant == 1) d.driver->config.only_slots = {"dev1:0:2"};
+        const fil::SlotKey slot{"dev1", 0, "1"};
+        const std::string  expected = fil::write_refusal(d.driver->config, &slot, true);
+        REQUIRE_FALSE(expected.empty());
+        std::string why;
+        CHECK_FALSE(d.driver->unassign(slot, {with_tray(make_printer(), make_tray("1"))}, nullptr, &why).ok);
+        CHECK(why == expected);
+        check_clean(why);
+    }
+    SECTION("no spool is linked to the slot")
+    {
+        DriverRig d;
+        d.load();
+        std::string why;
+        CHECK_FALSE(d.driver->unassign(fil::SlotKey{"dev1", 0, "1"}, {with_tray(make_printer(), make_tray("1"))}, nullptr, &why).ok);
+        CHECK(why == "No spool is linked to that slot.");
+    }
+    SECTION("the spool has an RFID tag")
+    {
+        DriverRig d;
+        d.rig.cloud->rows.push_back(mounted_json(rfid_row(1000001, "UUID1"), "dev1", "sn0", 0, "0"));
+        d.load();
+        std::string why;
+        CHECK_FALSE(d.driver->unassign(fil::SlotKey{"dev1", 0, "0"}, {with_tray(make_printer(), make_rfid_tray("0", "UUID1"))}, nullptr, &why).ok);
+        CHECK(why == "The spool in that slot has an RFID tag: the printer reports where it is.");
+        check_clean(why);
+    }
+    SECTION("the AMS is not known")
+    {
+        DriverRig d;
+        d.rig.cloud->rows.push_back(mounted_json(row_with(1000002), "dev1", "", 0, "1"));
+        d.load();
+        auto p = with_tray(make_printer(), make_tray("1"));
+        p.ams_sn.clear();
+        std::string why;
+        CHECK_FALSE(d.driver->unassign(fil::SlotKey{"dev1", 0, "1"}, {p}, nullptr, &why).ok);
+        CHECK(why == "The AMS of that slot is not known yet.");
+    }
+    SECTION("the service is missing")
+    {
+        fil::LinkDriver driver{fil::LinkDriverDeps{}};
+        std::string     why;
+        const fil::Accept a = driver.unassign(fil::SlotKey{"dev1", 0, "1"}, {}, nullptr, &why);
+        CHECK_FALSE(a.ok);
+        CHECK(a.kind == fil::FailKind::Unavailable);
+        CHECK(why == "The Filament Manager is not available.");
+    }
+}
+
 TEST_CASE("An assignment the tray agrees with binds the spool once", "[BblFilament]")
 {
     DriverRig d;
