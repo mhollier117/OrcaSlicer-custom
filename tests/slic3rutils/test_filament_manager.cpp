@@ -1301,12 +1301,33 @@ TEST_CASE("An automatic weight push is reported in the shape of Bambu Studio", "
 
 TEST_CASE("The link settings map to the linker's mode", "[FilamentManager]")
 {
-    CHECK(fm::link_config(false, false, "").mode == fil::LinkMode::Off);
-    CHECK(fm::link_config(false, true, "").mode == fil::LinkMode::Off);
-    CHECK(fm::link_config(true, true, "").mode == fil::LinkMode::DryRun);
-    CHECK(fm::link_config(true, false, "").mode == fil::LinkMode::On);
-    CHECK(fm::link_config(true, false, "").only_slots.empty());
-    CHECK(fm::link_config(true, false, "dev1:0:1").only_slots == std::set<std::string>{"dev1:0:1"});
+    CHECK(fm::link_config(false, false, "", "").mode == fil::LinkMode::Off);
+    CHECK(fm::link_config(false, true, "", "").mode == fil::LinkMode::Off);
+    CHECK(fm::link_config(true, true, "", "").mode == fil::LinkMode::DryRun);
+    CHECK(fm::link_config(true, false, "", "").mode == fil::LinkMode::On);
+    CHECK(fm::link_config(true, false, "", "").only_slots.empty());
+    CHECK(fm::link_config(true, false, "dev1:0:1", "").only_slots == std::set<std::string>{"dev1:0:1"});
+}
+
+TEST_CASE("The environment override decides the link mode in place of the settings", "[FilamentManager]")
+{
+    // Each of the three values overrides every combination of the two settings.
+    for (bool enabled : {false, true})
+        for (bool dry_run : {false, true}) {
+            CHECK(fm::link_config(enabled, dry_run, "", "off").mode == fil::LinkMode::Off);
+            CHECK(fm::link_config(enabled, dry_run, "", "dry_run").mode == fil::LinkMode::DryRun);
+            CHECK(fm::link_config(enabled, dry_run, "", "on").mode == fil::LinkMode::On);
+        }
+    // The allow-list still comes from the settings.
+    CHECK(fm::link_config(false, false, "dev1:0:1", "on").only_slots == std::set<std::string>{"dev1:0:1"});
+    // An unknown or empty value is ignored.
+    for (const char* ignored : {"", "ON", "dryrun", "1", " on"}) {
+        CHECK(fm::link_config(false, false, "", ignored).mode == fil::LinkMode::Off);
+        CHECK(fm::link_config(true, true, "", ignored).mode == fil::LinkMode::DryRun);
+        CHECK(fm::link_config(true, false, "", ignored).mode == fil::LinkMode::On);
+        CHECK_FALSE(fm::is_link_mode_override(ignored));
+    }
+    CHECK(fm::is_link_mode_override("dry_run"));
 }
 
 TEST_CASE("The chosen slots are read from a comma-separated list", "[FilamentManager]")

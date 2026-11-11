@@ -12,6 +12,7 @@
 #include "slic3r/Utils/NetworkAgentFactory.hpp"
 
 #include <cstddef>
+#include <cstdlib>
 #include <ctime>
 #include <exception>
 #include <map>
@@ -128,12 +129,30 @@ std::string join_only_slots(const std::set<std::string>& slots)
     return out;
 }
 
-fil::LinkConfig link_config(bool enabled, bool dry_run, const std::string& only)
+bool is_link_mode_override(const std::string& mode_override)
 {
+    return mode_override == "off" || mode_override == "dry_run" || mode_override == "on";
+}
+
+fil::LinkConfig link_config(bool enabled, bool dry_run, const std::string& only, const std::string& mode_override)
+{
+    if (is_link_mode_override(mode_override)) {
+        enabled = mode_override != "off";
+        dry_run = mode_override == "dry_run";
+    }
     fil::LinkConfig c;
     c.mode       = !enabled ? fil::LinkMode::Off : dry_run ? fil::LinkMode::DryRun : fil::LinkMode::On;
     c.only_slots = parse_only_slots(only);
     return c;
+}
+
+const std::string& link_mode_env()
+{
+    static const std::string value = [] {
+        const char* v = std::getenv("ORCA_FM_LINK_MODE");
+        return std::string(v != nullptr ? v : "");
+    }();
+    return value;
 }
 
 } // namespace Slic3r::GUI::Fm

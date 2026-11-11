@@ -155,7 +155,10 @@ the app keeps that record current for every Bambu printer of the account, not on
   `sync/auto_push_summary`.
 - **Settings.** `filament_manager_link_enabled` (Preferences, on by default) turns it off; `filament_manager_link_dry_run`
   plans without sending; `filament_manager_link_only` limits it to a list of slots. While linking is on, the runtime
-  reads the list itself when it has none, so linking does not depend on the tab being open.
+  reads the list itself when it has none, so linking does not depend on the tab being open. The environment variable
+  `ORCA_FM_LINK_MODE` (`off`, `dry_run` or `on`, read once at start-up) decides the mode in place of the first two
+  settings, so a new build can be tried against a real account in report-only mode from its first second; the MCP
+  `link_status` shows it as `mode_source: "env"`.
 
 ## Not part of this
 

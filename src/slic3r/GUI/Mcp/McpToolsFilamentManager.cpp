@@ -169,7 +169,10 @@ json settings_json(const std::vector<fil::PrinterView>& views)
     const AppConfig& config = app_config();
     json             only   = json::array();
     for (const std::string& slot : Fm::parse_only_slots(config.get(k_only))) only.push_back(slot_by_name(slot, views));
-    return {{k_enabled, config.get_bool(k_enabled)}, {k_dry_run, config.get_bool(k_dry_run)}, {k_only, std::move(only)}};
+    return {{k_enabled, config.get_bool(k_enabled)},
+            {k_dry_run, config.get_bool(k_dry_run)},
+            {k_only, std::move(only)},
+            {"mode_source", Fm::is_link_mode_override(Fm::link_mode_env()) ? "env" : "config"}};
 }
 
 json tap_json(const std::vector<fil::PrinterView>& views)
@@ -243,8 +246,12 @@ json link_mode(const json& args)
     }
     if (only) config.set(k_only, Fm::join_only_slots(*only));
     config.save();
-    Fm::Runtime::get().linker().config = Fm::link_config(config.get_bool(k_enabled), config.get_bool(k_dry_run), config.get(k_only));
-    return settings_json(views);
+    Fm::Runtime::get().linker().config = Fm::link_config(config.get_bool(k_enabled), config.get_bool(k_dry_run), config.get(k_only), Fm::link_mode_env());
+    json reply = settings_json(views);
+    if (Fm::is_link_mode_override(Fm::link_mode_env()))
+        reply["note"] = "the environment variable ORCA_FM_LINK_MODE=" + Fm::link_mode_env() +
+                        " decides the mode while this process runs; the stored mode applies when the app starts without it";
+    return reply;
 }
 
 json assign(const json& args)

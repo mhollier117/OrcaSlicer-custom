@@ -208,7 +208,7 @@ void Runtime::tick()
         if (config == nullptr)
             return;
         m_linker->config = link_config(config->get_bool("filament_manager_link_enabled"), config->get_bool("filament_manager_link_dry_run"),
-                                       config->get("filament_manager_link_only"));
+                                       config->get("filament_manager_link_only"), link_mode_env());
         const long long now = unix_now();
 
         // The linker needs the account's list also while the Filament Manager tab is closed.

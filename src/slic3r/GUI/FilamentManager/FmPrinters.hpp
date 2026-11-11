@@ -23,8 +23,13 @@ void on_printer_message(MachineObject& printer, const std::string& message);
 std::vector<BblFilament::PrinterView> printer_views(DeviceManager* devices, const BblFilament::PrinterTap& tap, long long now);
 
 // The linker's settings from the app config: Off when not enabled, else DryRun when dry_run, else On; `only` is the
-// comma-separated list of SlotKey::text() values (empty = every slot).
-BblFilament::LinkConfig link_config(bool enabled, bool dry_run, const std::string& only);
+// comma-separated list of SlotKey::text() values (empty = every slot). A `mode_override` of "off", "dry_run" or "on"
+// decides the mode in place of `enabled` and `dry_run`; any other text is ignored.
+BblFilament::LinkConfig link_config(bool enabled, bool dry_run, const std::string& only, const std::string& mode_override);
+// True when link_config() honours `mode_override`.
+bool is_link_mode_override(const std::string& mode_override);
+// The environment variable ORCA_FM_LINK_MODE, read once per process ("" when unset).
+const std::string& link_mode_env();
 std::set<std::string>   parse_only_slots(const std::string& only);
 std::string             join_only_slots(const std::set<std::string>& slots);
 
