@@ -150,7 +150,9 @@ BblPresetSyncFirstRunDialog::BblPresetSyncFirstRunDialog(wxWindow* parent, const
     buttons->Add(sync_btn, 0, wxRIGHT, FromDIP(8));
     buttons->Add(later_btn, 0);
     sizer->Add(buttons, 0, wxEXPAND | wxALL, FromDIP(10));
-    sync_btn->SetDefault();
+    // "Not now" is the default, so an Enter typed while the dialog appears cannot start the sync.
+    later_btn->SetDefault();
+    later_btn->SetFocus();
 
     SetSizerAndFit(sizer);
     CenterOnParent();

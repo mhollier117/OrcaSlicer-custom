@@ -603,7 +603,6 @@ struct FakeCloud : sync::ICloud
     std::function<void(const std::string&)> before_update;
     std::vector<sync::ValueMap>            created_values;
     std::vector<sync::ValueMap>            updated_values;
-    bool                                   drain_wanted_only{false}; // the drain returns only the bodies that were asked for
 
     sync::ListResult list(const std::string&, const std::function<bool(const sync::CloudRow&)>& want_body) override
     {
@@ -618,11 +617,20 @@ struct FakeCloud : sync::ICloud
             if (want_body(row)) wanted.push_back(Key{row.type, row.name});
         r.ok             = true;
         r.rows           = rows;
+        // Like the plugin: a row whose check answered "no" still gets an entry, with its metadata only.
         r.bodies_by_name = bodies;
-        if (drain_wanted_only) {
-            r.bodies_by_name.clear();
-            for (const auto& k : wanted)
-                if (bodies.count(k.name)) r.bodies_by_name[k.name] = bodies.at(k.name);
+        for (const auto& row : rows) {
+            if (std::find(wanted.begin(), wanted.end(), Key{row.type, row.name}) != wanted.end()) continue;
+            sync::ValueMap meta;
+            meta["type"]         = sync::type_string(row.type);
+            meta["name"]         = row.name;
+            meta["setting_id"]   = row.setting_id;
+            meta["updated_time"] = std::to_string(row.update_time);
+            meta["user_id"]      = "u1";
+            if (auto it = bodies.find(row.name); it != bodies.end())
+                for (const char* k : {"version", "base_id", "inherits", "filament_id"})
+                    if (auto v = it->second.find(k); v != it->second.end()) meta[k] = v->second;
+            r.bodies_by_name[row.name] = std::move(meta);
         }
         return r;
     }
@@ -2586,7 +2594,6 @@ TEST_CASE("A linked preset that is not eligible still syncs both ways", "[BblPre
 TEST_CASE("Bodies already downloaded are not asked for again on an unconfirmed first run", "[BblPresetSync]")
 {
     Env e;
-    e.cloud.drain_wanted_only = true;
     e.cloud.rows.push_back({PresetType::Filament, "Down", "PD", 100});
     e.cloud.bodies["Down"] = valid_body("PD", "d");
 
@@ -2795,4 +2802,35 @@ TEST_CASE("The mirror reports the loaded Studio keys, the cached bodies and the 
     CHECK(e.mirror.cached_body_count() == 1);
     REQUIRE(e.mirror.base_store());
     CHECK(e.mirror.base_store()->has("P5")); // the pulled body became the base
+}
+
+TEST_CASE("Cached bodies are used when the plugin answers metadata-only entries", "[BblPresetSync]")
+{
+    Env e; // the first run is not confirmed yet
+    e.cloud.rows.push_back({PresetType::Filament, "A", "PA", 100});
+    e.cloud.bodies["A"] = valid_body("PA", "a");
+    e.cloud.rows.push_back({PresetType::Filament, "B", "PB", 100});
+    e.cloud.bodies["B"] = valid_body("PB", "b");
+
+    e.pass(sync::Trigger::Manual);
+    CHECK(e.cloud.wanted.size() == 2);
+    const std::vector<std::string> planned{"pull filament/A", "pull filament/B"};
+    CHECK(e.mirror.status().planned == planned);
+
+    // Second pass: every row is answered "no" and comes back metadata-only.
+    e.pass(sync::Trigger::Manual);
+    CHECK(e.cloud.wanted.empty());
+    CHECK(e.mirror.status().planned == planned);
+    CHECK_FALSE(has_note(e.mirror.status(), "body unavailable"));
+    CHECK(e.mirror.status().last_result == "dry run");
+    CHECK(e.store.pulls.empty());
+
+    // Confirmed: the third pass queues every pull with its cached body.
+    e.mirror.confirm_first_run(true);
+    e.pass(sync::Trigger::Manual);
+    CHECK(e.cloud.wanted.empty());
+    REQUIRE(e.store.pulls.size() == 2);
+    CHECK(e.store.pulls[0].body.at("filament_cost") == "a");
+    CHECK(e.store.pulls[1].body.at("filament_cost") == "b");
+    CHECK(e.store.pulls[0].body.at("setting_id") == "PA");
 }

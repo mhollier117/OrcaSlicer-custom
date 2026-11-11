@@ -442,24 +442,22 @@ void Mirror::run_pass(Trigger trigger)
             const bool collided = types_by_name[row.name].size() > 1;
             const bool cached   = !collided && cache_hit(row.setting_id, row.update_time);
             const bool wanted   = want_body(rr.key, row.setting_id, row.update_time, view) && !cached;
-            if (found == nullptr && cached) {
+            // The plugin answers a row whose check said "no" with a metadata-only entry, so a drained entry is used
+            // only when it is a valid body; otherwise the cached body of this row (same update time) is.
+            const BodyStatus st = found != nullptr ? check_body(*found, row.type, row.setting_id, body_is_root(*found)) : BodyStatus::MetadataOnly;
+            if (found != nullptr && st == BodyStatus::Valid) {
+                rr.has_body  = true;
+                rr.body_hash = upload_hash(*found);
+                body         = *found;
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_body_cache[row.setting_id] = CachedBody{row.update_time, *found};
+            } else if (cached) {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 body         = m_body_cache[row.setting_id].body;
                 rr.has_body  = true;
                 rr.body_hash = upload_hash(body);
-            } else if (found != nullptr) {
-                const BodyStatus st = check_body(*found, row.type, row.setting_id, body_is_root(*found));
-                if (st == BodyStatus::Valid) {
-                    rr.has_body  = true;
-                    rr.body_hash = upload_hash(*found);
-                    body         = *found;
-                    std::lock_guard<std::mutex> lock(m_mutex);
-                    m_body_cache[row.setting_id] = CachedBody{row.update_time, *found};
-                } else if (wanted) {
-                    notes.push_back("body unavailable for " + rr.key.str() + ": " + body_status_name(st));
-                }
             } else if (wanted) {
-                notes.push_back("body unavailable for " + rr.key.str() + ": missing");
+                notes.push_back("body unavailable for " + rr.key.str() + ": " + (found != nullptr ? body_status_name(st) : "missing"));
             }
             rows.push_back(std::move(rr));
             row_bodies.push_back(std::move(body));
