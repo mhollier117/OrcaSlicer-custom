@@ -33,7 +33,7 @@ The rest of this repository is AGPL v3 as well. The built bundle in `resources/w
 
 ## Patches to upstream code
 
-1. Theme (`index.html`). The inline script no longer looks for "(light)"/"(dark)" in the user-agent string. It uses the `theme` query parameter (`?theme=dark` or `?theme=light`) and, when absent, `prefers-color-scheme`. Needed with it: `src/store/FilamentSlice.tsx` `detectTheme()` (the store's initial theme, which `FilamentManagerPage` writes to `<html data-theme>` on mount) now reads `document.documentElement.dataset.theme` instead of the user agent; otherwise it would overwrite the chosen theme with `dark`. The `init` response still sets the theme through the store.
+1. Theme (`index.html`). The inline script no longer looks for "(light)"/"(dark)" in the user-agent string. It uses the `theme` query parameter (`?theme=dark` or `?theme=light`) and, when absent, `prefers-color-scheme`. Needed with it: `src/store/FilamentSlice.tsx` `detectTheme()` (the store's initial theme, which `FilamentManagerPage` writes to `<html data-theme>` on mount) now reads `document.documentElement.dataset.theme` instead of the user agent; otherwise it would overwrite the chosen theme with `dark`. The `init` response still sets the theme through the store. The script also sets `document.documentElement.style.colorScheme` to the chosen theme, so the browser draws dark scroll bars in dark mode.
 2. No sourcemaps (`vite.config.ts`: `sourcemap: false`).
 3. Title (`index.html`): `<title>Filament Manager</title>`.
 4. Needed to build the trimmed app:

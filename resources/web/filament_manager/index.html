@@ -24,6 +24,7 @@
           theme = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
         }
         document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
       })();
       // Disable Ctrl+wheel / Ctrl+plus / Ctrl+minus zoom in WebView2
       document.addEventListener('keydown', function(e) {
