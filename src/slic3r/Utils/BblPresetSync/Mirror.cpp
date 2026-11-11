@@ -690,6 +690,13 @@ void Mirror::confirm_first_run(bool accepted)
     }
 }
 
+void Mirror::reset_first_run_prompt()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_last_summary.reset();
+    m_summary_declined = false;
+}
+
 void Mirror::set_declined(const Key& key)
 {
     const auto ledger = this->ledger();

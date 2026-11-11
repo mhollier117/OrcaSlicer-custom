@@ -34,50 +34,58 @@ long long file_mtime(const std::string& file)
 
 } // namespace
 
+EligibilityContext make_context(PresetBundle& bundle, const HasBambuId& has_bambu_id)
+{
+    EligibilityContext ctx;
+    ctx.prints        = &bundle.prints;
+    ctx.filaments     = &bundle.filaments;
+    ctx.printers      = &bundle.printers;
+    ctx.has_bambu_id  = has_bambu_id;
+    ctx.id_map_usable = compute_id_map_usable(bundle.filaments, has_bambu_id);
+    return ctx;
+}
+
+LocalItem make_item(const Preset& preset, PresetCollection& collection, PresetBundle& bundle, const EligibilityContext& ctx)
+{
+    LocalItem item;
+    item.key             = Key{to_sync_type(preset.type).value_or(PresetType::Print), preset.name};
+    item.cls             = classify(preset, collection, ctx);
+    item.mtime           = file_mtime(preset.file);
+    item.orca_setting_id = preset.setting_id;
+    item.filament_id     = preset.filament_id;
+    item.file            = preset.file;
+    item.selected        = preset.name == collection.get_selected_preset_name();
+
+    if (item.cls.eligibility == Eligibility::Eligible) {
+        Preset copy = preset;
+        if (bundle.get_differed_values_to_update(copy, item.upload) != 0) {
+            item.upload.clear();
+            item.cls.eligibility = Eligibility::Ineligible;
+            item.cls.reason      = "no_upload_values";
+        } else {
+            item.hash = upload_hash(item.upload);
+        }
+    }
+    return item;
+}
+
 LocalSnapshot build_snapshot(PresetBundle& bundle, const HasBambuId& has_bambu_id)
 {
     LocalSnapshot snap;
 
-    EligibilityContext ctx;
-    ctx.prints         = &bundle.prints;
-    ctx.filaments      = &bundle.filaments;
-    ctx.printers       = &bundle.printers;
-    ctx.has_bambu_id   = has_bambu_id;
-    ctx.id_map_usable  = compute_id_map_usable(bundle.filaments, has_bambu_id);
-    snap.id_map_usable = ctx.id_map_usable;
+    const EligibilityContext ctx = make_context(bundle, has_bambu_id);
+    snap.id_map_usable           = ctx.id_map_usable;
 
     snap.prints_dirty    = bundle.prints.get_edited_preset().is_dirty;
     snap.filaments_dirty = bundle.filaments.get_edited_preset().is_dirty;
     snap.printers_dirty  = bundle.printers.get_edited_preset().is_dirty;
 
     auto add_collection = [&](PresetCollection& collection) {
-        const std::string selected = collection.get_selected_preset_name();
         for (auto it = collection.begin(); it != collection.end(); ++it) {
             const Preset& preset = *it;
             if (!preset.is_user()) continue;
-            const auto type = to_sync_type(preset.type);
-            if (!type) continue;
-
-            LocalItem item;
-            item.key             = Key{*type, preset.name};
-            item.cls             = classify(preset, collection, ctx);
-            item.mtime           = file_mtime(preset.file);
-            item.orca_setting_id = preset.setting_id;
-            item.filament_id     = preset.filament_id;
-            item.file            = preset.file;
-            item.selected        = preset.name == selected;
-
-            if (item.cls.eligibility == Eligibility::Eligible) {
-                Preset copy = preset;
-                if (bundle.get_differed_values_to_update(copy, item.upload) != 0) {
-                    item.upload.clear();
-                    item.cls.eligibility = Eligibility::Ineligible;
-                    item.cls.reason      = "no_upload_values";
-                } else {
-                    item.hash = upload_hash(item.upload);
-                }
-            }
-            snap.items.push_back(std::move(item));
+            if (!to_sync_type(preset.type)) continue;
+            snap.items.push_back(make_item(preset, collection, bundle, ctx));
         }
     };
     add_collection(bundle.prints);

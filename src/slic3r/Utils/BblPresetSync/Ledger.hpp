@@ -28,6 +28,12 @@ struct LedgerEntry
     std::vector<std::string> k_copied_printers;
 };
 
+struct Conversion
+{
+    std::string              from_filament_id, to_filament_id;
+    std::vector<std::string> k_copied_printers;
+};
+
 class Ledger
 {
 public:
@@ -46,6 +52,10 @@ public:
     void                       erase(const Key& key);
     std::map<Key, LedgerEntry> entries() const;
 
+    std::optional<Conversion> get_conversion(const Key& key) const;
+    void                      put_conversion(const Key& key, const Conversion& conversion);
+    std::map<Key, Conversion> conversions() const;
+
     bool first_run_confirmed() const;
     void set_first_run_confirmed(bool v);
     std::string halted() const;
@@ -60,6 +70,7 @@ private:
     mutable std::mutex         m_mutex;
     mutable std::mutex         m_save_mutex; // serializes whole saves (one .tmp writer at a time)
     std::map<Key, LedgerEntry> m_entries;
+    std::map<Key, Conversion>  m_conversions;
     bool                       m_first_run_confirmed{false};
     std::string                m_halted;
     long long                  m_clock_offset{0};

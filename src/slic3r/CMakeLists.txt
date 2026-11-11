@@ -916,6 +916,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/BblPresetSync/Hash.hpp
     Utils/BblPresetSync/Ledger.cpp
     Utils/BblPresetSync/Ledger.hpp
+    Utils/BblPresetSync/LocalOps.cpp
+    Utils/BblPresetSync/LocalOps.hpp
     Utils/BblPresetSync/Mirror.cpp
     Utils/BblPresetSync/Mirror.hpp
     Utils/BblPresetSync/Planner.cpp

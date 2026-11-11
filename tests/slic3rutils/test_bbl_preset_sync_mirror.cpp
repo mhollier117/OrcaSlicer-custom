@@ -1136,6 +1136,54 @@ TEST_CASE("Declining the first run stops the summary and confirming lets the nex
     }
 }
 
+TEST_CASE("reset_first_run_prompt makes the next dry run show its summary again", "[BblPresetSync]")
+{
+    Env e;
+    e.add_local("Up", "hup");
+    e.pass();
+    e.pass(sync::Trigger::Manual);
+    CHECK(e.host.first_runs.size() == 1);
+
+    e.mirror.reset_first_run_prompt();
+    e.pass(sync::Trigger::Manual);
+    CHECK(e.host.first_runs.size() == 2);
+
+    // It also clears a decline.
+    e.mirror.confirm_first_run(false);
+    e.pass(sync::Trigger::Manual);
+    CHECK(e.host.first_runs.size() == 2);
+    e.mirror.reset_first_run_prompt();
+    e.pass(sync::Trigger::Manual);
+    CHECK(e.host.first_runs.size() == 3);
+}
+
+TEST_CASE("Ledger conversions survive a save and load and are absent from old files", "[BblPresetSync]")
+{
+    ScopedTemporaryDir temp;
+    const fs::path     file = temp.path() / "ledger.json";
+    {
+        sync::Ledger ledger(file);
+        ledger.put_conversion(Key{PresetType::Filament, "Mine"}, {"OLD1", "PNEW1", {"X1C"}});
+        REQUIRE(ledger.save());
+    }
+    sync::Ledger loaded(file);
+    REQUIRE(loaded.load());
+    const auto c = loaded.get_conversion(Key{PresetType::Filament, "Mine"});
+    REQUIRE(c.has_value());
+    CHECK(c->from_filament_id == "OLD1");
+    CHECK(c->to_filament_id == "PNEW1");
+    CHECK(c->k_copied_printers == std::vector<std::string>{"X1C"});
+    CHECK(loaded.conversions().size() == 1);
+    CHECK_FALSE(loaded.get_conversion(Key{PresetType::Filament, "Other"}).has_value());
+
+    {
+        boost::nowide::ofstream out(file.string(), std::ios::binary | std::ios::trunc);
+        out << R"({"version":1,"entries":{}})";
+    }
+    REQUIRE(loaded.load());
+    CHECK(loaded.conversions().empty());
+}
+
 // ---------------------------------------------------------------------------
 // Step 10: executing actions
 // ---------------------------------------------------------------------------

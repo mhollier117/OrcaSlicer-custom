@@ -119,6 +119,7 @@ public:
     void                    run_pass(Trigger trigger); // called on the sync thread
     void                    confirm_first_run(bool accepted); // any thread
     void                    resolve_halt(HaltChoice choice);  // any thread
+    void                    reset_first_run_prompt();         // any thread: the next dry-run pass shows the summary again
     void                    set_declined(const Key& key);     // any thread: conversion refused
     void                    forget(const Key& key);           // any thread: the preset is treated as new on the next pass
     Status                  status() const;                   // any thread

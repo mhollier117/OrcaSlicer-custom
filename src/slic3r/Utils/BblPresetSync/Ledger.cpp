@@ -81,6 +81,27 @@ json entry_to_json(const LedgerEntry& e)
     return j;
 }
 
+Conversion conversion_from_json(const json& j)
+{
+    Conversion c;
+    c.from_filament_id = get_string(j, "from_filament_id", "");
+    c.to_filament_id   = get_string(j, "to_filament_id", "");
+    auto it            = j.find("k_copied_printers");
+    if (it != j.end() && it->is_array())
+        for (const json& p : *it)
+            if (p.is_string()) c.k_copied_printers.push_back(p.get<std::string>());
+    return c;
+}
+
+json conversion_to_json(const Conversion& c)
+{
+    json j;
+    j["from_filament_id"]  = c.from_filament_id;
+    j["to_filament_id"]    = c.to_filament_id;
+    j["k_copied_printers"] = c.k_copied_printers;
+    return j;
+}
+
 } // namespace
 
 fs::path Ledger::file_path(const fs::path& data_dir, const std::string& orca_user_id, const std::string& bambu_uid)
@@ -101,6 +122,7 @@ bool Ledger::load(std::string* error)
     if (!fs::exists(m_file, ec)) {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_entries.clear();
+        m_conversions.clear();
         m_first_run_confirmed = false;
         m_halted.clear();
         m_clock_offset = 0;
@@ -131,6 +153,7 @@ bool Ledger::load(std::string* error)
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_entries.clear();
+            m_conversions.clear();
             m_first_run_confirmed = false;
             m_halted.clear();
             m_clock_offset = 0;
@@ -148,8 +171,18 @@ bool Ledger::load(std::string* error)
             entries[*key] = entry_from_json(e.value());
         }
 
+    std::map<Key, Conversion> conversions;
+    auto                      ct = root.find("conversions");
+    if (ct != root.end() && ct->is_object())
+        for (auto e = ct->begin(); e != ct->end(); ++e) {
+            auto key = Key::parse(e.key());
+            if (!key || !e.value().is_object()) continue;
+            conversions[*key] = conversion_from_json(e.value());
+        }
+
     std::lock_guard<std::mutex> lock(m_mutex);
     m_entries             = std::move(entries);
+    m_conversions         = std::move(conversions);
     m_first_run_confirmed = root.contains("first_run_confirmed") && root["first_run_confirmed"].is_boolean() &&
                             root["first_run_confirmed"].get<bool>();
     m_halted       = get_string(root, "halted", "");
@@ -170,6 +203,9 @@ bool Ledger::save(std::string* error) const
         json entries                = json::object();
         for (const auto& [key, entry] : m_entries) entries[key.str()] = entry_to_json(entry);
         root["entries"] = std::move(entries);
+        json conversions = json::object();
+        for (const auto& [key, conversion] : m_conversions) conversions[key.str()] = conversion_to_json(conversion);
+        root["conversions"] = std::move(conversions);
     }
 
     auto fail = [error](const std::string& msg) {
@@ -232,6 +268,26 @@ std::map<Key, LedgerEntry> Ledger::entries() const
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_entries;
+}
+
+std::optional<Conversion> Ledger::get_conversion(const Key& key) const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto                        it = m_conversions.find(key);
+    if (it == m_conversions.end()) return std::nullopt;
+    return it->second;
+}
+
+void Ledger::put_conversion(const Key& key, const Conversion& conversion)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_conversions[key] = conversion;
+}
+
+std::map<Key, Conversion> Ledger::conversions() const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_conversions;
 }
 
 bool Ledger::first_run_confirmed() const

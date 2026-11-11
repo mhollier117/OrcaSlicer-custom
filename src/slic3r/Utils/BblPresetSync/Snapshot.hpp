@@ -8,7 +8,9 @@
 #include <vector>
 
 namespace Slic3r {
+class Preset;
 class PresetBundle;
+class PresetCollection;
 }
 
 namespace Slic3r::BblPresetSync {
@@ -32,6 +34,11 @@ struct LocalSnapshot
     bool prints_dirty{false}, filaments_dirty{false}, printers_dirty{false}; // get_edited_preset().is_dirty
     bool id_map_usable{false};
 };
+
+EligibilityContext make_context(PresetBundle& bundle, const HasBambuId& has_bambu_id);
+
+// The per-preset part of build_snapshot: classification, upload values and hash.
+LocalItem make_item(const Preset& preset, PresetCollection& collection, PresetBundle& bundle, const EligibilityContext& ctx);
 
 // Must be called on the thread that owns the presets (the UI thread in the app).
 LocalSnapshot build_snapshot(PresetBundle& bundle, const HasBambuId& has_bambu_id);
