@@ -1265,6 +1265,7 @@ export function AddEditDialog({
         data.setting_id = data.setting_id || tray.setting_id || '';
         data.bound_ams_id = primarySlot.ams_id;
         data.bound_dev_id = amsData?.selected_dev_id || '';
+        data.bound_slot_id = primarySlot.slot_id;
         data.remain_percent = remain;
         // STUDIO-17977: keep gradient/multicolor info when creating a spool
         // from an AMS slot. tray.colors / tray.color_type come from

@@ -1,12 +1,15 @@
 #include "FmViewModel.hpp"
 
 #include "FmDevices.hpp"
+#include "slic3r/Utils/BblFilament/Linker.hpp"
 #include "slic3r/Utils/BblFilament/Spool.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <exception>
+#include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -59,6 +62,34 @@ std::string string_of(const json& obj, const char* key)
 {
     auto it = obj.find(key);
     return (it != obj.end() && it->is_string()) ? it->get<std::string>() : std::string();
+}
+
+// The AMS slot a new spool was read from, when it is to be assigned there: a spool without RFID (one with an RFID is
+// found by its tag) that names its printer, an AMS unit (not an external spool) and its slot.
+std::optional<fil::SlotKey> slot_to_assign(const json& spool)
+{
+    if (!spool.is_object() || fil::valid_rfid(string_of(spool, "tag_uid")))
+        return std::nullopt;
+    const std::string dev  = string_of(spool, "bound_dev_id");
+    const std::string slot = string_of(spool, "bound_slot_id");
+    if (dev.empty() || slot.empty())
+        return std::nullopt;
+    auto it = spool.find("bound_ams_id");
+    if (it == spool.end())
+        return std::nullopt;
+    long long ams = -1;
+    if (it->is_number_unsigned())
+        ams = it->get<unsigned long long>() < 254ULL ? static_cast<long long>(it->get<unsigned long long>()) : -1;
+    else if (it->is_number_integer())
+        ams = it->get<long long>();
+    else if (it->is_string()) {
+        const std::string s = it->get<std::string>();
+        if (!s.empty() && s.size() <= 3 && std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isdigit(c) != 0; }))
+            ams = std::stoll(s);
+    }
+    if (ams < 0 || ams >= 254)
+        return std::nullopt;
+    return fil::SlotKey{dev, static_cast<int>(ams), slot};
 }
 
 } // namespace
@@ -271,8 +302,12 @@ json ViewModel::dispatch(const Request& r)
     if (r.submod == "spool") {
         if (r.action == "list")
             return answer(r, 0, "", spools_json());
-        if (r.action == "add")
+        if (r.action == "add") {
+            if (m_host.create_and_assign)
+                if (const auto slot = slot_to_assign(p))
+                    return write_result(m_host.create_and_assign(p, slot->dev_id, slot->ams_id, slot->slot_id));
             return write_result(m_service.add(p, 1));
+        }
         if (r.action == "batch_add") {
             auto spool = p.find("spool");
             if (spool == p.end() || !spool->is_object())
@@ -292,6 +327,16 @@ json ViewModel::dispatch(const Request& r)
         if (r.action == "batch_create") {
             json creates = p.value("creates", json::array());
             json updates = p.value("updates", json::array());
+            if (m_host.create_and_assign && creates.is_array()) {
+                json rest = json::array();
+                for (const json& c : creates) {
+                    if (const auto slot = slot_to_assign(c))
+                        m_host.create_and_assign(c, slot->dev_id, slot->ams_id, slot->slot_id);
+                    else
+                        rest.push_back(c);
+                }
+                creates = std::move(rest);
+            }
             return write_result(m_service.batch(creates, updates));
         }
         if (r.action == "update")

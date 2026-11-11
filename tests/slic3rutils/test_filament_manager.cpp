@@ -753,8 +753,15 @@ struct VmRig
     bool                             throw_presets{false};
     std::unique_ptr<fm::ViewModel>   vm;
 
-    explicit VmRig(bool with_host = true)
+    std::vector<std::string> assigned; // "dev ams slot series" per create_and_assign call
+
+    explicit VmRig(bool with_host = true, bool with_create_and_assign = false)
     {
+        if (with_create_and_assign)
+            host.create_and_assign = [this](const json& s, const std::string& dev, int ams, const std::string& slot) {
+                assigned.push_back(dev + " " + std::to_string(ams) + " " + slot + " " + s.value("series", std::string()));
+                return fil::Accept{};
+            };
         if (with_host) {
             host.dark    = [] { return true; };
             host.presets = [this] {
@@ -905,6 +912,89 @@ TEST_CASE("A batch create runs its creates and updates", "[FilamentManager]")
     CHECK(a["error_code"] == 0);
     t.rig.settle();
     CHECK(t.rig.cloud->count("create") == 1);
+    CHECK(t.rig.cloud->count("update 1000001") == 1);
+}
+
+namespace {
+
+json read_from_slot(const std::string& name, json ams_id = "1", const std::string& slot = "2")
+{
+    json s             = page_spool(name);
+    s["bound_dev_id"]  = "dev1";
+    s["bound_ams_id"]  = std::move(ams_id);
+    s["bound_slot_id"] = slot;
+    return s;
+}
+
+} // namespace
+
+TEST_CASE("A spool read from an AMS slot without RFID is created through the host to be assigned", "[FilamentManager]")
+{
+    VmRig t(true, true);
+    json  a = t.call("spool", "add", read_from_slot("A"));
+    CHECK(a["error_code"] == 0);
+    t.rig.settle();
+    CHECK(t.rig.cloud->count("create") == 0);
+    REQUIRE(t.assigned.size() == 1);
+    CHECK(t.assigned[0] == "dev1 1 2 A");
+
+    json numeric = read_from_slot("B", 128);
+    t.call("spool", "add", numeric);
+    REQUIRE(t.assigned.size() == 2);
+    CHECK(t.assigned[1] == "dev1 128 2 B");
+}
+
+TEST_CASE("A spool with an RFID, an external spool, a missing slot or no host function is added as before", "[FilamentManager]")
+{
+    const auto run = [](const json& spool, bool with_assign) {
+        VmRig t(true, with_assign);
+        json  a = t.call("spool", "add", spool);
+        CHECK(a["error_code"] == 0);
+        t.rig.settle();
+        CHECK(t.assigned.empty());
+        CHECK(t.rig.cloud->count("create") == 1);
+    };
+    json rfid       = read_from_slot("A");
+    rfid["tag_uid"] = "0123456789ABCDEF";
+    run(rfid, true);
+    run(read_from_slot("A", "255"), true);
+    run(read_from_slot("A", 255), true);
+    run(read_from_slot("A", "254"), true);
+    run(read_from_slot("A", "x1"), true);
+    json no_slot = read_from_slot("A");
+    no_slot.erase("bound_slot_id");
+    run(no_slot, true);
+    json empty_slot             = read_from_slot("A");
+    empty_slot["bound_slot_id"] = "";
+    run(empty_slot, true);
+    json no_dev = read_from_slot("A");
+    no_dev.erase("bound_dev_id");
+    run(no_dev, true);
+    run(read_from_slot("A"), false);
+
+    // An RFID of zeros is no RFID.
+    VmRig t(true, true);
+    json  zeros    = read_from_slot("A");
+    zeros["tag_uid"] = "0000000000000000";
+    t.call("spool", "add", zeros);
+    CHECK(t.assigned.size() == 1);
+}
+
+TEST_CASE("A batch create routes spools to be assigned apart and answers the spool list", "[FilamentManager]")
+{
+    VmRig t(true, true);
+    t.rig.cloud->fill(1);
+    t.pull();
+    json rfid       = read_from_slot("R");
+    rfid["tag_uid"] = "0123456789ABCDEF";
+    json creates    = json::array({read_from_slot("S", "0", "3"), rfid, page_spool("P")});
+    json a = t.call("spool", "batch_create", json{{"creates", creates}, {"updates", json::array({json{{"spool_id", "1000001"}, {"note", "n"}}})}});
+    CHECK(a["error_code"] == 0);
+    CHECK(a["payload"].is_array());
+    t.rig.settle();
+    REQUIRE(t.assigned.size() == 1);
+    CHECK(t.assigned[0] == "dev1 0 3 S");
+    CHECK(t.rig.cloud->count("create") == 2);
     CHECK(t.rig.cloud->count("update 1000001") == 1);
 }
 

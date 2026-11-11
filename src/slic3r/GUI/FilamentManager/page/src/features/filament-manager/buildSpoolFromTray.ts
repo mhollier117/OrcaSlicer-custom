@@ -254,6 +254,7 @@ export function buildSpoolFromTray(input: BuildSpoolFromTrayInput): BuildSpoolFr
     // regular trays leave tray.ams_id undefined and fall back to the unit's id.
     bound_ams_id: tray.ams_id ?? unit.ams_id,
     bound_dev_id: devId,
+    bound_slot_id: tray.slot_id,
   };
 
   if (diaNum > 0) payload.diameter = diaNum;

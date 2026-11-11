@@ -17,6 +17,7 @@
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/Widgets/WebView.hpp"
 #include "slic3r/Utils/BBLPrinterAgent.hpp"
+#include "slic3r/Utils/BblFilament/Linker.hpp"
 
 #include <boost/filesystem/path.hpp>
 #include <boost/log/trivial.hpp>
@@ -270,6 +271,9 @@ Fm::Host FilamentManagerPanel::make_host()
         return text;
     };
     host.create_custom = [this](const std::string& vendor, const std::string& client_request_id) { create_custom(vendor, client_request_id); };
+    host.create_and_assign = [](const json& page_spool, const std::string& dev_id, int ams_id, const std::string& slot_id) {
+        return Fm::Runtime::get().create_and_assign(page_spool, fil::SlotKey{dev_id, ams_id, slot_id});
+    };
     return host;
 }
 

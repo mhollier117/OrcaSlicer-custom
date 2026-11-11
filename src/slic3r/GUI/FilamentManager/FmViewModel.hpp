@@ -28,6 +28,8 @@ struct Host
     std::function<void(json& page_spool)>                                decorate_spool; // fills color_name, tray_label
     std::function<std::string(BblFilament::FailKind, const std::string& server_message)> fail_text;
     std::function<std::uint64_t()>                                       now_ms;
+    // Creates a spool read from an AMS slot and assigns it to that slot (Runtime::create_and_assign).
+    std::function<BblFilament::Accept(const json& page_spool, const std::string& dev_id, int ams_id, const std::string& slot_id)> create_and_assign;
 };
 
 // Answers the page's requests and turns the spool service's events into reports.

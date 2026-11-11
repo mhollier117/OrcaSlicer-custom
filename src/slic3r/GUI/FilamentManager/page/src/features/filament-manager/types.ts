@@ -30,6 +30,7 @@ export interface Spool {
   setting_id?: string;
   bound_ams_id?: string;
   bound_dev_id?: string;
+  bound_slot_id?: string;
   // 运行时在位快照（C++ AMS MQTT 同步后填写，不持久化到 spools.json）
   in_printer?: boolean;
   dev_id?: string;
