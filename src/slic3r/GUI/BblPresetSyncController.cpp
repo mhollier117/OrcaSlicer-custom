@@ -42,6 +42,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <ctime>
 #include <future>
 #include <map>
@@ -806,12 +807,20 @@ void BblPresetSyncController::k_copy_step()
         set_k_last(key.str(), line);
     };
 
-    // Done: every job ran. Gone: the printer went away; the next printer follows. Shutdown: the app is closing.
+    // Done: every job ran, or a read failed and ended this printer's part. Gone: the printer went away; the next printer
+    // follows. Shutdown: the app is closing.
     enum class KRun { Done, Gone, Shutdown };
     const auto copy_on = [&](const sync::KPrinter& printer) -> KRun {
-        // What to copy: manual requests first, then every conversion not yet copied to this printer.
+        // What to copy: manual requests first, then every conversion not yet copied to this printer (none on a printer
+        // that refused to list its K profiles: only a manual request asks it again).
         std::vector<KJob> jobs = manual_jobs;
+        bool              refused_before = false;
+        {
+            std::lock_guard<std::mutex> lock(m_k_mutex);
+            refused_before = m_k_refused.count(printer.dev_id) > 0;
+        }
         for (const auto& [key, c] : conversions) {
+            if (refused_before) break;
             if (c.to_filament_id.empty() || manual_names.count(key.name)) continue;
             if (std::find(c.k_copied_printers.begin(), c.k_copied_printers.end(), printer.dev_id) != c.k_copied_printers.end()) continue;
             {
@@ -822,7 +831,22 @@ void BblPresetSyncController::k_copy_step()
             jobs.push_back({key, c.from_filament_id, c.to_filament_id, false, true});
         }
 
-        for (const KJob& job : jobs) {
+        // A read that fails ends this printer's part of the pass: the job at `from` and every one after it get the same
+        // note and retry time, without another request.
+        const auto read_failed = [&](std::size_t from, const char* text) {
+            for (std::size_t i = from; i < jobs.size(); ++i) {
+                {
+                    std::lock_guard<std::mutex> lock(m_k_mutex);
+                    m_k_retry_after[printer.dev_id + "|" + jobs[i].key.str()] = now() + 600;
+                }
+                note(jobs[i].key, printer.name + ": " + text);
+            }
+            return KRun::Done;
+        };
+        const char* const k_no_answer = "no answer to the K profile request";
+
+        for (std::size_t j = 0; j < jobs.size(); ++j) {
+            const KJob& job = jobs[j];
             if (cancelled()) return KRun::Shutdown;
             const std::string retry_key = printer.dev_id + "|" + job.key.str();
             const auto        fail      = [&](const char* what) {
@@ -851,11 +875,7 @@ void BblPresetSyncController::k_copy_step()
                 });
                 if (!asked) return KRun::Shutdown;
                 if (*asked == -2) return KRun::Gone;
-                if (*asked != 0) {
-                    fail("read");
-                    ok = false;
-                    break;
-                }
+                if (*asked != 0) return read_failed(j, k_no_answer);
 
                 // b. Wait for the reply.
                 struct Table
@@ -895,11 +915,13 @@ void BblPresetSyncController::k_copy_step()
                     if (table.ready) break;
                     sleep_ms(300);
                 }
-                if (!table.ready || !table.success) {
-                    fail("read");
-                    ok = false;
-                    break;
+                if (!table.ready) return read_failed(j, k_no_answer);
+                {
+                    std::lock_guard<std::mutex> lock(m_k_mutex);
+                    if (table.success) m_k_refused.erase(printer.dev_id);
+                    else m_k_refused.insert(printer.dev_id);
                 }
+                if (!table.success) return read_failed(j, "the printer did not return its K profiles");
 
                 // c. Plan.
                 const sync::KCopyPlan plan = sync::plan_k_copy(table.entries, job.from, job.to, printer.limited);

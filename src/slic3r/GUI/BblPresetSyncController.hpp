@@ -15,6 +15,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -136,6 +137,7 @@ private:
     mutable std::mutex                 m_k_mutex;
     std::vector<KRequest>              m_k_requests;
     std::map<std::string, long long>   m_k_retry_after; // dev_id + "|" + key
+    std::set<std::string>              m_k_refused;     // dev_ids that refused to list their K profiles: no automatic copy
     std::map<std::string, std::string> m_k_last;        // key -> last result text
 };
 
