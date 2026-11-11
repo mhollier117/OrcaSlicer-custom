@@ -77,7 +77,14 @@ struct LinkerState
         int       code{0};
     };
     std::map<std::string, Refusal> refused; // by SlotKey::text() + "|" + spool id ("" for an unbind)
+    // What the cloud accepted lately, so that a change the next list does not show is not sent again at once: by
+    // sent_key_mount / sent_key_unbind / sent_key_weight, until when it is held back.
+    std::map<std::string, long long> sent_until;
 };
+
+std::string sent_key_mount(const SlotKey& slot, const std::string& spool_id); // an RFID mount or a manual bind
+std::string sent_key_unbind(const SlotKey& slot);
+std::string sent_key_weight(const std::string& rfid, long long grams);
 
 enum class LinkMode { Off, DryRun, On };
 
@@ -137,6 +144,7 @@ struct LinkPlan
     std::vector<std::string>     notes; // why something was not done
     bool                         want_pull{false};
     std::map<std::string, int>   skipped_cooldown; // by dev_id: weight pushes held back by the busy-printer cooldown
+    int                          skipped_sent{0};  // actions held back because the cloud accepted the same one lately
     bool                         has_actions() const;
 };
 
@@ -157,6 +165,7 @@ AmsItem  ams_item_from_row(const Spool& row, const std::string& ams_sn, int ams_
 AmsItem  ams_item_from_tray(const TrayFacts& tray, const std::string& ams_sn, const FilamentLookup& lookup);
 SlotItem slot_bind(const std::string& ams_sn, int ams_id, int ams_type, const std::string& slot_id, const Spool& row);
 SlotItem slot_unbind(const std::string& ams_sn, int ams_id, int ams_type, const std::string& slot_id);
+// Nothing while the tray is being read; the printer's remain_g when it reports one; else the percent of the total.
 std::optional<long long> measured_grams(const TrayFacts& tray, const Spool& row);
 bool                     same_rgb(const std::string& a, const std::string& b); // "#RRGGBBAA" / "#RRGGBB", alpha ignored, case ignored
 

@@ -134,6 +134,10 @@ void read_tray(const json& t, TrayFacts& out)
     if (const auto r = get_integer(t, "remain")) {                                          // ParseV1_0:783, vt:5284
         if (*r >= 0 && *r <= 100) out.remain = static_cast<int>(*r);
     }
+    // Not read by OrcaSlicer's parser; Bambu Studio reads it next to `remain`. Absent or negative = unknown.
+    if (const auto g = get_integer(t, "remain_g")) {
+        if (*g >= 0 && *g < 1000000000) out.remain_g = static_cast<int>(*g);
+    }
 }
 
 // Mirrors the unit loop of DevFilaSystemParser::ParseV1_0 (DevFilaSystem.cpp:466-840) for the slots.

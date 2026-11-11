@@ -159,6 +159,26 @@ TEST_CASE("A full state sets has_full and fills the trays in unit, slot and exte
     CHECK(tap.printers() == std::vector<std::string>{"d1"});
 }
 
+TEST_CASE("The grams left are read when the printer reports them", "[BblFilament]")
+{
+    json p = full_print();
+    p["ams"]["ams"][0]["tray"][0]["remain_g"] = 812;
+    p["ams"]["ams"][0]["tray"][1]["remain_g"] = -1;
+    p["ams"]["ams"][0]["tray"][3]["remain_g"] = "400"; // not a number: absent
+    p["vir_slot"][0]["remain_g"]              = 0;
+    fil::PrinterTap tap;
+    tap.on_message("d1", message(p), 1);
+    const auto* f = tap.facts("d1");
+    REQUIRE(f != nullptr);
+    const std::vector<std::pair<std::pair<int, std::string>, int>> expected = {
+        {{0, "0"}, 812}, {{0, "1"}, -1}, {{0, "2"}, -1}, {{0, "3"}, -1}, {{255, "0"}, 0}};
+    for (const auto& [where, grams] : expected) {
+        const auto* t = find_tray(f, where.first, where.second);
+        REQUIRE(t != nullptr);
+        CHECK(t->remain_g == grams);
+    }
+}
+
 TEST_CASE("The slots of one AMS carry what the printer reports", "[BblFilament]")
 {
     fil::PrinterTap tap;

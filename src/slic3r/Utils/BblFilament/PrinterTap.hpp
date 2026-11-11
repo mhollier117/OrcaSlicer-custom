@@ -28,6 +28,7 @@ struct TrayFacts
     int         color_type{2};        // ctype as received; 2 when the tray reports none
     long long   total_g{0};           // tray_weight
     int         remain{-1};           // percent, -1 unknown
+    int         remain_g{-1};         // grams left as the printer reports them (remain_g), -1 unknown
 };
 
 struct PrinterFacts

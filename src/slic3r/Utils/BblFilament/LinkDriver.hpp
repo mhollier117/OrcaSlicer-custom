@@ -44,7 +44,7 @@ public:
     void            tick(const std::vector<PrinterView>& printers); // call every couple of seconds
     void            assign(const Assignment& a);                    // replaces an assignment for the same slot
     Accept          unassign(const SlotKey& slot, const std::vector<PrinterView>& printers); // unbind now (manual spools)
-    void            sync_now();                                     // forget the round spacing and the busy cooldowns once
+    void            sync_now();                                     // forget the round spacing, the busy cooldowns and what was sent lately, once
     void            reset();                                        // session changed: forget everything
     const LinkPlan& last_plan() const { return last_plan_; }
     json            status_json(const std::vector<PrinterView>& printers) const;
@@ -66,7 +66,7 @@ private:
     bool      waiting_for_list() const;
     void      start_round(const std::vector<PrinterView>& printers);
     void      op_finished(unsigned long long round, const OpRecord& record);
-    void      record_refusals(const std::string& dev_id, const SpoolService::LinkOutcome& out);
+    void      record_slot_results(const std::string& dev_id, const SpoolService::LinkOutcome& out); // refusals and accepted items
 
     LinkDriverDeps deps_;
     LinkerState    state_;

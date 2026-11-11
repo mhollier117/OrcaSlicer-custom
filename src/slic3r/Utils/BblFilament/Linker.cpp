@@ -73,7 +73,33 @@ std::string where(const PrinterView& p, const TrayFacts& t)
     return p.name + " AMS " + std::to_string(t.ams_id) + " slot " + t.slot_id;
 }
 
+// The total the percent rule of measured_grams uses.
+long long percent_total(const TrayFacts& t, const Spool& r) { return t.total_g > 0 ? t.total_g : std::llround(r.total_net_weight); }
+
+// The grams a weight push or an RFID mount sends; nothing when the row keeps its own weight: no valid measurement, or
+// a measurement from the percent while the row's own weight rounds to that percent (a percent cannot overrule a finer
+// number: a row with 304 of 1000 g and a tray at 30 % stay at 304).
+std::optional<long long> grams_to_send(const TrayFacts& t, const Spool& r)
+{
+    const auto g = measured_grams(t, r);
+    if (!g || t.remain_g >= 0) return g;
+    const long long total = percent_total(t, r);
+    if (total > 0 && std::llround(r.net_weight * 100.0 / static_cast<double>(total)) == t.remain) return std::nullopt;
+    return g;
+}
+
+const TrayFacts* tray_at(const PrinterView& p, int ams_id, const std::string& slot_id)
+{
+    for (const TrayFacts& t : p.trays)
+        if (t.ams_id == ams_id && t.slot_id == slot_id) return &t;
+    return nullptr;
+}
+
 } // namespace
+
+std::string sent_key_mount(const SlotKey& slot, const std::string& spool_id) { return "mount|" + slot.text() + "|" + spool_id; }
+std::string sent_key_unbind(const SlotKey& slot) { return "unbind|" + slot.text(); }
+std::string sent_key_weight(const std::string& rfid, long long grams) { return "weight|" + rfid + "|" + std::to_string(grams); }
 
 bool same_rgb(const std::string& a, const std::string& b)
 {
@@ -84,8 +110,10 @@ bool same_rgb(const std::string& a, const std::string& b)
 
 std::optional<long long> measured_grams(const TrayFacts& tray, const Spool& row)
 {
-    if (tray.reading || tray.remain < 0 || tray.remain > 100) return std::nullopt;
-    const long long total = tray.total_g > 0 ? tray.total_g : std::llround(row.total_net_weight);
+    if (tray.reading) return std::nullopt;
+    if (tray.remain_g >= 0) return static_cast<long long>(tray.remain_g);
+    if (tray.remain < 0 || tray.remain > 100) return std::nullopt;
+    const long long total = percent_total(tray, row);
     if (total <= 0) return std::nullopt;
     return std::llround(static_cast<double>(total) * tray.remain / 100.0);
 }
@@ -194,11 +222,19 @@ LinkPlan plan_links(const std::vector<PrinterView>& printers, const std::vector<
         if (it->second.until <= now) it = state.refused.erase(it);
         else ++it;
     }
+    for (auto it = state.sent_until.begin(); it != state.sent_until.end();) {
+        if (it->second <= now) it = state.sent_until.erase(it);
+        else ++it;
+    }
 
     const auto slot_allowed = [&](const SlotKey& k) { return config.only_slots.empty() || config.only_slots.count(k.text()) > 0; };
     const auto refused      = [&](const SlotKey& k, const std::string& spool_id) {
         auto it = state.refused.find(k.text() + "|" + spool_id);
         return it != state.refused.end() && it->second.until > now;
+    };
+    const auto sent_lately = [&](const std::string& key) {
+        auto it = state.sent_until.find(key);
+        return it != state.sent_until.end() && it->second > now;
     };
 
     struct Entry
@@ -316,22 +352,30 @@ LinkPlan plan_links(const std::vector<PrinterView>& printers, const std::vector<
                 continue;
             }
             if (!mounted) {
+                mounted_slots.insert(S);
+                if (sent_lately(sent_key_mount(S, R.id))) {
+                    ++plan.skipped_sent;
+                    note("Spool " + R.id + " was sent to " + where(p, t) + " a short while ago and the list does not show it: not sent again yet.");
+                    continue;
+                }
                 PlannedMount m;
                 m.slot     = S;
                 m.ams_sn   = sn;
                 m.ams_type = t.ams_type;
                 m.spool_id = R.id;
                 m.rfid     = !R.rfid.empty();
-                if (m.rfid) m.grams = measured_grams(t, R);
+                if (m.rfid) m.grams = grams_to_send(t, R);
                 plan.mounts.push_back(m);
-                mounted_slots.insert(S);
             } else if (!R.rfid.empty()) {
-                const auto g = measured_grams(t, R);
+                const auto g = grams_to_send(t, R);
                 if (g && *g != std::llround(R.net_weight)) {
                     auto pushed = state.pushed.find(R.rfid);
                     if (p.busy && pushed != state.pushed.end() && now - pushed->second.sent_at < k_busy_push_seconds) {
                         ++plan.skipped_cooldown[p.dev_id];
                         note("Weight of spool " + R.id + " was sent a short while ago and " + p.name + " is busy: waiting.");
+                    } else if (sent_lately(sent_key_weight(R.rfid, *g))) {
+                        ++plan.skipped_sent;
+                        note("Weight " + std::to_string(*g) + " g of spool " + R.id + " was sent a short while ago and the list does not show it: not sent again yet.");
                     } else {
                         plan.weights.push_back({S, sn, t.ams_type, R.id, *g});
                     }
@@ -378,6 +422,12 @@ LinkPlan plan_links(const std::vector<PrinterView>& printers, const std::vector<
             plan.notes.push_back("Another spool is in " + place + ": the claim of spool " + R.id + " is left alone.");
             continue;
         }
+        // An occupied slot whose spool cannot be identified right now (its tag is being read, or not read yet after
+        // the AMS restarted) is not an empty slot: the streak neither starts nor grows.
+        if (const TrayFacts* t = tray_at(p, R.ams_id, R.slot_id); t != nullptr && t->occupied && (t->reading || (!R.rfid.empty() && !valid_rfid(t->uuid)))) {
+            plan.notes.push_back("The spool in " + place + " cannot be identified yet: the claim of spool " + R.id + " is left alone.");
+            continue;
+        }
 
         auto it = state.unmatched.find(R.id);
         if (it == state.unmatched.end()) {
@@ -390,8 +440,14 @@ LinkPlan plan_links(const std::vector<PrinterView>& printers, const std::vector<
         const auto& streak = it->second;
         if (streak.count < k_unbind_observations || now - streak.first_at < k_unbind_seconds) continue;
         if (R.ams_sn.empty() || !slot_allowed(S) || refused(S, std::string())) continue;
-        if (list_serial > streak.list_serial) unbinds.push_back({S, R.ams_sn, R.ams_type, R.id});
-        else plan.want_pull = true;
+        if (list_serial <= streak.list_serial) {
+            plan.want_pull = true;
+        } else if (sent_lately(sent_key_unbind(S))) {
+            ++plan.skipped_sent;
+            plan.notes.push_back("The slot " + place + " was cleared a short while ago and the list still shows spool " + R.id + ": not sent again yet.");
+        } else {
+            unbinds.push_back({S, R.ams_sn, R.ams_type, R.id});
+        }
     }
     for (auto it = state.unmatched.begin(); it != state.unmatched.end();) {
         if (still_claiming.count(it->first) == 0) it = state.unmatched.erase(it);

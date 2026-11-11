@@ -816,6 +816,159 @@ TEST_CASE("The measured grams need a valid reading and a total", "[BblFilament]"
     CHECK_FALSE(fil::measured_grams(t, row).has_value());
 }
 
+TEST_CASE("The grams the printer reports win over the percent", "[BblFilament]")
+{
+    auto t     = make_tray(); // 50 % of 1000 g
+    t.remain_g = 304;
+    CHECK(fil::measured_grams(t, make_row("1")).value() == 304);
+    t.remain_g = 0;
+    CHECK(fil::measured_grams(t, make_row("1")).value() == 0);
+    t.remain   = -1; // no percent: the grams alone are enough
+    t.remain_g = 120;
+    CHECK(fil::measured_grams(t, make_row("1")).value() == 120);
+    t.reading = true; // nothing while the tray is being read
+    CHECK_FALSE(fil::measured_grams(t, make_row("1")).has_value());
+}
+
+TEST_CASE("A weight push uses the grams the printer reports", "[BblFilament]")
+{
+    Ctx  c;
+    auto t     = make_rfid_tray("0", "UUID1");
+    t.remain   = 30;
+    t.remain_g = 300;
+    auto row       = mounted_row(make_row("1", "UUID1"), "dev1", "sn0", 0, "0");
+    row.net_weight = 304; // its percent is 30 too, but the printer reports grams
+    const auto plan = c.plan({with_tray(make_printer(), t)}, {row});
+    REQUIRE(plan.weights.size() == 1);
+    CHECK(plan.weights[0].grams == 300);
+}
+
+TEST_CASE("A percent does not overrule a row whose own percent is the same", "[BblFilament]")
+{
+    auto row       = make_row("1", "UUID1");
+    row.net_weight = 304; // of 1000 g
+    auto t         = make_rfid_tray("0", "UUID1");
+    t.remain       = 30;
+    {
+        Ctx c;
+        CHECK_FALSE(c.plan({with_tray(make_printer(), t)}, {mounted_row(row, "dev1", "sn0", 0, "0")}).has_actions());
+    }
+    {
+        // A mount sends the row's own weight.
+        Ctx        c;
+        const auto plan = c.plan({with_tray(make_printer(), t)}, {row});
+        REQUIRE(plan.mounts.size() == 1);
+        CHECK_FALSE(plan.mounts[0].grams.has_value());
+        CHECK(fil::ams_item_from_row(row, "sn0", 0, 1, "0", plan.mounts[0].grams).net_weight == 304);
+    }
+    {
+        // A percent that differs still counts.
+        Ctx c;
+        t.remain        = 29;
+        const auto plan = c.plan({with_tray(make_printer(), t)}, {mounted_row(row, "dev1", "sn0", 0, "0")});
+        REQUIRE(plan.weights.size() == 1);
+        CHECK(plan.weights[0].grams == 290);
+    }
+}
+
+TEST_CASE("A claim on an occupied slot whose spool cannot be identified yet is left alone", "[BblFilament]")
+{
+    const auto run = [](const fil::TrayFacts& t, const fil::Spool& claim) {
+        Ctx  c;
+        auto p = with_tray(make_printer(), t);
+        for (int i = 0; i < 6; ++i) {
+            p.observations = static_cast<unsigned long long>(i + 1);
+            c.now += 20;
+            c.serial += 1;
+            const auto plan = c.plan({p}, {claim});
+            CHECK(plan.unbinds.empty());
+            CHECK_FALSE(plan.want_pull);
+        }
+        CHECK(c.state.unmatched.empty());
+    };
+    // A tray being read (an RFID row whose tag is not read yet).
+    auto reading    = make_tray("0");
+    reading.reading = true;
+    reading.color   = "#123456FF"; // would not agree with a manual row either
+    run(reading, mounted_row(make_row("2", "UUID2"), "dev1", "sn0", 0, "0"));
+    run(reading, mounted_row(make_row("2"), "dev1", "sn0", 0, "0"));
+    // A tray that reports no RFID while the row has one (after an AMS restart).
+    auto no_tag = make_tray("0");
+    run(no_tag, mounted_row(make_row("2", "UUID2"), "dev1", "sn0", 0, "0"));
+    no_tag.uuid = "00000000000000000000000000000000";
+    run(no_tag, mounted_row(make_row("2", "UUID2"), "dev1", "sn0", 0, "0"));
+}
+
+TEST_CASE("An unidentified spool holds an unbind streak where it is", "[BblFilament]")
+{
+    Ctx  c;
+    auto t     = make_tray("0");
+    t.occupied = false;
+    auto p     = with_tray(make_printer(), t);
+    const auto claim = mounted_row(make_row("2", "UUID2"), "dev1", "sn0", 0, "0");
+    p.observations   = 1;
+    c.plan({p}, {claim});
+    REQUIRE(c.state.unmatched["2"].count == 1);
+    p.trays[0].occupied = true; // a spool without a readable tag
+    for (int i = 0; i < 4; ++i) {
+        p.observations += 1;
+        c.now += 20;
+        c.serial += 1;
+        CHECK(c.plan({p}, {claim}).unbinds.empty());
+    }
+    CHECK(c.state.unmatched["2"].count == 1);
+    // A tray that is empty again lets the streak grow.
+    p.trays[0].occupied = false;
+    p.observations += 1;
+    c.plan({p}, {claim});
+    CHECK(c.state.unmatched["2"].count == 2);
+}
+
+TEST_CASE("Something the cloud accepted lately is not planned again", "[BblFilament]")
+{
+    const fil::SlotKey S{"dev1", 0, "0"};
+    {
+        Ctx c;
+        c.state.sent_until[fil::sent_key_mount(S, "1")] = c.now + 10;
+        auto plan = c.plan({with_tray(make_printer(), make_rfid_tray("0", "UUID1"))}, {make_row("1", "UUID1")});
+        CHECK(plan.mounts.empty());
+        CHECK(plan.skipped_sent == 1);
+        CHECK_FALSE(plan.notes.empty());
+        c.now += 10; // the memory ran out
+        plan = c.plan({with_tray(make_printer(), make_rfid_tray("0", "UUID1"))}, {make_row("1", "UUID1")});
+        CHECK(plan.mounts.size() == 1);
+        CHECK(c.state.sent_until.empty());
+    }
+    {
+        // A weight push of the same grams, on an idle printer too.
+        Ctx c;
+        c.state.sent_until[fil::sent_key_weight("UUID1", 500)] = c.now + 10;
+        const auto row = mounted_row(make_row("1", "UUID1"), "dev1", "sn0", 0, "0");
+        CHECK(c.plan({with_tray(make_printer(), make_rfid_tray("0", "UUID1"))}, {row}).weights.empty());
+        auto t   = make_rfid_tray("0", "UUID1");
+        t.remain = 40; // other grams are sent
+        CHECK(c.plan({with_tray(make_printer(), t)}, {row}).weights.size() == 1);
+    }
+    {
+        // An unbind of the same slot.
+        Ctx  c;
+        auto p = make_printer();
+        const auto claim = mounted_row(make_row("2"), "dev1", "sn0", 0, "0");
+        c.state.sent_until[fil::sent_key_unbind(S)] = c.now + 100000;
+        fil::LinkPlan plan;
+        for (int i = 0; i < 4; ++i) {
+            p.observations = static_cast<unsigned long long>(i + 1);
+            c.now += 11;
+            plan = c.plan({p}, {claim});
+        }
+        c.serial += 1;
+        p.observations = 9;
+        plan           = c.plan({p}, {claim});
+        CHECK(plan.unbinds.empty());
+        CHECK(plan.skipped_sent == 1);
+    }
+}
+
 TEST_CASE("RFID evidence moves a row claimed by a printer that does not take part", "[BblFilament]")
 {
     Ctx c;
@@ -1058,9 +1211,10 @@ TEST_CASE("A round sends the RFID mount and the manual bind, then one pull, and 
 TEST_CASE("No round starts while one is in flight, before its list arrives, or within five seconds", "[BblFilament]")
 {
     DriverRig d;
-    d.rig.cloud->rows.push_back(rfid_row(1000001, "UUID1")); // the fake does not apply the mount: it is planned again
+    d.rig.cloud->rows.push_back(rfid_row(1000001, "UUID1"));
     d.load();
     const std::vector<fil::PrinterView> printers{with_tray(make_printer(), make_rfid_tray("0", "UUID1"))};
+    d.rig.cloud->forced["sync_ams"].push_back(forced_error(fil::CloudError::Rejected)); // not taken: it is planned again
 
     d.driver->tick(printers);
     CHECK(d.rig.worker.size() == 1);
@@ -1117,6 +1271,92 @@ TEST_CASE("A weight push is recorded only when the cloud took it", "[BblFilament
     d.driver->sync_now();
     d.run({p});
     CHECK(d.count("sync_ams") == 3);
+}
+
+TEST_CASE("A change the cloud took but the list does not show is not sent again for ten minutes", "[BblFilament]")
+{
+    DriverRig d;
+    d.rig.cloud->rows.push_back(rfid_row(1000001, "UUID1"));                                            // not mounted
+    d.rig.cloud->rows.push_back(mounted_json(rfid_row(1000003, "UUID3"), "dev1", "sn0", 0, "2"));       // 750 g
+    d.rig.cloud->rows.push_back(row_with(1000002));
+    d.load(); // apply_mounts is off: the lists after the round look as before
+    auto p = make_printer();
+    p.trays.push_back(make_rfid_tray("0", "UUID1"));
+    p.trays.push_back(make_tray("1"));
+    p.trays.push_back(make_rfid_tray("2", "UUID3")); // 500 g, an idle printer
+    d.driver->assign(make_assignment("dev1", "1", "1000002", 0));
+
+    const long long start = d.t;
+    d.run({p});
+    CHECK(d.count("sync_ams") == 1);
+    CHECK(d.count("sync_slots") == 1);
+    REQUIRE(d.rig.cloud->ams_got.size() == 1);
+    CHECK(d.rig.cloud->ams_got[0].size() == 2);
+
+    d.t += fil::LinkDriver::k_round_spacing_seconds;
+    d.driver->assign(make_assignment("dev1", "1", "1000002", 0));
+    d.run({p});
+    CHECK(d.count("sync_") == 2);
+    CHECK_FALSE(d.driver->last_plan().has_actions());
+    CHECK(d.driver->last_plan().skipped_sent == 3);
+    CHECK(d.driver->status_json({p})["planned"]["skipped_recently_sent"] == 3);
+
+    d.t = start + fil::LinkDriver::k_refusal_seconds;
+    d.driver->assign(make_assignment("dev1", "1", "1000002", 0));
+    d.run({p});
+    CHECK(d.count("sync_ams") == 2);
+    CHECK(d.count("sync_slots") == 2);
+
+    // sync_now forgets it.
+    d.t += fil::LinkDriver::k_round_spacing_seconds;
+    d.driver->assign(make_assignment("dev1", "1", "1000002", 0));
+    d.run({p});
+    CHECK(d.count("sync_") == 4);
+    d.driver->sync_now();
+    d.run({p});
+    CHECK(d.count("sync_") == 6);
+}
+
+TEST_CASE("A change the cloud did not take is sent again in the next round", "[BblFilament]")
+{
+    DriverRig d;
+    d.rig.cloud->rows.push_back(row_with(1000002));
+    d.load();
+    const std::vector<fil::PrinterView> printers{with_tray(make_printer(), make_tray("1"))};
+    d.rig.cloud->forced["sync_slots"].push_back(forced_error(fil::CloudError::Rejected));
+    d.driver->assign(make_assignment("dev1", "1", "1000002", 0));
+    d.run(printers);
+    CHECK(d.count("sync_slots") == 1);
+    d.t += fil::LinkDriver::k_round_spacing_seconds;
+    d.run(printers);
+    CHECK(d.count("sync_slots") == 2);
+}
+
+TEST_CASE("An unbind the list does not show is not sent again for ten minutes", "[BblFilament]")
+{
+    DriverRig d;
+    d.rig.cloud->rows.push_back(mounted_json(row_with(1000002), "dev1", "sn0", 0, "0"));
+    d.load();
+    auto t     = make_tray("0");
+    t.occupied = false;
+    auto p     = with_tray(make_printer(), t);
+    for (int i = 0; i < 6 && d.count("sync_slots") == 0; ++i) {
+        p.observations = static_cast<unsigned long long>(i + 1);
+        d.t += 11;
+        d.run({p});
+        d.rig.svc->request_pull(); // a newer list
+        d.rig.settle();
+    }
+    REQUIRE(d.count("sync_slots") == 1);
+    for (int i = 0; i < 6; ++i) {
+        p.observations += 1;
+        d.t += 11;
+        d.run({p});
+        d.rig.svc->request_pull();
+        d.rig.settle();
+    }
+    CHECK(d.count("sync_slots") == 1);
+    CHECK(d.driver->last_plan().skipped_sent == 1);
 }
 
 TEST_CASE("The ams sync builder leaves out a row that became busy after planning", "[BblFilament]")
