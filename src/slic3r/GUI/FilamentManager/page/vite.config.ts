@@ -1,0 +1,109 @@
+import { defineConfig, type Plugin } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+import legacyWebkit from './legacy-webkit.postcss'
+
+/**
+ * Make Vite build output compatible with file:// protocol:
+ * 1. Move <script> tags from <head> to end of <body> (DOM must be ready for React)
+ * 2. Strip crossorigin attribute from all tags (blocked under file://)
+ * 3. Strip type="module" from scripts (IIFE bundles don't need it)
+ */
+function fileProtocolCompat(): Plugin {
+  return {
+    name: 'file-protocol-compat',
+    enforce: 'post',
+    transformIndexHtml(html) {
+      // 1) Strip crossorigin from all tags (link, script, etc.)
+      let result = html.replace(/ crossorigin/g, '')
+
+      // 2) Move <script> from <head> to end of <body>
+      const headEnd = result.indexOf('</head>')
+      const scriptRe = /<script\b[^>]*src="[^"]*"[^>]*><\/script>/g
+      const scripts: string[] = []
+      result = result.replace(scriptRe, (match, offset) => {
+        if (offset < headEnd) {
+          scripts.push(match)
+          return ''
+        }
+        return match
+      })
+
+      if (scripts.length > 0) {
+        // 3) Strip type="module" for IIFE bundles
+        const cleaned = scripts.map(s => s.replace(/ type="module"/, ''))
+        result = result.replace('</body>', '    ' + cleaned.join('\n    ') + '\n  </body>')
+      }
+
+      return result
+    }
+  }
+}
+
+// https://vite.dev/config/
+export default defineConfig({
+  base: './',
+  plugins: [
+    react(),
+    tailwindcss(),
+    fileProtocolCompat(),
+  ],
+
+  resolve: {
+    alias: {
+      '@locales': new URL('./locales', import.meta.url).href,
+    },
+  },
+
+  css: {
+    postcss: {
+      plugins: [legacyWebkit()],
+    },
+  },
+
+  build: {
+    // Keep in step with package.json browserslist; unset lets Vite's default drift.
+    // The floor is the oldest engine the installer can reach, not the newest:
+    // WKWebView is tied to the macOS version and CMAKE_OSX_DEPLOYMENT_TARGET is
+    // 10.15, whose shipping Safari is 13.1. Chromium 109 is the last WebView2 /
+    // Chrome line for Windows 8.1 and earlier.
+    target: ['chrome109', 'edge109', 'safari13.1'],
+    cssTarget: ['chrome109', 'edge109', 'safari13.1'],
+    // esbuild's CSS minifier passes oklch() through untouched; lightningcss
+    // lowers it for cssTarget (hex fallback + @supports lab/p3).
+    cssMinify: 'lightningcss',
+    sourcemap: false,
+    rollupOptions: {
+      output: {
+        // fileProtocolCompat() strips type="module"; IIFE is required for file://.
+        format: 'iife',
+        name: 'DevicePageApp',
+        inlineDynamicImports: true,
+        entryFileNames: 'assets/[name].js',
+        chunkFileNames: 'assets/[name].js',
+        assetFileNames: 'assets/[name].[ext]'
+      }
+    },
+    // Use terser instead of esbuild so we can reserve names that would
+    // otherwise collide with WebView host globals or with browser builtins.
+    //
+    //   wx : WKWebView's AddScriptMessageHandler("wx") injects `window.wx`.
+    //        If terser mangles a top-level variable to "wx", it shadows the
+    //        global and we get
+    //          "wx is not a function (it is an instance of UserMessageHandler)".
+    //
+    //   gc : Some Chromium / WebView2 builds expose `window.gc()` as a
+    //        debug-only garbage-collect hook. When terser mangles two
+    //        different module-level identifiers to `gc` they collide as a
+    //        single `var gc` declaration in the IIFE bundle and cause
+    //          "SyntaxError: Identifier 'gc' has already been declared"
+    //        at script-load time, leaving the React tree blank. Reserving
+    //        the name keeps terser away from it.
+    minify: 'terser',
+    terserOptions: {
+      mangle: {
+        reserved: ['wx', 'gc'],
+      },
+    },
+  }
+})
