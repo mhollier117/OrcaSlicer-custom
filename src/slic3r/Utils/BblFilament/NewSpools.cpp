@@ -14,6 +14,15 @@ void NewSpools::add(const SlotKey& slot, const std::string& rfid) { m_slots[slot
 
 void NewSpools::dismiss(const SlotKey& slot) { m_slots.erase(slot); }
 
+bool NewSpools::dismiss_if(const SlotKey& slot, const std::string& rfid)
+{
+    auto it = m_slots.find(slot);
+    if (it == m_slots.end() || it->second != rfid)
+        return false;
+    m_slots.erase(it);
+    return true;
+}
+
 void NewSpools::reconcile(const std::vector<PrinterView>& printers)
 {
     for (const PrinterView& p : printers) {

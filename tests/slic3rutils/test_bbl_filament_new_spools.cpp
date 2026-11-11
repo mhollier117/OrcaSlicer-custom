@@ -7,6 +7,7 @@
 #include "slic3r/Utils/BblFilament/PrinterTap.hpp"
 #include "slic3r/Utils/BblFilament/Spool.hpp"
 #include "slic3r/Utils/BblFilament/SpoolCloud.hpp"
+#include "slic3r/Utils/BblFilament/SpoolService.hpp"
 
 #include <string>
 #include <utility>
@@ -229,4 +230,32 @@ TEST_CASE("A spool shown from a tray takes its filament, colours and grams", "[B
 
     t.uuid = "00000000000000000000000000000000";
     CHECK(fil::spool_from_tray(t).rfid.empty());
+}
+
+TEST_CASE("A decision dismisses the marker only while it names the same spool", "[BblFilament]")
+{
+    fil::NewSpools spools;
+    spools.add(k_slot, k_rfid);
+    CHECK_FALSE(spools.dismiss_if(k_slot, "OTHER"));
+    CHECK(spools.has(k_slot));
+    CHECK_FALSE(spools.dismiss_if(fil::SlotKey{"dev1", 0, "2"}, k_rfid));
+    CHECK(spools.dismiss_if(k_slot, k_rfid));
+    CHECK_FALSE(spools.has(k_slot));
+    CHECK_FALSE(spools.dismiss_if(k_slot, k_rfid));
+
+    // A newer spool registered in that slot meanwhile keeps its marker.
+    spools.add(k_slot, "NEWER");
+    CHECK_FALSE(spools.dismiss_if(k_slot, k_rfid));
+    CHECK(spools.rfid(k_slot) == "NEWER");
+}
+
+TEST_CASE("A new-spool decision belongs to the account and the plugin load it was read under", "[BblFilament]")
+{
+    const fil::Session asked{true, "u1", 3, false};
+    CHECK(fil::same_account(asked, asked));
+    CHECK_FALSE(fil::same_account(asked, fil::Session{true, "u2", 3, false}));
+    CHECK_FALSE(fil::same_account(asked, fil::Session{true, "u1", 4, false}));
+    CHECK_FALSE(fil::same_account(asked, fil::Session{false, "u1", 3, false}));
+    CHECK_FALSE(fil::same_account(asked, fil::Session{true, "u1", 3, true}));
+    CHECK_FALSE(fil::same_account(fil::Session{}, fil::Session{}));
 }

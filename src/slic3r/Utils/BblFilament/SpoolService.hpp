@@ -22,6 +22,10 @@ struct Session
     bool               closing{false};
 };
 
+// Both signed in, to the same Bambu user, with the same load of the network plugin: something read under `a` may be
+// acted on under `b`.
+bool same_account(const Session& a, const Session& b);
+
 enum class FailKind { NotSignedIn, Unavailable, BadRequest, NotFound, Rejected, Unknown };
 
 struct Accept // the immediate answer to a request

@@ -129,7 +129,12 @@ the app keeps that record current for every Bambu printer of the account, not on
 
 - **Printer tap.** The app parses tray contents only for the selected printer. Every status message of every Bambu
   printer (both message handlers of `GUI_App`) therefore also goes to the tap, which keeps the AMS and external-spool
-  parts of each printer's state, merged the way the app merges them.
+  parts of each printer's state, merged the way the app merges them. The tap is fed while the Filament Manager or the
+  Bambu preset sync is enabled (the K copy of the preset sync reads its nozzle diameter and calibration support); linking
+  itself needs the Filament Manager. Old tray contents never count as current: a message that follows the previous one
+  of that printer by more than a minute makes the tap forget the printer first, so a diff after a gap leaves it without
+  a full state; the runtime makes the tap forget a printer that is offline or gone, and forget everything when the Bambu
+  session changes or ends.
 - **Views.** Every two seconds the runtime builds one view per printer of the account, plus the selected printer in
   LAN mode: bound to the account, LAN-only, selected, busy (printing, or the AMS doing anything but idling), fresh
   (online, a full state since the tap last forgot it, a message within a minute), the AMS serials from the printer's
@@ -174,8 +179,19 @@ Studio). The runtime keeps the marked slots in memory, forgets them when the lis
 its slot is empty or reports another spool on a printer with fresh data. Clicking the marker reads the cloud's queue of
 new spools for that AMS. When the queue has no entry for the spool, a dialog says the spool was recorded. Otherwise a
 dialog offers to add it as a new spool or to confirm the match, the spool the cloud proposes or one of its candidates;
-the answer is sent as `create_new`, `link_other` or `accept`, and the list is read again. Either way the marker goes;
-closing the dialog keeps it. A failed call is shown with the Filament Manager's failure texts and keeps the marker.
+the answer is sent as `create_new`, `link_other` or `accept`, and the list is read again. The marker goes once the
+"recorded" dialog was shown or the answer was sent successfully, and only while it still names the same spool; closing
+the dialog keeps it. A failed call is shown with the Filament Manager's failure texts and keeps the marker. The queue
+belongs to the account it was read for: when the Bambu user or the plugin load differs by the time the reply arrives,
+or by the time the answer would be sent, nothing is shown or sent.
+
+## Choosing a spool in the AMS slot dialog
+
+The slot dialog of a printer that takes part in linking offers the spools without RFID that are not in a printer. A
+spool the dialog's printer cannot take is shown greyed with the reason: no preset of its filament for that printer, or
+several colours on a printer that takes one colour per slot (or more colours than the colour picker edits). The dialog
+keeps the printer's dev id; after the picker, and when the dialog is confirmed, it continues only while the device
+manager still holds that same printer object, because a sign-out or a refresh of the printer list deletes printers.
 
 ## Not part of this
 

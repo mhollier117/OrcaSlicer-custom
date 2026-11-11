@@ -438,7 +438,7 @@ TEST_CASE("A second full state replaces everything", "[BblFilament]")
     p["ams"]["ams"].erase(p["ams"]["ams"].begin() + 1, p["ams"]["ams"].end()); // only unit 0 is left
     p.erase("vir_slot");
     p.erase("home_flag");
-    tap.on_message("d1", message(p), 200);
+    tap.on_message("d1", message(p), 150); // within a minute of the last message: not a gap
     const auto* f = tap.facts("d1");
     REQUIRE(f != nullptr);
     CHECK(f->has_full);
@@ -513,6 +513,46 @@ TEST_CASE("The printer tap forgets one printer or all of them", "[BblFilament]")
     tap.clear();
     CHECK(tap.printers().empty());
     CHECK(tap.facts("d2") == nullptr);
+}
+
+TEST_CASE("A diff more than a minute after the last message leaves the printer without a full state or trays", "[BblFilament]")
+{
+    fil::PrinterTap tap;
+    tap.on_message("d1", full_message(), 100);
+    tap.on_message("d1", diff_message(json{{"mc_percent", 1}}), 100 + fil::PrinterTap::k_gap_seconds + 1);
+    const auto* f = tap.facts("d1");
+    REQUIRE(f != nullptr);
+    CHECK_FALSE(f->has_full);
+    CHECK(f->trays.empty());
+    CHECK(f->observations == 1);
+    CHECK(f->last_message_at == 161);
+    CHECK_FALSE(f->pa_supported.has_value());
+    // the next full state makes it whole again
+    tap.on_message("d1", full_message(), 170);
+    CHECK(tap.facts("d1")->has_full);
+    CHECK(tap.facts("d1")->trays.size() == 8);
+}
+
+TEST_CASE("A diff within a minute of the last message keeps the full state and the trays", "[BblFilament]")
+{
+    fil::PrinterTap tap;
+    tap.on_message("d1", full_message(), 100);
+    tap.on_message("d1", diff_message(json{{"mc_percent", 1}}), 159);
+    const auto* f = tap.facts("d1");
+    REQUIRE(f != nullptr);
+    CHECK(f->has_full);
+    CHECK(f->trays.size() == 8);
+    CHECK(f->observations == 2);
+}
+
+TEST_CASE("A full state after a gap restarts the observation count", "[BblFilament]")
+{
+    fil::PrinterTap tap;
+    tap.on_message("d1", full_message(), 100);
+    tap.on_message("d1", diff_message(json{{"mc_percent", 1}}), 110);
+    tap.on_message("d1", full_message(), 300);
+    CHECK(tap.facts("d1")->has_full);
+    CHECK(tap.facts("d1")->observations == 1);
 }
 
 TEST_CASE("The printer tap keeps two printers apart", "[BblFilament]")

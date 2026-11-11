@@ -93,10 +93,11 @@ void refresh_shown(const std::string& dev_id)
     }
 }
 
-void dismiss(const fil::SlotKey& slot)
+// Only while the marker still names the spool the decision was about.
+void dismiss(const fil::SlotKey& slot, const std::string& rfid)
 {
-    Runtime::get().new_spools().dismiss(slot);
-    refresh_shown(slot.dev_id);
+    if (Runtime::get().new_spools().dismiss_if(slot, rfid))
+        refresh_shown(slot.dev_id);
 }
 
 void show_failure(wxWindow* parent, fil::FailKind kind, const std::string& message)
@@ -112,7 +113,15 @@ std::set<fil::SlotKey>& in_flight()
     return slots;
 }
 
-void send_choice(wxWindow* parent, const fil::SlotKey& slot, const fil::SoftMatchAct& act)
+// Slots whose answer is on its way: the marker stays until it succeeded, but is not acted on twice.
+std::set<fil::SlotKey>& sending()
+{
+    static std::set<fil::SlotKey> slots;
+    return slots;
+}
+
+// The marker goes once the choice was sent successfully; a failure is shown and the marker stays.
+void send_choice(wxWindow* parent, const fil::SlotKey& slot, const std::string& rfid, const fil::SoftMatchAct& act)
 {
     if (!fil::write_refusal(Runtime::get().link_settings(), nullptr).empty()) {
         MessageDialog(parent, _L("Linking spools to printer slots is not turned on, so the choice was not sent."), _L("Filament Manager"),
@@ -121,19 +130,28 @@ void send_choice(wxWindow* parent, const fil::SlotKey& slot, const fil::SoftMatc
         return;
     }
     wxWeakRef<wxWindow> weak(parent);
-    const auto          done = [weak](const fil::SpoolService::LinkOutcome& out) {
-        if (out.ok)
-            return; // the service pulls the list by itself
+    const auto          done = [weak, slot, rfid](const fil::SpoolService::LinkOutcome& out) {
+        // Outside the service's call; the service pulls the list by itself.
+        const bool          ok   = out.ok;
         const fil::FailKind kind = out.kind;
         const std::string   msg  = out.message;
-        wxTheApp->CallAfter([weak, kind, msg] {
-            if (wxWindow* p = weak.get())
-                show_failure(p, kind, msg);
+        wxTheApp->CallAfter([weak, slot, rfid, ok, kind, msg] {
+            sending().erase(slot);
+            try {
+                if (ok)
+                    dismiss(slot, rfid);
+                else if (wxWindow* p = weak.get())
+                    show_failure(p, kind, msg);
+            } catch (...) {
+            }
         });
     };
+    sending().insert(slot);
     const fil::Accept a = Runtime::get().soft_match_act(act.action, act.spool_id, act.target_spool_id, slot.dev_id, done);
-    if (!a.ok)
+    if (!a.ok) {
+        sending().erase(slot);
         show_failure(parent, a.kind, std::string());
+    }
 }
 
 // The tray as the printer reports it, for a spool the list does not show yet.
@@ -149,9 +167,13 @@ fil::Spool spool_of_tray(const fil::SlotKey& slot)
     return {};
 }
 
-// On the UI thread, outside the service's call: what the cloud has queued for the slot's spool.
-void on_soft_match(wxWindow* parent, const fil::SlotKey& slot, const std::string& rfid, const fil::SpoolService::LinkOutcome& out)
+// On the UI thread, outside the service's call: what the cloud has queued for the slot's spool. `asked` is the session
+// the queue was read under: a reply or a choice of another account (or plugin load) is dropped quietly.
+void on_soft_match(wxWindow* parent, const fil::SlotKey& slot, const std::string& rfid, const fil::Session& asked,
+                   const fil::SpoolService::LinkOutcome& out)
 {
+    if (!fil::same_account(asked, Runtime::get().session()))
+        return;
     if (!out.ok) {
         show_failure(parent, out.kind, out.message); // the marker stays
         return;
@@ -166,18 +188,19 @@ void on_soft_match(wxWindow* parent, const fil::SlotKey& slot, const std::string
                 row = r;
         SpoolRecordedDialog dlg(parent, row ? *row : spool_of_tray(slot));
         dlg.ShowModal();
-        dismiss(slot);
+        dismiss(slot, rfid);
         return;
     }
 
     NewOfficialSpoolDialog dlg(parent, *entry);
     if (dlg.ShowModal() != wxID_OK)
         return; // closed: nothing is sent and the marker stays
-    dismiss(slot);
+    if (!fil::same_account(asked, Runtime::get().session()))
+        return; // the account changed while the dialog was open
     const fil::NewSpoolChoice choice = dlg.choice() == NewOfficialSpoolDialog::Choice::RecordNew ? fil::NewSpoolChoice::AddNew :
                                                                                                    fil::NewSpoolChoice::Confirm;
     if (const std::optional<fil::SoftMatchAct> act = fil::soft_match_act_for(choice, dlg.hit_spool_id(), dlg.selected_candidate_id()))
-        send_choice(parent, slot, *act);
+        send_choice(parent, slot, rfid, *act);
 }
 
 } // namespace
@@ -199,7 +222,7 @@ void on_new_spool_hint(wxWindow* parent, MachineObject* obj, int ams_id, const s
             return;
         const fil::SlotKey slot{obj->get_dev_id(), ams_id, slot_id};
         const std::string  rfid = Runtime::get().new_spools().rfid(slot);
-        if (rfid.empty() || in_flight().count(slot) > 0)
+        if (rfid.empty() || in_flight().count(slot) > 0 || sending().count(slot) > 0)
             return;
 
         std::string ams_sn;
@@ -212,12 +235,13 @@ void on_new_spool_hint(wxWindow* parent, MachineObject* obj, int ams_id, const s
         req.dev_id = slot.dev_id;
         req.ams_sn = ams_sn;
         wxWeakRef<wxWindow> weak(parent);
-        req.done = [weak, slot, rfid](const fil::SpoolService::LinkOutcome& out) {
+        const fil::Session  asked = Runtime::get().session();
+        req.done = [weak, slot, rfid, asked](const fil::SpoolService::LinkOutcome& out) {
             // The dialogs are modal: they run after the service's call has returned.
-            wxTheApp->CallAfter([weak, slot, rfid, out] {
+            wxTheApp->CallAfter([weak, slot, rfid, asked, out] {
                 try {
                     if (wxWindow* p = weak.get())
-                        on_soft_match(p, slot, rfid, out);
+                        on_soft_match(p, slot, rfid, asked, out);
                 } catch (...) {
                 }
                 in_flight().erase(slot);

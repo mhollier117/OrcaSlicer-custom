@@ -54,7 +54,8 @@ struct KPrinter
 
 // The printers that take part, the selected one first, each once: connected, its info ready, not a LAN printer unless it
 // is the selected one, calibration supported (the flag, the tap, or the X1 series) and at least one nozzle diameter
-// known (the extruders', else the tap's).
+// known. The selected printer's diameters are its extruders', else the tap's; another printer's are the tap's when it
+// heard one (the model refreshes them only for the selected printer), else its extruders'.
 std::vector<KPrinter> k_copy_printers(const std::vector<KPrinterFacts>& printers);
 
 } // namespace Slic3r::BblPresetSync

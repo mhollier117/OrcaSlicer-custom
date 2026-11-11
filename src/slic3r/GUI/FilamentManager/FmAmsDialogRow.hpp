@@ -32,7 +32,6 @@ public:
     void on_confirmed(const std::string& tray_color, const std::vector<std::string>& tray_colors, int tray_ctype);
 
 private:
-    std::string dev_id() const;
     void        choose();
     void        clear_choice();
     void        update_texts(); // the spool text, the Clear link and the check box
@@ -47,6 +46,7 @@ private:
     Label*                           m_box_label{nullptr};
     std::optional<BblFilament::Spool> m_chosen;
     std::optional<BblFilament::Spool> m_current; // the spool the cloud has in this slot
+    std::string                      m_dev_id;   // the dialog's printer at on_popup, to find it again after an event loop
     bool                             m_combo_bound{false};
 };
 

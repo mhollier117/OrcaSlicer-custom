@@ -293,6 +293,10 @@ void PrinterTap::on_message(const std::string& dev_id, const std::string& text, 
             else if (m != 0) return; // :3006 "unsupported msg_type"
         }
 
+        // After a gap a diff cannot be merged into what the tap kept: the printer starts again from nothing.
+        if (auto old = m_printers.find(dev_id); old != m_printers.end() && now - old->second.facts.last_message_at > k_gap_seconds)
+            m_printers.erase(old);
+
         Entry& e = m_printers[dev_id];
         if (full) {
             e.parts = json::object();

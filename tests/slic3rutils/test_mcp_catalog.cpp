@@ -110,6 +110,7 @@ TEST_CASE("the filament_manager tool takes an action and a closed set of argumen
     const std::string description = tool->at("description").get<std::string>();
     CHECK(description.find("dry_run plans without sending") != std::string::npos);
     CHECK(description.find("for this session only") != std::string::npos);
+    CHECK(description.find("its candidates with the same fields") != std::string::npos);
     CHECK(description.find("binds it only when the printer reports") != std::string::npos);
     CHECK(tool->at("annotations").at("readOnlyHint") == false);
 }

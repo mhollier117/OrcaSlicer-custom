@@ -8,9 +8,12 @@
 #include "slic3r/GUI/FilamentManager/FmPresets.hpp"
 #include "slic3r/GUI/FilamentManager/FmPrinters.hpp"
 #include "slic3r/GUI/FilamentManager/FmProtocol.hpp"
+#include "slic3r/GUI/FilamentManager/FmRuntime.hpp"
+#include "slic3r/GUI/FilamentManager/FmSpoolPicker.hpp"
 #include "slic3r/GUI/FilamentManager/FmViewModel.hpp"
 #include "slic3r/Utils/BblFilament/LinkDriver.hpp"
 #include "slic3r/Utils/BblFilament/Linker.hpp"
+#include "slic3r/Utils/BblFilament/SpoolCloud.hpp"
 
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -998,6 +1001,27 @@ TEST_CASE("A batch create routes spools to be assigned apart and answers the spo
     CHECK(t.rig.cloud->count("update 1000001") == 1);
 }
 
+TEST_CASE("A batch create with a malformed part creates and assigns nothing", "[FilamentManager]")
+{
+    const json bad[] = {json{{"creates", json::array({read_from_slot("S", "0", "3")})}, {"updates", json::object()}},
+                        json{{"creates", json::array({read_from_slot("S", "0", "3")})}, {"updates", json::array({json("x")})}},
+                        json{{"creates", json::array({read_from_slot("S", "0", "3"), json(5)})}},
+                        json{{"creates", json::array({page_spool("P")})}, {"updates", 5}},
+                        json::array({read_from_slot("S", "0", "3")})};
+    for (const json& payload : bad) {
+        VmRig t(true, true);
+        t.rig.cloud->fill(1);
+        t.pull();
+        json a = t.call("spool", "batch_create", payload);
+        INFO(payload.dump());
+        CHECK(a["error_code"] == 3);
+        t.rig.settle();
+        CHECK(t.assigned.empty());
+        CHECK(t.rig.cloud->count("create") == 0);
+        CHECK(t.rig.cloud->count("update") == 0);
+    }
+}
+
 TEST_CASE("An update shows in the answer at once", "[FilamentManager]")
 {
     VmRig t(false);
@@ -1511,4 +1535,62 @@ TEST_CASE("Link mode names read back as the mode they name", "[FilamentManager]"
         REQUIRE(back.has_value());
         CHECK(*back == m);
     }
+}
+
+TEST_CASE("The soft-match queue shows the spool ids and facts of each entry and its candidates, never an RFID or a serial", "[FilamentManager]")
+{
+    fil::Spool hit;
+    hit.id         = "11";
+    hit.vendor     = "Bambu Lab";
+    hit.name       = "PLA Basic";
+    hit.color      = "#FF0000FF";
+    hit.net_weight = 812.4;
+    hit.rfid       = "0123456789ABCDEF0123456789ABCDEF";
+    hit.dev_id     = "01P00A391800123";
+    hit.ams_sn     = "19C06A4A2900456";
+    fil::Spool candidate = hit;
+    candidate.id         = "12";
+    candidate.name       = "PLA Matte";
+    candidate.net_weight = 400;
+    fil::SoftMatchEntry entry;
+    entry.hit        = hit;
+    entry.candidates = {candidate};
+    fil::SoftMatchQueue queue;
+    queue.entries = {entry};
+
+    const json items = fm::soft_match_items(queue);
+    REQUIRE(items.size() == 1);
+    CHECK(items[0]["spool_id"] == "11");
+    CHECK(items[0]["brand"] == "Bambu Lab");
+    CHECK(items[0]["name"] == "PLA Basic");
+    CHECK(items[0]["color"] == "#FF0000FF");
+    CHECK(items[0]["remaining_g"] == 812);
+    REQUIRE(items[0]["candidates"].size() == 1);
+    CHECK(items[0]["candidates"][0]["spool_id"] == "12");
+    CHECK(items[0]["candidates"][0]["name"] == "PLA Matte");
+    CHECK(items[0]["candidates"][0]["remaining_g"] == 400);
+    const std::string text = items.dump();
+    CHECK(text.find(hit.rfid) == std::string::npos);
+    CHECK(text.find(hit.dev_id) == std::string::npos);
+    CHECK(text.find(hit.ams_sn) == std::string::npos);
+    CHECK(fm::soft_match_items(fil::SoftMatchQueue{}).empty());
+}
+
+TEST_CASE("A slot shows a spool with several colours only where the printer takes several", "[FilamentManager]")
+{
+    fil::Spool one;
+    one.color = "#FF0000FF";
+    fil::Spool two = one;
+    two.colors     = {"#FF0000FF", "#00FF00FF"};
+    fil::Spool five = one;
+    five.colors     = {"#FF0000FF", "#00FF00FF", "#0000FFFF", "#FFFFFFFF", "#000000FF"};
+    fil::Spool unreadable = one;
+    unreadable.colors     = {"#FF0000FF", "nope"};
+
+    CHECK(fm::slot_shows_colours(one, false, 4));
+    CHECK(fm::slot_shows_colours(one, true, 4));
+    CHECK_FALSE(fm::slot_shows_colours(two, false, 4));
+    CHECK(fm::slot_shows_colours(two, true, 4));
+    CHECK_FALSE(fm::slot_shows_colours(five, true, 4));
+    CHECK(fm::slot_shows_colours(unreadable, false, 4)); // the colour that cannot be read is left out
 }

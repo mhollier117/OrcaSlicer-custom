@@ -389,7 +389,8 @@ void register_filament_manager_tools(McpService& service)
         "slots for this session; link_status settings shows the mode, where it comes from and the slots. assign puts a spool without RFID into "
         "a slot, but binds it only when the printer reports that spool's filament and colour in that slot (within two minutes); unassign "
         "clears the slot of a spool without RFID now (in dry_run it answers what it would send); sync_now runs the next round at once; "
-        "soft_match reads the cloud's queue of new official spools of one AMS (shown in link_status); new_spools lists the slots that show the new-spool marker; soft_match_act answers an entry of that queue (accept the match, "
+        "soft_match reads the cloud's queue of new official spools of one AMS (shown in link_status: per entry the spool id, brand, name, "
+        "colour and grams left, and its candidates with the same fields); new_spools lists the slots that show the new-spool marker; soft_match_act answers an entry of that queue (accept the match, "
         "link_other to another spool, or create_new; the outcome shows in status recent). assign, unassign and soft_match_act fail unless "
         "linking is on (unassign also in dry_run), and assign and unassign fail for a slot outside the session's slots. Printers are named "
         "by their names.",

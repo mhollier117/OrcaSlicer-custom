@@ -15,6 +15,7 @@
 #include <wx/listctrl.h>
 #include <wx/pen.h>
 #include <wx/sizer.h>
+#include <wx/string.h>
 #include <wx/textctrl.h>
 
 #include <cctype>
@@ -98,21 +99,29 @@ std::vector<wxColour> spool_colours(const fil::Spool& spool)
     return out;
 }
 
-SpoolPicker::SpoolPicker(wxWindow* parent, std::vector<fil::Spool> spools, const std::function<bool(const fil::Spool&)>& choosable)
+bool slot_shows_colours(const fil::Spool& spool, bool several_per_slot, std::size_t max_colours)
+{
+    const std::size_t n = spool_colours(spool).size();
+    return n <= 1 || (several_per_slot && n <= max_colours);
+}
+
+SpoolPicker::SpoolPicker(wxWindow* parent, std::vector<fil::Spool> spools, const std::function<wxString(const fil::Spool&)>& why_not)
     : DPIDialog(parent, wxID_ANY, _L("Choose a spool"), wxDefaultPosition, wxDefaultSize, wxCAPTION | wxCLOSE_BOX | wxRESIZE_BORDER)
 {
     // Choosable spools first, each group in the service's order.
-    std::vector<fil::Spool> greyed;
+    std::vector<std::pair<fil::Spool, wxString>> greyed;
     for (fil::Spool& s : spools) {
-        if (choosable && choosable(s))
+        wxString why = why_not ? why_not(s) : wxString();
+        if (why.empty()) {
             m_spools.push_back(std::move(s));
-        else
-            greyed.push_back(std::move(s));
+            m_why.emplace_back();
+        } else {
+            greyed.emplace_back(std::move(s), std::move(why));
+        }
     }
-    m_ok.assign(m_spools.size(), true);
-    for (fil::Spool& s : greyed) {
+    for (auto& [s, why] : greyed) {
         m_spools.push_back(std::move(s));
-        m_ok.push_back(false);
+        m_why.push_back(std::move(why));
     }
 
     SetBackgroundColour(*wxWHITE);
@@ -154,12 +163,13 @@ SpoolPicker::SpoolPicker(wxWindow* parent, std::vector<fil::Spool> spools, const
     m_list->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent& e) { pick(e.GetIndex()); });
     m_list->Bind(wxEVT_MOTION, [this](wxMouseEvent& e) {
         int        flags = 0;
-        const long row   = m_list->HitTest(e.GetPosition(), flags);
-        const bool tip   = row >= 0 && !row_choosable(row);
-        if (tip != m_tip_shown) {
-            m_tip_shown = tip;
-            if (tip)
-                m_list->SetToolTip(_L("This filament has no preset for this printer."));
+        long       row   = m_list->HitTest(e.GetPosition(), flags);
+        if (row < 0 || static_cast<std::size_t>(row) >= m_rows.size() || row_choosable(row))
+            row = -1;
+        if (row != m_tip_row) {
+            m_tip_row = row;
+            if (row >= 0)
+                m_list->SetToolTip(m_why[m_rows[static_cast<std::size_t>(row)]]);
             else
                 m_list->UnsetToolTip();
         }
@@ -198,12 +208,14 @@ void SpoolPicker::fill()
         m_list->SetItem(row, 1, wxString::Format(_L("%d of %d g"), static_cast<int>(fil::bounded_grams(s.net_weight)),
                                                  static_cast<int>(fil::bounded_grams(s.total_net_weight))));
         m_list->SetItem(row, 2, utf8(s.note));
-        if (!m_ok[i])
+        if (!m_why[i].empty())
             m_list->SetItemTextColour(row, wxColour(172, 172, 172));
         m_rows.push_back(i);
     }
     m_list->Thaw();
     m_buttons->GetOK()->Disable();
+    m_tip_row = -1; // the rows changed
+    m_list->UnsetToolTip();
 
     if (m_spools.empty())
         m_help->SetLabel(_L("No spool can be chosen: spools with an RFID tag, spools in a printer and spools with a change waiting are not listed."));
@@ -215,7 +227,7 @@ void SpoolPicker::fill()
 
 bool SpoolPicker::row_choosable(long row) const
 {
-    return row >= 0 && static_cast<std::size_t>(row) < m_rows.size() && m_ok[m_rows[static_cast<std::size_t>(row)]];
+    return row >= 0 && static_cast<std::size_t>(row) < m_rows.size() && m_why[m_rows[static_cast<std::size_t>(row)]].empty();
 }
 
 void SpoolPicker::pick(long row)

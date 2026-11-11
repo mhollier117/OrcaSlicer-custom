@@ -9,6 +9,7 @@
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/Utils/BBLPrinterAgent.hpp"
 #include "slic3r/Utils/BblFilament/PluginGate.hpp"
+#include "slic3r/Utils/BblFilament/Spool.hpp"
 #include "slic3r/Utils/BblFilament/SpoolCloud.hpp"
 #include "slic3r/Utils/CloudProvider.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
@@ -66,6 +67,23 @@ const char* fail_name(fil::FailKind kind)
 }
 
 } // namespace
+
+json soft_match_items(const fil::SoftMatchQueue& queue)
+{
+    const auto spool_json = [](const fil::Spool& s) {
+        return json{{"spool_id", s.id}, {"brand", s.vendor}, {"name", s.name}, {"color", s.color}, {"remaining_g", fil::bounded_grams(s.net_weight)}};
+    };
+    json items = json::array();
+    for (const fil::SoftMatchEntry& e : queue.entries) {
+        json item       = spool_json(e.hit);
+        json candidates = json::array();
+        for (const fil::Spool& c : e.candidates)
+            candidates.push_back(spool_json(c));
+        item["candidates"] = std::move(candidates);
+        items.push_back(std::move(item));
+    }
+    return items;
+}
 
 Runtime& Runtime::get()
 {
@@ -176,10 +194,12 @@ fil::LinkDriver&   Runtime::linker() { return *m_linker; }
 
 void Runtime::note_list_state()
 {
-    // The list is gone (signed out, another account, the plugin reloaded): the linker forgets everything.
+    // The list is gone (signed out, another account, the plugin reloaded): the linker and the tap forget everything.
     const bool have = m_service->status().have_list;
     if (m_had_list && !have) {
         m_linker->reset();
+        m_tap->clear();
+        m_pushall_asked_at.clear();
         m_new_spools.clear();
     }
     m_had_list = have;
@@ -203,6 +223,12 @@ void Runtime::tick()
             m_timer->Stop();
             return;
         }
+        // Another account, a sign-out or a reloaded plugin: what the tap heard before belongs to the old session.
+        if (m_tap_session && (m_tap_session->signed_in != s.signed_in || m_tap_session->uid != s.uid || m_tap_session->generation != s.generation)) {
+            m_tap->clear();
+            m_pushall_asked_at.clear();
+        }
+        m_tap_session = s;
         if (!s.signed_in)
             return;
         if (wxGetApp().app_config == nullptr)
@@ -219,15 +245,17 @@ void Runtime::tick()
             }
         }
 
+        // A printer that is silent, offline or gone starts again from its next full state.
+        DeviceManager* devices = wxGetApp().getDeviceManager();
         for (const std::string& dev : m_tap->printers()) {
-            const fil::PrinterFacts* f = m_tap->facts(dev);
-            if (f != nullptr && now - f->last_message_at > k_tap_silence_s) {
+            const fil::PrinterFacts* f       = m_tap->facts(dev);
+            MachineObject*           machine = devices != nullptr ? find_printer(*devices, dev) : nullptr;
+            if ((f != nullptr && now - f->last_message_at > k_tap_silence_s) || machine == nullptr || !machine->is_online()) {
                 m_tap->forget(dev);
                 m_pushall_asked_at.erase(dev);
             }
         }
 
-        DeviceManager* devices = wxGetApp().getDeviceManager();
         if (devices != nullptr) {
             for (const auto& [dev, machine] : account_printers(*devices)) {
                 if (machine == nullptr || !machine->is_online())
@@ -329,15 +357,11 @@ fil::Accept Runtime::request_soft_match(const fil::PrinterView& printer, int ams
     req.ams_sn            = sn->second;
     const std::string name = printer.name;
     req.done = [this, name, ams_id](const fil::SpoolService::LinkOutcome& out) {
-        // Brand, name, colour and the number of candidates; never an RFID.
         json j = {{"printer", name}, {"ams_id", ams_id}, {"at", unix_now()}, {"ok", out.ok}, {"kind", out.ok ? "" : fail_name(out.kind)}};
         if (out.ok) {
             const fil::SoftMatchQueue queue = fil::parse_soft_match(out.body);
-            json                      items = json::array();
-            for (const fil::SoftMatchEntry& e : queue.entries)
-                items.push_back({{"brand", e.hit.vendor}, {"name", e.hit.name}, {"color", e.hit.color}, {"candidates", e.candidates.size()}});
             j["entries"] = queue.entries.size();
-            j["items"]   = std::move(items);
+            j["items"]   = soft_match_items(queue);
         }
         m_soft_match = std::move(j);
     };

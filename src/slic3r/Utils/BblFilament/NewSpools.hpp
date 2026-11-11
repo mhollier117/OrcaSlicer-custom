@@ -18,6 +18,8 @@ class NewSpools
 public:
     void add(const SlotKey& slot, const std::string& rfid);
     void dismiss(const SlotKey& slot);
+    // Dismisses the marker only while it still names this RFID; true when it did.
+    bool dismiss_if(const SlotKey& slot, const std::string& rfid);
     // Drops markers whose slot is empty or reports another spool, on printers that take part with fresh data.
     void reconcile(const std::vector<PrinterView>& printers);
     bool                 has(const SlotKey& slot) const;

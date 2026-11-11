@@ -325,9 +325,17 @@ json ViewModel::dispatch(const Request& r)
             return write_result(m_service.add(*spool, quantity));
         }
         if (r.action == "batch_create") {
+            // The whole payload is checked before anything is sent.
+            if (!p.is_object())
+                return bad_request();
             json creates = p.value("creates", json::array());
             json updates = p.value("updates", json::array());
-            if (m_host.create_and_assign && creates.is_array()) {
+            const auto all_objects = [](const json& list) {
+                return list.is_array() && std::all_of(list.begin(), list.end(), [](const json& e) { return e.is_object(); });
+            };
+            if (!all_objects(creates) || !all_objects(updates))
+                return bad_request();
+            if (m_host.create_and_assign) {
                 json rest = json::array();
                 for (const json& c : creates) {
                     if (const auto slot = slot_to_assign(c))

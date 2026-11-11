@@ -6,6 +6,7 @@
 #include "slic3r/Utils/BblFilament/Linker.hpp"
 #include "slic3r/Utils/BblFilament/NewSpools.hpp"
 #include "slic3r/Utils/BblFilament/PrinterTap.hpp"
+#include "slic3r/Utils/BblFilament/SpoolCloud.hpp"
 #include "slic3r/Utils/BblFilament/SpoolService.hpp"
 
 #include <nlohmann/json.hpp>
@@ -24,6 +25,10 @@
 namespace Slic3r::GUI::Fm {
 
 using json = nlohmann::json;
+
+// The entries of a soft-match queue as the MCP tool shows them: per entry the spool id (a cloud id, not a secret),
+// brand, name, colour and grams left of the hit, and its candidates with the same fields. Never an RFID or a serial.
+json soft_match_items(const BblFilament::SoftMatchQueue& queue);
 
 // The app-side owner of the spool service, the printer tap and the linker. UI thread only.
 class Runtime
@@ -97,6 +102,7 @@ private:
     bool                                       m_had_list{false};
     long long                                  m_pull_asked_at{0};
     std::map<std::string, long long>           m_pushall_asked_at; // by dev id
+    std::optional<BblFilament::Session>        m_tap_session;      // the session of the last tick
     BblFilament::NewSpools                     m_new_spools;
     json                                       m_soft_match = nullptr;
     std::optional<BblFilament::LinkMode>       m_session_mode;

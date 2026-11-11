@@ -153,10 +153,26 @@ TEST_CASE("k_copy_printers takes the tap's diameter and PA support when the prin
     CHECK(out[1].dev_id == "OTHER");
     CHECK(out[1].diameters == std::vector<float>{0.4f});
 
-    SECTION("the printer's own diameters win over the tap's")
+    SECTION("the tap's diameter wins over the model's for a printer that is not selected")
     {
         other.diameters  = {0.6f};
         const auto mixed = sync::k_copy_printers({other});
+        REQUIRE(mixed.size() == 1);
+        CHECK(mixed[0].diameters == std::vector<float>{0.4f});
+    }
+    SECTION("the model's diameters win over the tap's for the selected printer")
+    {
+        other.selected   = true;
+        other.diameters  = {0.6f};
+        const auto mixed = sync::k_copy_printers({other});
+        REQUIRE(mixed.size() == 1);
+        CHECK(mixed[0].diameters == std::vector<float>{0.6f});
+    }
+    SECTION("a printer that is not selected keeps the model's diameters while the tap has none")
+    {
+        other.diameters    = {0.6f};
+        other.tap_diameter = 0;
+        const auto mixed   = sync::k_copy_printers({other});
         REQUIRE(mixed.size() == 1);
         CHECK(mixed[0].diameters == std::vector<float>{0.6f});
     }

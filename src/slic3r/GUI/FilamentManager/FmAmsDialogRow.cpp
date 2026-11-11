@@ -1,6 +1,7 @@
 #include "FmAmsDialogRow.hpp"
 
 #include "FmPresets.hpp"
+#include "FmPrinters.hpp"
 #include "FmRuntime.hpp"
 #include "FmSpoolPicker.hpp"
 #include "libslic3r/AppConfig.hpp"
@@ -8,6 +9,7 @@
 #include "slic3r/GUI/AMSMaterialsSetting.hpp"
 #include "slic3r/GUI/DeviceCore/DevDefs.h"
 #include "slic3r/GUI/DeviceCore/DevFilaSystem.h"
+#include "slic3r/GUI/DeviceCore/DevManager.h"
 #include "slic3r/GUI/DeviceManager.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/I18N.hpp"
@@ -29,8 +31,10 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Slic3r::GUI::Fm {
@@ -53,6 +57,19 @@ wxString spool_label(const fil::Spool& s)
 int grams_left(const fil::Spool& s) { return static_cast<int>(fil::bounded_grams(s.net_weight)); }
 
 std::vector<std::string> colours_of(const fil::Spool& s) { return s.colors.empty() ? std::vector<std::string>{s.color} : s.colors; }
+
+// The dialog's printer while the device manager still holds that very object for `dev_id`; null once it was deleted or
+// replaced (sign-out, a list refresh), and then the dialog's pointer must not be used.
+MachineObject* live_printer(const AMSMaterialsSetting* dlg, const std::string& dev_id)
+{
+    if (dlg == nullptr || dlg->obj == nullptr || dev_id.empty())
+        return nullptr;
+    DeviceManager* devices = wxGetApp().getDeviceManager();
+    if (devices == nullptr)
+        return nullptr;
+    MachineObject* found = find_printer(*devices, dev_id);
+    return found == dlg->obj ? found : nullptr;
+}
 
 } // namespace
 
@@ -113,12 +130,11 @@ AmsDialogRow::AmsDialogRow(wxWindow* parent, AMSMaterialsSetting* dlg) : wxPanel
     Hide(); // until on_popup decides
 }
 
-std::string AmsDialogRow::dev_id() const { return m_dlg != nullptr && m_dlg->obj != nullptr ? m_dlg->obj->get_dev_id() : std::string(); }
-
 void AmsDialogRow::on_popup()
 {
     m_chosen.reset();
     m_current.reset();
+    m_dev_id.clear();
     m_box->SetValue(false);
     bool show = false;
     try {
@@ -131,10 +147,13 @@ void AmsDialogRow::on_popup()
             });
             m_combo_bound = true;
         }
-        AppConfig*     config = wxGetApp().app_config;
-        MachineObject* obj    = m_dlg->obj;
+        AppConfig* config = wxGetApp().app_config;
+        // The dialog was just handed its printer; the row keeps its dev id to find it again later.
+        if (m_dlg->obj != nullptr)
+            m_dev_id = m_dlg->obj->get_dev_id();
+        MachineObject* obj = live_printer(m_dlg, m_dev_id);
         show = config != nullptr && config->get_bool("filament_manager_enabled") && obj != nullptr && m_dlg->m_is_third && !m_dlg->m_view_only &&
-               m_dlg->ams_id >= 0 && m_dlg->ams_id < VIRTUAL_TRAY_DEPUTY_ID && Runtime::get().link_available(obj->get_dev_id());
+               m_dlg->ams_id >= 0 && m_dlg->ams_id < VIRTUAL_TRAY_DEPUTY_ID && Runtime::get().link_available(m_dev_id);
         if (show) {
             // A spool with an RFID tag is found by its tag: there is nothing to choose for it.
             if (std::shared_ptr<DevFilaSystem> fila = obj->GetFilaSystem())
@@ -143,10 +162,9 @@ void AmsDialogRow::on_popup()
                         show = false;
         }
         if (show) {
-            const std::string dev  = obj->get_dev_id();
             const std::string slot = std::to_string(m_dlg->slot_id);
             for (const fil::Spool& r : Runtime::get().service().confirmed())
-                if (r.rfid.empty() && r.in_printer && r.dev_id == dev && r.ams_id == m_dlg->ams_id && r.slot_id == slot) {
+                if (r.rfid.empty() && r.in_printer && r.dev_id == m_dev_id && r.ams_id == m_dlg->ams_id && r.slot_id == slot) {
                     m_current = r;
                     break;
                 }
@@ -202,8 +220,10 @@ void AmsDialogRow::update_box()
 
 void AmsDialogRow::choose()
 {
-    if (m_dlg == nullptr || m_dlg->obj == nullptr)
+    const MachineObject* printer = live_printer(m_dlg, m_dev_id);
+    if (printer == nullptr)
         return;
+    const bool several_per_slot = printer->is_support_filament_manual_multi_color;
     fil::SpoolService&          service = Runtime::get().service();
     const std::set<std::string> busy    = service.busy_ids();
     std::vector<fil::Spool>     spools;
@@ -214,14 +234,25 @@ void AmsDialogRow::choose()
     for (const auto& item : m_dlg->map_filament_items)
         listed.insert(item.second.filament_id);
 
-    SpoolPicker picker(m_dlg, spools, [&listed](const fil::Spool& s) { return !s.filament_id.empty() && listed.count(to_orca_id(s.filament_id)) > 0; });
-    if (picker.ShowModal() != wxID_OK)
+    // Only what Confirm can assign: a spool with a preset for this printer and colours the slot can show.
+    SpoolPicker picker(m_dlg, spools, [&listed, several_per_slot](const fil::Spool& s) {
+        if (s.filament_id.empty() || listed.count(to_orca_id(s.filament_id)) == 0)
+            return _L("This filament has no preset for this printer.");
+        if (!slot_shows_colours(s, several_per_slot, ColorPickerPopup::MAX_EDITABLE_COLORS))
+            return _L("This printer cannot show a spool with several colours in one slot.");
+        return wxString();
+    });
+    const int answer = picker.ShowModal();
+    // The printer may have been deleted (sign-out, a list refresh) while the picker was open.
+    if (answer != wxID_OK || live_printer(m_dlg, m_dev_id) == nullptr)
         return;
+    std::optional<fil::Spool> chosen;
     for (const fil::Spool& s : spools)
         if (s.id == picker.chosen_id())
-            m_chosen = s;
-    if (!m_chosen)
+            chosen = s;
+    if (!chosen || !slot_shows_colours(*chosen, several_per_slot, ColorPickerPopup::MAX_EDITABLE_COLORS))
         return;
+    m_chosen = std::move(chosen);
 
     // Select the spool's filament the way Popup() preselects the tray's.
     const std::string orca_id = to_orca_id(m_chosen->filament_id);
@@ -232,10 +263,8 @@ void AmsDialogRow::choose()
     if (selection < 0)
         m_dlg->m_comboBox_filament->SetValue(wxEmptyString);
 
-    // The colours, as the colour picker sets them (several only where the printer takes them).
-    std::vector<wxColour> colours = spool_colours(*m_chosen);
-    if (colours.size() > 1 && (colours.size() > ColorPickerPopup::MAX_EDITABLE_COLORS || !m_dlg->obj->is_support_filament_manual_multi_color))
-        colours.resize(1);
+    // The colours, as the colour picker sets them (the picker offered only spools whose colours the slot can show).
+    const std::vector<wxColour> colours = spool_colours(*m_chosen);
     if (!colours.empty()) {
         m_dlg->set_ctype(colours.size() > 1 ? m_chosen->color_type : 2);
         m_dlg->set_color(colours.front());
@@ -270,9 +299,10 @@ void AmsDialogRow::relayout()
 void AmsDialogRow::on_confirmed(const std::string& tray_color, const std::vector<std::string>& tray_colors, int tray_ctype)
 {
     try {
-        if (!IsShown() || m_dlg == nullptr || m_dlg->obj == nullptr)
+        // The printer may have been deleted while the dialog was open: nothing is assigned to a printer that is gone.
+        if (!IsShown() || live_printer(m_dlg, m_dev_id) == nullptr)
             return;
-        const fil::SlotKey slot{dev_id(), m_dlg->ams_id, std::to_string(m_dlg->slot_id)};
+        const fil::SlotKey slot{m_dev_id, m_dlg->ams_id, std::to_string(m_dlg->slot_id)};
         if (m_chosen) {
             // Only while the dialog still sets the spool's filament and colours.
             if (to_orca_id(m_chosen->filament_id) != m_dlg->ams_filament_id)

@@ -758,9 +758,8 @@ void BblPresetSyncController::k_copy_step()
     const auto printers = run_on_ui<std::vector<sync::KPrinter>>([]() {
         DeviceManager* dev = wxGetApp().getDeviceManager();
         if (dev == nullptr) return std::vector<sync::KPrinter>();
-        // The tap hears printers only while the Filament Manager is enabled.
-        AppConfig*                     config = wxGetApp().app_config;
-        const BblFilament::PrinterTap* tap    = config != nullptr && config->get_bool("filament_manager_enabled") ? &Fm::Runtime::get().tap() : nullptr;
+        // The tap hears printers only while it is fed.
+        const BblFilament::PrinterTap* tap = Fm::tap_enabled() ? &Fm::Runtime::get().tap() : nullptr;
         MachineObject*                 selected = dev->get_selected_machine();
         std::vector<sync::KPrinterFacts> facts;
         if (selected != nullptr) facts.push_back(k_printer_facts(*selected, true, tap));

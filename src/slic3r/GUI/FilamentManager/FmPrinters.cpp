@@ -72,11 +72,16 @@ fil::PrinterView view_of(DeviceManager& devices, MachineObject& m, MachineObject
 
 } // namespace
 
+bool tap_enabled()
+{
+    const AppConfig* config = wxGetApp().app_config;
+    return config != nullptr && (config->get_bool("filament_manager_enabled") || config->get_bool("sync_bbl_user_preset"));
+}
+
 void on_printer_message(MachineObject& printer, const std::string& message)
 {
     try {
-        AppConfig* config = wxGetApp().app_config;
-        if (config == nullptr || !config->get_bool("filament_manager_enabled") || !is_bambu(printer))
+        if (!tap_enabled() || !is_bambu(printer))
             return;
         Runtime::get().tap().on_message(printer.get_dev_id(), message, static_cast<long long>(std::time(nullptr)));
     } catch (...) {
@@ -84,6 +89,19 @@ void on_printer_message(MachineObject& printer, const std::string& message)
 }
 
 std::map<std::string, MachineObject*> account_printers(DeviceManager& devices) { return devices.get_my_cloud_machine_list(BBL_PRINTER_AGENT_ID); }
+
+MachineObject* find_printer(DeviceManager& devices, const std::string& dev_id)
+{
+    if (dev_id.empty())
+        return nullptr;
+    if (MachineObject* selected = devices.get_selected_machine(); selected != nullptr && selected->get_dev_id() == dev_id)
+        return selected;
+    if (MachineObject* m = devices.get_my_machine(dev_id))
+        return m;
+    if (MachineObject* m = devices.get_user_machine(dev_id, BBL_CLOUD_PROVIDER))
+        return m;
+    return devices.get_local_machine(dev_id);
+}
 
 std::vector<fil::PrinterView> printer_views(DeviceManager* devices, const fil::PrinterTap& tap, long long now)
 {

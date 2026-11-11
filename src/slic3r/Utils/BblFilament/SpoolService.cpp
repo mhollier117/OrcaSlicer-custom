@@ -42,6 +42,11 @@ std::string string_field(const json& j, const char* key)
 
 } // namespace
 
+bool same_account(const Session& a, const Session& b)
+{
+    return is_signed_in(a) && is_signed_in(b) && a.uid == b.uid && a.generation == b.generation;
+}
+
 SpoolService::SpoolService(ServiceDeps deps) : deps_(std::move(deps)), alive_(std::make_shared<int>(0)) {}
 
 SpoolService::~SpoolService()

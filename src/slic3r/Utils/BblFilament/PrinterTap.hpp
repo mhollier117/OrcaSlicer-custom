@@ -46,8 +46,11 @@ struct PrinterFacts
 class PrinterTap
 {
 public:
-    // Ignores anything that is not a push_status message. Never throws.
+    // Ignores anything that is not a push_status message. When the previous status message of that printer is more than
+    // k_gap_seconds old, the printer is forgotten first: what it held then is not taken as current. Never throws.
     void on_message(const std::string& dev_id, const std::string& text, long long now);
+
+    static constexpr long long k_gap_seconds = 60;
     // Null when the printer is unknown. The pointer is valid until the next call that changes the tap.
     const PrinterFacts*      facts(const std::string& dev_id) const;
     std::vector<std::string> printers() const;

@@ -55,8 +55,11 @@ std::vector<KPrinter> k_copy_printers(const std::vector<KPrinterFacts>& printers
         p.dev_id  = f.dev_id;
         p.name    = f.name;
         p.limited = !f.series_x1;
-        for (const float d : f.diameters)
-            if (d > 0.0f && std::find(p.diameters.begin(), p.diameters.end(), d) == p.diameters.end()) p.diameters.push_back(d);
+        // The model's diameters are refreshed only while the printer is selected: for another printer the tap's wins.
+        if (!f.selected && f.tap_diameter > 0) p.diameters.push_back(static_cast<float>(f.tap_diameter));
+        if (p.diameters.empty())
+            for (const float d : f.diameters)
+                if (d > 0.0f && std::find(p.diameters.begin(), p.diameters.end(), d) == p.diameters.end()) p.diameters.push_back(d);
         if (p.diameters.empty() && f.tap_diameter > 0) p.diameters.push_back(static_cast<float>(f.tap_diameter));
         if (p.diameters.empty()) return;
         out.push_back(std::move(p));

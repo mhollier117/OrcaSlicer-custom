@@ -5,6 +5,7 @@
 
 #include <wx/colour.h>
 #include <wx/gdicmn.h>
+#include <wx/string.h>
 
 #include <cstddef>
 #include <functional>
@@ -24,12 +25,16 @@ namespace Slic3r::GUI::Fm {
 // The colours of a spool ("#RRGGBB" or "#RRGGBBAA"); colours that cannot be read are left out.
 std::vector<wxColour> spool_colours(const BblFilament::Spool& spool);
 
-// Lets the user choose one of the given spools (modal). A spool for which `choosable` is false is shown greyed at the
-// end and cannot be chosen.
+// Whether a slot can show the spool's colours: one colour, or several on a printer that takes several colours per slot
+// and no more than `max_colours` (what the slot dialog's colour picker edits).
+bool slot_shows_colours(const BblFilament::Spool& spool, bool several_per_slot, std::size_t max_colours);
+
+// Lets the user choose one of the given spools (modal). A spool for which `why_not` gives a text is shown greyed at the
+// end, with that text as its tooltip, and cannot be chosen.
 class SpoolPicker : public DPIDialog
 {
 public:
-    SpoolPicker(wxWindow* parent, std::vector<BblFilament::Spool> spools, const std::function<bool(const BblFilament::Spool&)>& choosable);
+    SpoolPicker(wxWindow* parent, std::vector<BblFilament::Spool> spools, const std::function<wxString(const BblFilament::Spool&)>& why_not);
 
     // The id of the chosen spool after ShowModal() returned wxID_OK.
     const std::string& chosen_id() const { return m_chosen; }
@@ -43,10 +48,10 @@ private:
     void pick(long row);
 
     std::vector<BblFilament::Spool> m_spools; // choosable ones first
-    std::vector<bool>               m_ok;     // per spool
+    std::vector<wxString>           m_why;    // per spool: empty when it can be chosen, else why not
     std::vector<std::size_t>        m_rows;   // list row -> index into m_spools
     std::string                     m_chosen;
-    bool                            m_tip_shown{false};
+    long                            m_tip_row{-1};
 
     TextInput*     m_search{nullptr};
     wxListView*    m_list{nullptr};
