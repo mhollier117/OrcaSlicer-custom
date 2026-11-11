@@ -4,6 +4,7 @@
 #include "FmViewModel.hpp"
 #include "slic3r/Utils/BblFilament/LinkDriver.hpp"
 #include "slic3r/Utils/BblFilament/Linker.hpp"
+#include "slic3r/Utils/BblFilament/NewSpools.hpp"
 #include "slic3r/Utils/BblFilament/PrinterTap.hpp"
 #include "slic3r/Utils/BblFilament/SpoolService.hpp"
 
@@ -43,8 +44,8 @@ public:
     void attach(ViewModel* vm);
     void detach(ViewModel* vm);
 
-    // Slots where a new official spool was registered in this session (for the slot marker).
-    const std::set<BblFilament::SlotKey>& new_spool_slots() const { return m_new_spools; }
+    // Slots that hold an official spool registered in this session (for the slot marker).
+    BblFilament::NewSpools& new_spools() { return m_new_spools; }
 
     // Reads the soft-match queue of one AMS; the result shows in soft_match_json().
     BblFilament::Accept request_soft_match(const BblFilament::PrinterView& printer, int ams_id);
@@ -77,7 +78,7 @@ private:
     bool                                       m_had_list{false};
     long long                                  m_pull_asked_at{0};
     std::map<std::string, long long>           m_pushall_asked_at; // by dev id
-    std::set<BblFilament::SlotKey>             m_new_spools;
+    BblFilament::NewSpools                     m_new_spools;
     json                                       m_soft_match = nullptr;
 };
 

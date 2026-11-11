@@ -326,6 +326,26 @@ void AMSControl::on_retry()
     post_event(wxCommandEvent(EVT_AMS_RETRY));
 }
 
+void AMSControl::dismiss_filament_hint(const std::string& ams_id, const std::string& slot_id)
+{
+    auto it = m_ams_item_list.find(ams_id);
+    if (it == m_ams_item_list.end() || !it->second) return;
+    auto libs = it->second->get_can_lib_list();
+    auto lib_it = libs.find(slot_id);
+    if (lib_it != libs.end() && lib_it->second)
+    lib_it->second->set_new_filament_hint(false);
+}
+
+void AMSControl::show_filament_hint(const std::string& ams_id, const std::string& slot_id)
+{
+    auto it = m_ams_item_list.find(ams_id);
+    if (it == m_ams_item_list.end() || !it->second) return;
+    auto libs = it->second->get_can_lib_list();
+    auto lib_it = libs.find(slot_id);
+    if (lib_it != libs.end() && lib_it->second)
+        lib_it->second->set_new_filament_hint(true);
+}
+
 AMSControl::~AMSControl()
 {
     if (m_ams_dry_ctr_win) {

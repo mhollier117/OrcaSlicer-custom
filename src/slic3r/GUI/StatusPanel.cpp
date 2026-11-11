@@ -134,6 +134,7 @@
 
 #include "ThermalPreconditioningDialog.hpp"
 #include "Monitor.hpp"
+#include "FilamentManager/FmNewSpool.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
 #include <wx/dcgraph.h>
 
@@ -3213,6 +3214,7 @@ void StatusPanel::wire_controls()
     Bind(EVT_AMS_REFRESH_RFID, &StatusPanel::on_ams_refresh_rfid, this);
     Bind(EVT_AMS_ON_SELECTED, &StatusPanel::on_ams_selected, this);
     Bind(EVT_AMS_ON_FILAMENT_EDIT, &StatusPanel::on_filament_edit, this);
+    Bind(EVT_AMS_NEW_FILAMENT_HINT, [this](wxCommandEvent& e) { Fm::on_new_spool_hint(this, obj, e.GetInt(), e.GetString().ToStdString()); });
     Bind(EVT_VAMS_ON_FILAMENT_EDIT, &StatusPanel::on_ext_spool_edit, this);
     Bind(EVT_AMS_GUIDE_WIKI, &StatusPanel::on_ams_guide, this);
     Bind(EVT_AMS_RETRY, &StatusPanel::on_ams_retry, this);
@@ -4134,6 +4136,7 @@ void StatusPanel::update_ams(MachineObject *obj)
 
     // must select a current can
     m_ams_control->UpdateAms(obj->get_printer_series_str(), obj->printer_type, ams_info, ext_info, *obj->GetExtderSystem(), obj->get_dev_id(), obj, false);
+    Fm::apply_new_spool_hints(m_ams_control, obj);
     m_ams_control->UpdateAmsDryControl(obj);
 
     last_tray_exist_bits  = obj->tray_exist_bits;

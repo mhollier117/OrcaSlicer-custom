@@ -274,6 +274,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/FilamentManager/FmColorCodes.hpp
     GUI/FilamentManager/FmDevices.cpp
     GUI/FilamentManager/FmDevices.hpp
+    GUI/FilamentManager/FmNewSpool.cpp
+    GUI/FilamentManager/FmNewSpool.hpp
     GUI/FilamentManager/FmPresets.cpp
     GUI/FilamentManager/FmPresets.hpp
     GUI/FilamentManager/FmPrinters.cpp
@@ -961,6 +963,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/BblFilament/LinkDriver.hpp
     Utils/BblFilament/Linker.cpp
     Utils/BblFilament/Linker.hpp
+    Utils/BblFilament/NewSpools.cpp
+    Utils/BblFilament/NewSpools.hpp
     Utils/BblFilament/PluginGate.cpp
     Utils/BblFilament/PluginGate.hpp
     Utils/BblFilament/PluginLinkStructs.hpp

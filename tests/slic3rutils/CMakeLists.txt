@@ -5,6 +5,7 @@ add_executable(${_TEST_NAME}_tests
     test_bbl_filament.cpp
     test_bbl_filament_link.cpp
     test_bbl_filament_linker.cpp
+    test_bbl_filament_new_spools.cpp
     test_bbl_filament_tap.cpp
     test_bbl_preset_sync.cpp
     test_bbl_preset_sync_kcopy.cpp

@@ -121,9 +121,9 @@ Runtime::Runtime()
         if (m_vm != nullptr)
             m_vm->auto_push_summary(summary);
     };
-    m_linker->on_registered = [this](const fil::SlotKey& slot, const std::string&) {
+    m_linker->on_registered = [this](const fil::SlotKey& slot, const std::string& rfid) {
         log_event({{"event", "registered"}});
-        m_new_spools.insert(slot);
+        m_new_spools.add(slot, rfid);
     };
 
     // Runtime owns the service's events. Each one is logged, then handed to the open panel's view-model, if any.
@@ -178,8 +178,10 @@ void Runtime::note_list_state()
 {
     // The list is gone (signed out, another account, the plugin reloaded): the linker forgets everything.
     const bool have = m_service->status().have_list;
-    if (m_had_list && !have)
+    if (m_had_list && !have) {
         m_linker->reset();
+        m_new_spools.clear();
+    }
     m_had_list = have;
 }
 
@@ -243,7 +245,9 @@ void Runtime::tick()
             }
         }
 
-        m_linker->tick(printer_views(devices, *m_tap, now));
+        const std::vector<fil::PrinterView> printers = printer_views(devices, *m_tap, now);
+        m_new_spools.reconcile(printers);
+        m_linker->tick(printers);
     } catch (...) {
     }
 }
