@@ -93,6 +93,7 @@ private:
     BblPresetSync::LocalOpsContext ops_context(const std::string& bambu_uid) const;
     void                           refresh_ui();
     void                           k_copy_step();
+    void                           refresh_studio_keys_step();
     void                           set_k_last(const std::string& key, const std::string& text);
     // Runs fn on the UI thread and waits for it; nullopt when cancelled first.
     template<class T> std::optional<T> run_on_ui(std::function<T()> fn);
@@ -117,6 +118,12 @@ private:
     std::unique_ptr<CloudProxy>    m_cloud;
     NetworkAgent*                  m_cloud_agent{nullptr};
     std::unique_ptr<BblPresetSync::Mirror> m_mirror;
+
+    // Only touched on the sync thread (refresh_studio_keys_step).
+    bool      m_studio_cache_read{false};
+    bool      m_studio_have_valid{false};
+    long long m_studio_fetched_at{0};
+    long long m_studio_last_attempt{0};
 
     mutable std::mutex m_token_mutex;
     std::weak_ptr<int> m_token;

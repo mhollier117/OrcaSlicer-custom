@@ -265,11 +265,28 @@ void Mirror::run_pass(Trigger trigger)
         }
     }
 
-    if (!m_studio_loaded) {
-        m_studio        = StudioKeys::load(m_host.resources_dir() / "printers" / "bambu_studio_option_keys.json");
-        m_studio_loaded = true;
-        m_studio_count  = m_studio.size();
-        if (m_studio.empty()) BOOST_LOG_TRIVIAL(warning) << "bbl preset sync: the Bambu Studio key list is empty or missing";
+    {
+        std::optional<std::pair<StudioKeys, std::string>> pending;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            pending.swap(m_studio_pending);
+        }
+        if (pending) {
+            m_studio        = std::move(pending->first);
+            m_studio_loaded = true;
+            m_studio_count  = m_studio.size();
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_studio_source = std::move(pending->second);
+        }
+        if (!m_studio_loaded) {
+            std::string source;
+            m_studio        = StudioKeys::load(m_host.resources_dir() / "printers" / "bambu_studio_option_keys.json", &source);
+            m_studio_loaded = true;
+            m_studio_count  = m_studio.size();
+            if (m_studio.empty()) BOOST_LOG_TRIVIAL(warning) << "bbl preset sync: the Bambu Studio key list is empty or missing";
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_studio_source = std::move(source);
+        }
     }
     const KeyTest studio = [this](const std::string& k) { return m_studio.knows(k); };
 
@@ -912,6 +929,7 @@ Status Mirror::status() const
         std::lock_guard<std::mutex> lock(m_mutex);
         st     = m_status;
         ledger = m_ledger;
+        st.studio_keys_source = m_studio_source;
     }
     if (ledger) {
         st.halted              = ledger->halted();
@@ -933,6 +951,12 @@ std::shared_ptr<BaseStore> Mirror::base_store() const
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_base;
+}
+
+void Mirror::set_studio_keys(StudioKeys keys, std::string source)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_studio_pending = std::make_pair(std::move(keys), std::move(source));
 }
 
 size_t Mirror::studio_key_count() const

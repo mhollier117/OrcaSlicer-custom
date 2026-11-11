@@ -21,7 +21,9 @@
 #include "slic3r/Utils/BblPresetSync/Ledger.hpp"
 #include "slic3r/Utils/BblPresetSync/KCopy.hpp"
 #include "slic3r/Utils/BblPresetSync/Snapshot.hpp"
+#include "slic3r/Utils/BblPresetSync/Keys.hpp"
 #include "slic3r/Utils/CloudProvider.hpp"
+#include "slic3r/Utils/Http.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
 
 #include <boost/filesystem/path.hpp>
@@ -253,6 +255,7 @@ void BblPresetSyncController::tick(const std::weak_ptr<int>& sync_token)
     const bool manual = m_manual_requested.exchange(false, std::memory_order_acq_rel);
     m_mirror->run_pass(new_token || manual ? sync::Trigger::Manual : sync::Trigger::Tick);
     k_copy_step();
+    refresh_studio_keys_step();
 }
 
 // --- IHost -----------------------------------------------------------------
@@ -575,6 +578,94 @@ void BblPresetSyncController::end_batch()
     });
 }
 
+// --- Bambu Studio key list ----------------------------------------------------
+
+namespace {
+
+constexpr long long REFRESH_AFTER_SECONDS = 7 * 24 * 3600;
+constexpr long long RETRY_AFTER_SECONDS   = 24 * 3600;
+constexpr long        STUDIO_REQUEST_TIMEOUT_SECONDS = 15;
+
+// One synchronous GET (modelled on GUI_App::check_new_version_sf: Http::get, the GitHub accept header, timeouts). Nothing about
+// the user or their presets is sent. True with the body on HTTP 200; otherwise `why` says what failed.
+bool http_get_text(const std::string& url, std::string& body, std::string& why)
+{
+    bool ok = false;
+    Http::get(url)
+        .header("accept", "application/vnd.github.v3+json")
+        .timeout_connect(STUDIO_REQUEST_TIMEOUT_SECONDS)
+        .timeout_max(STUDIO_REQUEST_TIMEOUT_SECONDS)
+        .on_complete([&](std::string response, unsigned http_status) {
+            if (http_status == 200) {
+                body = std::move(response);
+                ok   = true;
+            } else {
+                why = "HTTP " + std::to_string(http_status);
+            }
+        })
+        .on_error([&](std::string, std::string error, unsigned http_status) {
+            why = "HTTP " + std::to_string(http_status) + " " + error;
+        })
+        .perform_sync();
+    return ok;
+}
+
+bool valid_tag(const std::string& tag)
+{
+    if (tag.empty() || tag.size() > 40) return false;
+    for (const char c : tag)
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')) return false;
+    return true;
+}
+
+} // namespace
+
+void BblPresetSyncController::refresh_studio_keys_step()
+{
+    const boost::filesystem::path cache = boost::filesystem::path(Slic3r::data_dir()) / "bbl_sync" / "studio_keys.json";
+
+    if (!m_studio_cache_read) {
+        m_studio_cache_read = true;
+        if (const auto file = sync::read_studio_key_file(cache)) {
+            m_mirror->set_studio_keys(sync::StudioKeys(file->keys), file->source);
+            m_studio_have_valid = true;
+            m_studio_fetched_at = file->fetched_at;
+        }
+    }
+    if (!session() || cancelled()) return; // stealth mode, sync off or not signed in: no request
+
+    const long long t = now();
+    if (m_studio_have_valid && t - m_studio_fetched_at < REFRESH_AFTER_SECONDS) return;
+    if (m_studio_last_attempt != 0 && t - m_studio_last_attempt <= RETRY_AFTER_SECONDS) return;
+    m_studio_last_attempt = t;
+
+    auto not_refreshed = [](const std::string& why) {
+        BOOST_LOG_TRIVIAL(info) << "bbl preset sync: Bambu Studio key list not refreshed: " << why;
+    };
+
+    std::string body, why;
+    if (!http_get_text("https://api.github.com/repos/bambulab/BambuStudio/releases/latest", body, why)) return not_refreshed(why);
+    const auto release = nlohmann::json::parse(body, nullptr, false);
+    if (release.is_discarded() || !release.is_object() || !release.contains("tag_name") || !release["tag_name"].is_string())
+        return not_refreshed("no release tag");
+    const std::string tag = release["tag_name"].get<std::string>();
+    if (!valid_tag(tag)) return not_refreshed("unexpected release tag");
+    if (cancelled()) return;
+
+    std::string source;
+    if (!http_get_text("https://raw.githubusercontent.com/bambulab/BambuStudio/" + tag + "/src/libslic3r/PrintConfig.cpp", source, why))
+        return not_refreshed(why);
+    if (source.size() < 100 * 1024 || source.size() > 5 * 1024 * 1024) return not_refreshed("unexpected size of PrintConfig.cpp");
+
+    const std::set<std::string> keys = sync::parse_studio_print_config(source);
+    if (!sync::plausible_studio_keys(keys)) return not_refreshed("the parsed key list is not plausible");
+
+    if (!sync::write_studio_key_file(cache, keys, tag, t)) BOOST_LOG_TRIVIAL(info) << "bbl preset sync: Bambu Studio key list cache not written";
+    m_mirror->set_studio_keys(sync::StudioKeys(keys), "BambuStudio " + tag);
+    m_studio_have_valid = true;
+    m_studio_fetched_at = t;
+}
+
 // --- K profile copy ---------------------------------------------------------
 
 namespace {
@@ -889,6 +980,7 @@ nlohmann::json BblPresetSyncController::status_json() const
     j["linked"]              = status.linked;
     j["studio_keys"]         = m_mirror->studio_key_count();
     j["cached_bodies"]       = m_mirror->cached_body_count();
+    j["studio_keys_source"]  = status.studio_keys_source;
 
     NetworkAgent* agent       = m_app.getAgent();
     j["enabled"]              = self->session().has_value();

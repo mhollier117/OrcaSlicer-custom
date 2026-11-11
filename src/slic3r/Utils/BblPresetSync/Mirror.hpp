@@ -119,6 +119,7 @@ struct Status // for the MCP tool
     std::string              halted;
     bool                     first_run_confirmed{false};
     size_t                   linked{0};
+    std::string              studio_keys_source; // "bundled <version>" or "BambuStudio <tag>"; empty before the first pass
 };
 
 class Mirror
@@ -136,6 +137,7 @@ public:
     Status                  status() const;                   // any thread
     std::shared_ptr<Ledger> ledger() const;                   // current ledger or null
     std::shared_ptr<BaseStore> base_store() const;            // current base copies or null
+    void                    set_studio_keys(StudioKeys keys, std::string source); // any thread; takes effect from the next pass
     size_t                  studio_key_count() const;         // keys loaded from the Studio list (0: file missing)
     size_t                  cached_body_count() const;        // bodies held in the in-memory cache
 
@@ -173,6 +175,8 @@ private:
     StudioKeys              m_studio; // loaded on the first pass; read on the sync thread only
     bool                    m_studio_loaded{false};
     std::atomic<size_t>     m_studio_count{0};
+    std::optional<std::pair<StudioKeys, std::string>> m_studio_pending; // set_studio_keys, applied at the start of a pass (m_mutex)
+    std::string             m_studio_source;                              // (m_mutex)
     struct CachedBody
     {
         long long update_time{0};

@@ -10,8 +10,10 @@
 
 #include <boost/filesystem/operations.hpp>
 #include <boost/nowide/fstream.hpp>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -463,5 +465,115 @@ TEST_CASE("BaseStore keeps one body per setting id and account", "[BblPresetSync
                     CHECK(a->local == b->local);
                 }
             }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Studio key list: parsing, plausibility, files
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::set<std::string> numbered_keys(size_t n)
+{
+    std::set<std::string> keys;
+    for (size_t i = 0; i < n; ++i) keys.insert("key_" + std::to_string(i));
+    return keys;
+}
+
+const char* const essential_keys[] = {"layer_height", "nozzle_temperature", "filament_type", "printable_area", "sparse_infill_density", "compatible_printers"};
+
+std::set<std::string> full_key_set()
+{
+    std::set<std::string> keys = numbered_keys(400);
+    for (const char* k : essential_keys) keys.insert(k);
+    return keys;
+}
+
+} // namespace
+
+TEST_CASE("parse_studio_print_config finds the keys defined with this->add and this->add_nullable", "[BblPresetSync]")
+{
+    const std::string source = R"(
+    def = this->add("layer_height", coFloat);
+    def = this->add_nullable("filament_retraction_length", coFloats);
+    def = this->add( "sparse_infill_density" , coPercent);
+    // this->add("old_key", coInt);   (a comment is still found by the plain scan: harmless)
+    def = m_other.add("not_this", coInt);
+    def = this->add(key_variable, coInt);
+    def = this->add_nullable(
+        "on_next_line", coInt);
+    def = this->add("with-dash", coInt);
+    )";
+    const auto keys = sync::parse_studio_print_config(source);
+    CHECK(keys.count("layer_height") == 1);
+    CHECK(keys.count("filament_retraction_length") == 1);
+    CHECK(keys.count("sparse_infill_density") == 1);
+    CHECK(keys.count("old_key") == 1);
+    CHECK(keys.count("on_next_line") == 1);
+    CHECK(keys.count("not_this") == 0);
+    CHECK(keys.count("key_variable") == 0);
+    CHECK(keys.count("with-dash") == 0);
+    CHECK(keys.size() == 5);
+}
+
+TEST_CASE("plausible_studio_keys wants enough keys and the essential ones", "[BblPresetSync]")
+{
+    CHECK(sync::plausible_studio_keys(full_key_set()));
+
+    auto few_keys = numbered_keys(393);
+    for (const char* k : essential_keys) few_keys.insert(k);
+    REQUIRE(few_keys.size() == 399);
+    CHECK_FALSE(sync::plausible_studio_keys(few_keys));
+
+    auto without = full_key_set();
+    without.erase("layer_height");
+    for (size_t i = 1000; without.size() < 405; ++i) without.insert("pad_" + std::to_string(i));
+    CHECK_FALSE(sync::plausible_studio_keys(without));
+}
+
+TEST_CASE("The bundled Studio key list is plausible", "[BblPresetSync]")
+{
+    const fs::path bundled = fs::path(std::string(PROFILES_DIR)).parent_path() / "printers" / "bambu_studio_option_keys.json";
+    const auto     file    = sync::read_studio_key_file(bundled);
+    REQUIRE(file.has_value());
+    CHECK(file->fetched_at == 0);
+    CHECK(file->source.rfind("bundled ", 0) == 0);
+    CHECK(sync::plausible_studio_keys(file->keys));
+}
+
+TEST_CASE("Studio key files round-trip and bad ones are rejected", "[BblPresetSync]")
+{
+    ScopedTemporaryDir temp{"orca-bblstudiokeys"};
+    const fs::path     file = temp.path() / "sub" / "studio_keys.json";
+
+    SECTION("write then read")
+    {
+        REQUIRE(sync::write_studio_key_file(file, full_key_set(), "v02.09.00.70", 1700000000));
+        CHECK_FALSE(fs::exists(fs::path(file.string() + ".tmp")));
+        const auto got = sync::read_studio_key_file(file);
+        REQUIRE(got.has_value());
+        CHECK(got->keys == full_key_set());
+        CHECK(got->source == "BambuStudio v02.09.00.70");
+        CHECK(got->fetched_at == 1700000000);
+    }
+    SECTION("the bundled form has no fetched_at")
+    {
+        nlohmann::json j;
+        j["studio_version"] = "v1";
+        j["keys"]           = full_key_set();
+        write_file(file, j.dump());
+        const auto got = sync::read_studio_key_file(file);
+        REQUIRE(got.has_value());
+        CHECK(got->fetched_at == 0);
+        CHECK(got->source == "bundled v1");
+    }
+    SECTION("missing, invalid and implausible files")
+    {
+        CHECK_FALSE(sync::read_studio_key_file(temp.path() / "none.json").has_value());
+        write_file(file, "not json");
+        CHECK_FALSE(sync::read_studio_key_file(file).has_value());
+        REQUIRE(sync::write_studio_key_file(file, numbered_keys(10), "v1", 5));
+        CHECK_FALSE(sync::read_studio_key_file(file).has_value());
     }
 }

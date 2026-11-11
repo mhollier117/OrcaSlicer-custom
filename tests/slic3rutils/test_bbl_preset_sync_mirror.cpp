@@ -2683,6 +2683,45 @@ TEST_CASE("A lost bases file merges as a first meeting and keeps both sides", "[
     CHECK(e.store.pulls[0].body.at("filament_density") == "2"); // remote value arrives
 }
 
+TEST_CASE("set_studio_keys changes how the next pull treats a setting the remote removed", "[BblPresetSync]")
+{
+    Env  e;
+    auto base = body_with("P1", {{"filament_density", "1.3"}});
+    seed_linked(e, base, base);
+    remote_row(e, "Mine", "P1", 200, valid_body("P1", "1")); // Studio removed filament_density
+
+    SECTION("a set that knows the key: it is dropped")
+    {
+        e.mirror.set_studio_keys(sync::StudioKeys({"filament_cost", "filament_density"}), "BambuStudio vTest");
+        e.pass(sync::Trigger::Manual);
+        REQUIRE(e.store.pulls.size() == 1);
+        CHECK(e.store.pulls[0].body.count("filament_density") == 0);
+        CHECK(e.mirror.status().studio_keys_source == "BambuStudio vTest");
+        CHECK(e.mirror.studio_key_count() == 2);
+    }
+    SECTION("a set that does not know it: the local value is kept")
+    {
+        e.mirror.set_studio_keys(sync::StudioKeys({"filament_cost"}), "BambuStudio vOther");
+        e.pass(sync::Trigger::Manual);
+        REQUIRE(e.store.pulls.size() == 1);
+        CHECK(e.store.pulls[0].body.at("filament_density") == "1.3");
+        CHECK(e.mirror.status().studio_keys_source == "BambuStudio vOther");
+    }
+    SECTION("without a set the bundled test file is used")
+    {
+        e.pass(sync::Trigger::Manual);
+        CHECK(e.mirror.status().studio_keys_source == "bundled 0");
+    }
+    SECTION("a later set takes effect on the next pass")
+    {
+        e.pass(sync::Trigger::Manual);
+        e.mirror.set_studio_keys(sync::StudioKeys({"filament_cost"}), "BambuStudio vLater");
+        CHECK(e.mirror.status().studio_keys_source == "bundled 0");
+        e.pass(sync::Trigger::Manual);
+        CHECK(e.mirror.status().studio_keys_source == "BambuStudio vLater");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Batching
 // ---------------------------------------------------------------------------
