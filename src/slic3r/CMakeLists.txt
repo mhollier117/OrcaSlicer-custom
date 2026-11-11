@@ -268,6 +268,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Field.hpp
     GUI/FilamentManager/FilamentManagerPanel.cpp
     GUI/FilamentManager/FilamentManagerPanel.hpp
+    GUI/FilamentManager/FmAmsDialogRow.cpp
+    GUI/FilamentManager/FmAmsDialogRow.hpp
     GUI/FilamentManager/FmColorCodes.cpp
     GUI/FilamentManager/FmColorCodes.hpp
     GUI/FilamentManager/FmDevices.cpp
@@ -278,6 +280,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/FilamentManager/FmPrinters.hpp
     GUI/FilamentManager/FmRuntime.cpp
     GUI/FilamentManager/FmRuntime.hpp
+    GUI/FilamentManager/FmSpoolPicker.cpp
+    GUI/FilamentManager/FmSpoolPicker.hpp
     GUI/FilamentManager/FmProtocol.cpp
     GUI/FilamentManager/FmProtocol.hpp
     GUI/FilamentManager/FmViewModel.cpp

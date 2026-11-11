@@ -50,6 +50,8 @@
 
 namespace Slic3r { namespace GUI {
 
+namespace Fm { class AmsDialogRow; }
+
 class ColorPicker : public wxWindow
 {
 public:
@@ -135,6 +137,7 @@ private:
 
 class AMSMaterialsSetting : public DPIDialog
 {
+    friend class Fm::AmsDialogRow;
 public:
     AMSMaterialsSetting(wxWindow *parent, wxWindowID id);
     ~AMSMaterialsSetting();
@@ -256,6 +259,7 @@ protected:
     ScalableBitmap                       m_star_empty;
     // Favorites changed while the list was open; their rows are regrouped before it opens again.
     bool                                 m_favorites_regroup{false};
+    Fm::AmsDialogRow*                    m_fm_row{nullptr};
 };
 
 wxDECLARE_EVENT(EVT_SELECTED_COLOR, wxCommandEvent);

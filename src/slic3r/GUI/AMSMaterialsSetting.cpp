@@ -9,6 +9,7 @@
 #include "MsgDialog.hpp"
 #include "GUI_App.hpp"
 #include "BblPresetSyncController.hpp"
+#include "FilamentManager/FmAmsDialogRow.hpp"
 #include "GUI.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
 #include "libslic3r/Preset.hpp"
@@ -468,6 +469,7 @@ void AMSMaterialsSetting::create_panel_normal(wxWindow* parent)
     sizer->Add(m_sizer_filament, 0, wxLEFT | wxRIGHT, FromDIP(20));
     sizer->Add(0, 0, 0, wxTOP, FromDIP(16));
     sizer->Add(m_sizer_colour, 0, wxLEFT | wxRIGHT, FromDIP(20));
+    m_fm_row = new Fm::AmsDialogRow(parent, this); sizer->Add(m_fm_row, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(20));
     sizer->Add(0, 0, 0, wxTOP, FromDIP(16));
     sizer->Add(m_sizer_temperature, 0, wxLEFT | wxRIGHT, FromDIP(20));
     sizer->Add(0, 0, 0, wxTOP, FromDIP(5));
@@ -1016,6 +1018,7 @@ void AMSMaterialsSetting::on_select_ok(wxCommandEvent &event)
             obj->command_extrusion_cali_set(cali_tray_id, "", "", k, n);
         }
     }
+    if (m_fm_row) m_fm_row->on_confirmed(tray_color, tray_colors, tray_ctype);
     Close();
 }
 
@@ -1536,6 +1539,7 @@ void AMSMaterialsSetting::Popup(wxString filament, wxString sn, wxString temp_mi
     // Set the flag whether to open the filament setting dialog from the device page
     m_comboBox_filament->SetClientData(new int(1));
 
+    if (m_fm_row) m_fm_row->on_popup();
     update();
     Layout();
     Fit();
