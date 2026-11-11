@@ -632,18 +632,26 @@ void BblPresetSyncController::refresh_studio_keys_step()
 {
     const boost::filesystem::path cache = boost::filesystem::path(Slic3r::data_dir()) / "bbl_sync" / "studio_keys.json";
 
+    // Until a list with types arrives, the types of the bundled list go with the keys.
+    auto with_types = [this](const std::set<std::string>& keys, const std::map<std::string, std::string>& types) {
+        if (!types.empty()) return sync::StudioKeys(keys, types);
+        const auto bundled = sync::read_studio_key_file(resources_dir() / "printers" / "bambu_studio_option_keys.json");
+        return sync::StudioKeys(keys, bundled ? bundled->types : std::map<std::string, std::string>());
+    };
+
     if (!m_studio_cache_read) {
         m_studio_cache_read = true;
         if (const auto file = sync::read_studio_key_file(cache)) {
-            m_mirror->set_studio_keys(sync::StudioKeys(file->keys), file->source);
+            m_mirror->set_studio_keys(with_types(file->keys, file->types), file->source);
             m_studio_have_valid = true;
+            m_studio_have_types = !file->types.empty();
             m_studio_fetched_at = file->fetched_at;
         }
     }
     if (!session() || cancelled()) return; // stealth mode, sync off or not signed in: no request
 
     const long long t = now();
-    if (m_studio_have_valid && t - m_studio_fetched_at < REFRESH_AFTER_SECONDS) return;
+    if (m_studio_have_valid && m_studio_have_types && t - m_studio_fetched_at < REFRESH_AFTER_SECONDS) return;
     if (m_studio_last_attempt != 0 && t - m_studio_last_attempt <= RETRY_AFTER_SECONDS) return;
     m_studio_last_attempt = t;
 
@@ -667,10 +675,13 @@ void BblPresetSyncController::refresh_studio_keys_step()
 
     const std::set<std::string> keys = sync::parse_studio_print_config(source);
     if (!sync::plausible_studio_keys(keys)) return not_refreshed("the parsed key list is not plausible");
+    const std::map<std::string, std::string> types = sync::parse_studio_print_config_types(source);
 
-    if (!sync::write_studio_key_file(cache, keys, tag, t)) BOOST_LOG_TRIVIAL(info) << "bbl preset sync: Bambu Studio key list cache not written";
-    m_mirror->set_studio_keys(sync::StudioKeys(keys), "BambuStudio " + tag);
+    if (!sync::write_studio_key_file(cache, keys, types, tag, t))
+        BOOST_LOG_TRIVIAL(info) << "bbl preset sync: Bambu Studio key list cache not written";
+    m_mirror->set_studio_keys(with_types(keys, types), "BambuStudio " + tag);
     m_studio_have_valid = true;
+    m_studio_have_types = !types.empty();
     m_studio_fetched_at = t;
 }
 
@@ -1052,6 +1063,7 @@ nlohmann::json BblPresetSyncController::status_json() const
     j["studio_keys"]         = m_mirror->studio_key_count();
     j["cached_bodies"]       = m_mirror->cached_body_count();
     j["studio_keys_source"]  = status.studio_keys_source;
+    j["translated_keys"]     = status.translated_keys;
 
     NetworkAgent* agent       = m_app.getAgent();
     j["enabled"]              = self->session().has_value();

@@ -13,6 +13,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <map>
 #include <set>
 #include <string>
 #include <thread>
@@ -549,11 +550,13 @@ TEST_CASE("Studio key files round-trip and bad ones are rejected", "[BblPresetSy
 
     SECTION("write then read")
     {
-        REQUIRE(sync::write_studio_key_file(file, full_key_set(), "v02.09.00.70", 1700000000));
+        const std::map<std::string, std::string> types{{"layer_height", "coFloat"}, {"filament_type", "coStrings"}};
+        REQUIRE(sync::write_studio_key_file(file, full_key_set(), types, "v02.09.00.70", 1700000000));
         CHECK_FALSE(fs::exists(fs::path(file.string() + ".tmp")));
         const auto got = sync::read_studio_key_file(file);
         REQUIRE(got.has_value());
         CHECK(got->keys == full_key_set());
+        CHECK(got->types == types);
         CHECK(got->source == "BambuStudio v02.09.00.70");
         CHECK(got->fetched_at == 1700000000);
     }
@@ -567,13 +570,95 @@ TEST_CASE("Studio key files round-trip and bad ones are rejected", "[BblPresetSy
         REQUIRE(got.has_value());
         CHECK(got->fetched_at == 0);
         CHECK(got->source == "bundled v1");
+        CHECK(got->types.empty()); // a file without "types"
+    }
+    SECTION("only string types are read")
+    {
+        nlohmann::json j;
+        j["keys"]                   = full_key_set();
+        j["types"]["layer_height"]  = "coFloat";
+        j["types"]["filament_type"] = 5;
+        write_file(file, j.dump());
+        const auto got = sync::read_studio_key_file(file);
+        REQUIRE(got.has_value());
+        CHECK(got->types == std::map<std::string, std::string>{{"layer_height", "coFloat"}});
     }
     SECTION("missing, invalid and implausible files")
     {
         CHECK_FALSE(sync::read_studio_key_file(temp.path() / "none.json").has_value());
         write_file(file, "not json");
         CHECK_FALSE(sync::read_studio_key_file(file).has_value());
-        REQUIRE(sync::write_studio_key_file(file, numbered_keys(10), "v1", 5));
+        REQUIRE(sync::write_studio_key_file(file, numbered_keys(10), {}, "v1", 5));
         CHECK_FALSE(sync::read_studio_key_file(file).has_value());
     }
+}
+
+TEST_CASE("parse_studio_print_config_types reads the type token after each key", "[BblPresetSync]")
+{
+    const std::string source = R"(
+    def = this->add("a", coFloat);
+    def = this->add_nullable("b", coFloats);
+    def = this->add( "c"   ,
+        coPercent);
+    def = this->add("no_token");
+    def = this->add("not_co", ConfigOptionFloat);
+    def = this->add("a", coString);
+    def = this->add(key_variable, coInt);
+    )";
+    const auto types = sync::parse_studio_print_config_types(source);
+    CHECK(types.size() == 3);
+    CHECK(types.at("a") == "coFloat"); // the first occurrence wins
+    CHECK(types.at("b") == "coFloats");
+    CHECK(types.at("c") == "coPercent");
+    CHECK(types.count("no_token") == 0);
+    CHECK(types.count("not_co") == 0);
+    // The key scan itself is unchanged.
+    const auto keys = sync::parse_studio_print_config(source);
+    CHECK(keys == std::set<std::string>{"a", "b", "c", "no_token", "not_co"});
+}
+
+TEST_CASE("StudioKeys carries the types of its file", "[BblPresetSync]")
+{
+    ScopedTemporaryDir temp{"orca-bblkeytypes"};
+    const fs::path     file = temp.path() / "keys.json";
+
+    write_file(file, R"({"keys":["layer_height","filament_notes"],"types":{"layer_height":"coFloat","filament_notes":"coString"}})");
+    const auto keys = sync::StudioKeys::load(file);
+    CHECK(keys.has_types());
+    CHECK(keys.type_of("filament_notes") == "coString");
+    CHECK(keys.type_of("layer_height") == "coFloat");
+    CHECK(keys.type_of("unknown").empty());
+
+    write_file(file, R"({"keys":["layer_height"]})");
+    const auto without = sync::StudioKeys::load(file);
+    CHECK_FALSE(without.has_types());
+    CHECK(without.type_of("layer_height").empty());
+
+    CHECK_FALSE(sync::StudioKeys({"a"}).has_types());
+    CHECK(sync::StudioKeys({"a"}, {{"a", "coInt"}}).type_of("a") == "coInt");
+}
+
+TEST_CASE("The bundled Studio key list has a type for its keys", "[BblPresetSync]")
+{
+    const fs::path bundled = fs::path(std::string(PROFILES_DIR)).parent_path() / "printers" / "bambu_studio_option_keys.json";
+    const auto     file    = sync::read_studio_key_file(bundled);
+    REQUIRE(file.has_value());
+    CHECK(file->types.size() > 700);
+    for (const auto& [key, type] : file->types) {
+        CAPTURE(key);
+        CHECK(file->keys.count(key) == 1);
+        CHECK(type.rfind("co", 0) == 0);
+    }
+    CHECK(file->types.at("filament_notes") == "coString");
+    CHECK(sync::StudioKeys::load(bundled).type_of("fan_max_speed") == "coInts");
+}
+
+TEST_CASE("orca_type_name spells OrcaSlicer's own type of a setting", "[BblPresetSync]")
+{
+    CHECK(sync::orca_type_name("layer_height") == "coFloat");
+    CHECK(sync::orca_type_name("filament_notes") == "coStrings");
+    CHECK(sync::orca_type_name("fan_max_speed") == "coFloats");
+    CHECK(sync::orca_type_name("line_width") == "coFloatOrPercent");
+    CHECK(sync::orca_type_name("enable_arc_fitting") == "coEnum");
+    CHECK(sync::orca_type_name("no_such_setting").empty());
 }

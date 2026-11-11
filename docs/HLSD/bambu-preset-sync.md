@@ -78,8 +78,32 @@ value: a stale list loses nothing, it only fails to carry a "reset to default" m
 setting newer than the list. The opposite error is possible only for a setting the latest Studio
 release has, the user's older Studio lacks, and OrcaSlicer also has.
 
-One limit remains: a value Studio cannot represent for a shared key is replaced by Studio's default
-when the preset is saved in Studio, and that is indistinguishable from a deliberate change.
+Some shared settings have a different type in the two slicers (about 30: a note that is one text in
+Studio and a list of texts in OrcaSlicer, jerks that are one number in Studio and a list in
+OrcaSlicer, line widths that accept a percent only in OrcaSlicer...). The Bambu copy always holds
+Studio's form, and each side compares a key only against its own base, in its own form. A value is
+translated where it crosses over: when a local value is written into a body (`Forms::to_studio`,
+used by `apply_local_edits`, by a create and by the pairing fingerprint) and when a value from a
+body is taken into the local preset (`Forms::to_orca`, used by `merge_bodies`). The rule for a key
+(`build_forms`) comes from the type tokens that travel with Studio's key list (its `"types"`,
+parsed by `parse_studio_print_config_types`) against OrcaSlicer's own definition of the key:
+
+- `ScalarToList`: Studio gets the first item; a value from Bambu is repeated for every item OrcaSlicer has.
+- `StringToStrings`: the one text moves between Studio's escaped string and OrcaSlicer's list of one text.
+- `IntsToFloats`: only whole numbers go to Studio; values from Bambu are taken as they are.
+- `FloatToFloatOrPercent`: a percent stays local; numbers cross unchanged.
+- `PercentToFloatOrPercent`: only percents go to Studio; a bare number from Bambu becomes a percent.
+- `Never` (unrelated types): the key is not exchanged.
+
+A value the other side cannot hold is not sent: that side keeps its own value. A remote value that
+the local value already equals in Studio's form is not taken, so a list such as a jerk of `9,12`
+is not flattened to `9,9` by a body that holds `9`. A cached key list
+without types is refreshed at once, and until one with types arrives the bundled list's types are
+used.
+
+One limit remains: for a shared key of the same type, a value Studio does not accept (an enum value
+it lacks, for instance) is replaced by Studio's default when the preset is saved in Studio, and that
+is indistinguishable from a deliberate change.
 
 ## State
 

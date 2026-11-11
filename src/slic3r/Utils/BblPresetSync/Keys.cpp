@@ -1,6 +1,8 @@
 #include "Keys.hpp"
 
+#include "libslic3r/Config.hpp"
 #include "libslic3r/Preset.hpp"
+#include "libslic3r/PrintConfig.hpp"
 
 #include <boost/filesystem/operations.hpp>
 #include <boost/nowide/fstream.hpp>
@@ -39,9 +41,55 @@ bool orca_knows(PresetType type, const std::string& key)
     return false;
 }
 
+std::string orca_type_name(const std::string& key)
+{
+    const ConfigOptionDef* def = print_config_def.get(key);
+    if (def == nullptr) return {};
+    switch (def->type) {
+    case coNone: return "coNone";
+    case coFloat: return "coFloat";
+    case coFloats: return "coFloats";
+    case coInt: return "coInt";
+    case coInts: return "coInts";
+    case coString: return "coString";
+    case coStrings: return "coStrings";
+    case coPercent: return "coPercent";
+    case coPercents: return "coPercents";
+    case coFloatOrPercent: return "coFloatOrPercent";
+    case coFloatsOrPercents: return "coFloatsOrPercents";
+    case coPoint: return "coPoint";
+    case coPoints: return "coPoints";
+    case coPoint3: return "coPoint3";
+    case coBool: return "coBool";
+    case coBools: return "coBools";
+    case coEnum: return "coEnum";
+    case coEnums: return "coEnums";
+    case coPointsGroups: return "coPointsGroups";
+    case coIntsGroups: return "coIntsGroups";
+    case coVectorType: break;
+    }
+    return {};
+}
+
+namespace {
+
+// Reads {key: token} with string tokens only; anything else gives an empty map.
+std::map<std::string, std::string> read_types(const nlohmann::json& root)
+{
+    std::map<std::string, std::string> types;
+    const auto it = root.find("types");
+    if (it == root.end() || !it->is_object()) return types;
+    for (auto t = it->begin(); t != it->end(); ++t)
+        if (t.value().is_string()) types[t.key()] = t.value().get<std::string>();
+    return types;
+}
+
+} // namespace
+
 StudioKeys StudioKeys::load(const boost::filesystem::path& file, std::string* source)
 {
-    std::set<std::string> keys;
+    std::set<std::string>              keys;
+    std::map<std::string, std::string> types;
     try {
         boost::nowide::ifstream in(file.string(), std::ios::binary);
         if (!in.is_open()) return StudioKeys();
@@ -52,6 +100,7 @@ StudioKeys StudioKeys::load(const boost::filesystem::path& file, std::string* so
         if (it == root.end() || !it->is_array()) return StudioKeys();
         for (const auto& k : *it)
             if (k.is_string()) keys.insert(k.get<std::string>());
+        types = read_types(root);
         if (source != nullptr) {
             const auto v = root.find("studio_version");
             *source      = "bundled" + (v != root.end() && v->is_string() ? " " + v->get<std::string>() : std::string());
@@ -59,7 +108,7 @@ StudioKeys StudioKeys::load(const boost::filesystem::path& file, std::string* so
     } catch (...) {
         return StudioKeys();
     }
-    return StudioKeys(std::move(keys));
+    return StudioKeys(std::move(keys), std::move(types));
 }
 
 bool StudioKeys::knows(const std::string& key) const
@@ -67,11 +116,22 @@ bool StudioKeys::knows(const std::string& key) const
     return key == "inherits" || key == "base_id" || key == "filament_id" || m_keys.count(key) > 0;
 }
 
-std::set<std::string> parse_studio_print_config(const std::string& text)
+const std::string& StudioKeys::type_of(const std::string& key) const
 {
-    std::set<std::string> keys;
-    const std::string     marker = "this->add";
-    size_t                pos    = 0;
+    static const std::string none;
+    const auto               it = m_types.find(key);
+    return it == m_types.end() ? none : it->second;
+}
+
+namespace {
+
+bool is_word_char(char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; }
+
+// The scan shared by the two parsers: calls `found(key, position after the key's closing quote)` for every definition.
+template<class Found> void scan_studio_print_config(const std::string& text, Found found)
+{
+    const std::string marker = "this->add";
+    size_t            pos    = 0;
     while ((pos = text.find(marker, pos)) != std::string::npos) {
         size_t i = pos + marker.size();
         pos      = i;
@@ -82,11 +142,35 @@ std::set<std::string> parse_studio_print_config(const std::string& text)
         if (i >= text.size() || text[i] != '"') continue;
         ++i;
         const size_t start = i;
-        while (i < text.size() && (std::isalnum(static_cast<unsigned char>(text[i])) || text[i] == '_')) ++i;
+        while (i < text.size() && is_word_char(text[i])) ++i;
         if (i == start || i >= text.size() || text[i] != '"') continue;
-        keys.insert(text.substr(start, i - start));
+        found(text.substr(start, i - start), i + 1);
     }
+}
+
+} // namespace
+
+std::set<std::string> parse_studio_print_config(const std::string& text)
+{
+    std::set<std::string> keys;
+    scan_studio_print_config(text, [&keys](std::string key, size_t) { keys.insert(std::move(key)); });
     return keys;
+}
+
+std::map<std::string, std::string> parse_studio_print_config_types(const std::string& text)
+{
+    std::map<std::string, std::string> types;
+    scan_studio_print_config(text, [&](std::string key, size_t i) {
+        while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) ++i;
+        if (i >= text.size() || text[i] != ',') return;
+        ++i;
+        while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) ++i;
+        const size_t start = i;
+        while (i < text.size() && is_word_char(text[i])) ++i;
+        std::string token = text.substr(start, i - start);
+        if (token.rfind("co", 0) == 0) types.emplace(std::move(key), std::move(token)); // emplace: the first occurrence wins
+    });
+    return types;
 }
 
 bool plausible_studio_keys(const std::set<std::string>& keys)
@@ -111,6 +195,7 @@ std::optional<StudioKeyFile> read_studio_key_file(const boost::filesystem::path&
         for (const auto& k : *it)
             if (k.is_string()) out.keys.insert(k.get<std::string>());
         if (!plausible_studio_keys(out.keys)) return std::nullopt;
+        out.types          = read_types(root);
         const auto tag     = root.find("source_tag");
         const auto version = root.find("studio_version");
         const auto fetched = root.find("fetched_at");
@@ -123,8 +208,8 @@ std::optional<StudioKeyFile> read_studio_key_file(const boost::filesystem::path&
     }
 }
 
-bool write_studio_key_file(const boost::filesystem::path& file, const std::set<std::string>& keys, const std::string& source_tag,
-                           long long fetched_at)
+bool write_studio_key_file(const boost::filesystem::path& file, const std::set<std::string>& keys,
+                           const std::map<std::string, std::string>& types, const std::string& source_tag, long long fetched_at)
 {
     namespace fs = boost::filesystem;
     try {
@@ -132,6 +217,8 @@ bool write_studio_key_file(const boost::filesystem::path& file, const std::set<s
         root["source_tag"] = source_tag;
         root["fetched_at"] = fetched_at;
         root["keys"]       = keys;
+        root["types"]      = nlohmann::json::object();
+        for (const auto& [k, t] : types) root["types"][k] = t;
 
         boost::system::error_code ec;
         fs::create_directories(file.parent_path(), ec);

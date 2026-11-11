@@ -123,6 +123,7 @@ private:
     // Only touched on the sync thread (refresh_studio_keys_step).
     bool      m_studio_cache_read{false};
     bool      m_studio_have_valid{false};
+    bool      m_studio_have_types{false}; // the list in use came with its types (a cached list without them is refreshed at once)
     long long m_studio_fetched_at{0};
     long long m_studio_last_attempt{0};
 

@@ -942,6 +942,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/BblPresetSync/Cloud.hpp
     Utils/BblPresetSync/FilamentId.cpp
     Utils/BblPresetSync/FilamentId.hpp
+    Utils/BblPresetSync/Forms.cpp
+    Utils/BblPresetSync/Forms.hpp
     Utils/BblPresetSync/Hash.cpp
     Utils/BblPresetSync/Hash.hpp
     Utils/BblPresetSync/KCopy.cpp

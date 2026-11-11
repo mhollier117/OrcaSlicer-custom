@@ -275,6 +275,8 @@ void Mirror::run_pass(Trigger trigger)
             m_studio        = std::move(pending->first);
             m_studio_loaded = true;
             m_studio_count  = m_studio.size();
+            m_forms         = build_forms(m_studio, orca_type_name);
+            m_forms_count   = m_forms.size();
             std::lock_guard<std::mutex> lock(m_mutex);
             m_studio_source = std::move(pending->second);
         }
@@ -283,6 +285,8 @@ void Mirror::run_pass(Trigger trigger)
             m_studio        = StudioKeys::load(m_host.resources_dir() / "printers" / "bambu_studio_option_keys.json", &source);
             m_studio_loaded = true;
             m_studio_count  = m_studio.size();
+            m_forms         = build_forms(m_studio, orca_type_name);
+            m_forms_count   = m_forms.size();
             if (m_studio.empty()) BOOST_LOG_TRIVIAL(warning) << "bbl preset sync: the Bambu Studio key list is empty or missing";
             std::lock_guard<std::mutex> lock(m_mutex);
             m_studio_source = std::move(source);
@@ -348,7 +352,7 @@ void Mirror::run_pass(Trigger trigger)
                 if (r != remote_bodies->end()) {
                     const PresetType type = item.key.type;
                     const KeyTest    orca = [type](const std::string& k) { return orca_knows(type, k); };
-                    l.hash = fingerprint(upload_with_foreign(item.upload, *r->second, orca), *r->second, orca, studio);
+                    l.hash = fingerprint(upload_with_foreign(item.upload, *r->second, orca, &m_forms), *r->second, orca, studio);
                 }
             }
             l.mtime = item.mtime;
@@ -661,7 +665,7 @@ void Mirror::run_pass(Trigger trigger)
                 break;
             }
             wrote                 = true;
-            const ValueMap& values = item->upload; // there is no Bambu copy yet
+            const ValueMap  values = m_forms.studio_body(item->upload); // there is no Bambu copy yet
             WriteResult     w      = m_cloud.create(a.key.name, values);
             if (w.ok) {
                 base->put(w.setting_id, Bases{values, item->upload});
@@ -679,8 +683,8 @@ void Mirror::run_pass(Trigger trigger)
             // The Bambu copy with only the local edits applied; without bases (a lost file) the whole local map.
             const auto     bases  = base->get(a.setting_id);
             const ValueMap values = bases ? apply_local_edits(bases->remote, item->upload, bases->local,
-                                                              [t = a.key.type](const std::string& k) { return orca_knows(t, k); })
-                                          : item->upload;
+                                                              [t = a.key.type](const std::string& k) { return orca_knows(t, k); }, &m_forms)
+                                          : m_forms.studio_body(item->upload);
             WriteResult    w      = m_cloud.update(a.setting_id, a.key.name, values);
             if (w.ok) {
                 base->put(a.setting_id, Bases{values, item->upload});
@@ -771,7 +775,8 @@ void Mirror::run_pass(Trigger trigger)
             const Bases      no_bases;
             const Bases&     bs = bases ? *bases : no_bases;
             const MergeResult m = merge_bodies(MergeInput{item != nullptr ? item->upload : none, bs.local, remote_body, bs.remote, pairing,
-                                                          a.local_newer, [type](const std::string& k) { return orca_knows(type, k); }, studio});
+                                                          a.local_newer, [type](const std::string& k) { return orca_knows(type, k); }, studio,
+                                                          &m_forms});
             PullOp op;
             op.session             = s;
             op.key                 = a.key;
@@ -929,6 +934,7 @@ Status Mirror::status() const
         ledger = m_ledger;
         st.studio_keys_source = m_studio_source;
     }
+    st.translated_keys = m_forms_count.load();
     if (ledger) {
         st.halted              = ledger->halted();
         st.first_run_confirmed = ledger->first_run_confirmed();

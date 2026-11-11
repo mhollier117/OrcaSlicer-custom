@@ -9,6 +9,8 @@
 
 namespace Slic3r::BblPresetSync {
 
+class Forms;
+
 using KeyTest = std::function<bool(const std::string&)>;
 
 struct MergeInput
@@ -20,6 +22,9 @@ struct MergeInput
     bool            pairing;     // first meeting of two same-named presets: there are no bases
     bool            local_newer; // which side wins a key changed on both
     KeyTest         orca_knows, studio_knows;
+    // Settings whose type differs between the two slicers: a value crossing over is translated, one the other side cannot
+    // hold stays where it is. Null: every value crosses unchanged.
+    const Forms* forms{nullptr};
 };
 
 struct MergeResult
@@ -36,12 +41,14 @@ MergeResult merge_bodies(const MergeInput& in);
 // The body to upload: `remote_now` (every key of the Bambu copy, including the ones OrcaSlicer does not know, but none of the
 // envelope fields in hash_ignored_keys()) with the local edits applied: for every non-metadata key k that OrcaSlicer knows and where local[k] != local_base[k],
 // set it to local[k], or remove it when local has no such key. Then `type` is set from `local` (always), and `version`
-// from `remote_now` when it has one, else from `local`.
-ValueMap apply_local_edits(const ValueMap& remote_now, const ValueMap& local, const ValueMap& local_base, const KeyTest& orca_knows);
+// from `remote_now` when it has one, else from `local`. With `forms`, an edited key with a rule is written in Studio's form;
+// when Studio cannot hold the value (or the rule is Never) the body keeps what `remote_now` has.
+ValueMap apply_local_edits(const ValueMap& remote_now, const ValueMap& local, const ValueMap& local_base, const KeyTest& orca_knows,
+                           const Forms* forms = nullptr);
 
-// What to upload for a preset paired by fingerprint: the local map, plus every non-metadata key of `base` that OrcaSlicer
-// does not know. Local wins on a key in both.
-ValueMap upload_with_foreign(const ValueMap& local, const ValueMap& base, const KeyTest& orca_knows);
+// What to upload for a preset paired by fingerprint: the local map (in Studio's form with `forms`), plus every non-metadata
+// key of `base` that OrcaSlicer does not know. Local wins on a key in both.
+ValueMap upload_with_foreign(const ValueMap& local, const ValueMap& base, const KeyTest& orca_knows, const Forms* forms = nullptr);
 
 // Fingerprint for pairing: upload_hash() of `values` after dropping every key that OrcaSlicer knows,
 // Studio does not know, and `base` does not contain.

@@ -1,5 +1,6 @@
 #include "Merge.hpp"
 
+#include "Forms.hpp"
 #include "Hash.hpp"
 
 #include <optional>
@@ -32,10 +33,21 @@ MergeResult merge_bodies(const MergeInput& in)
         const auto l = find_value(in.local, k), lb = find_value(in.local_base, k), r = find_value(in.remote, k),
                    rb = find_value(in.remote_base, k);
 
+        // A setting whose type differs between the two slicers: the remote value is in Studio's form.
+        const FormRule rule = in.forms != nullptr ? in.forms->rule(k) : FormRule::Same;
+        if (rule == FormRule::Never) {
+            if (l) out.merged[k] = *l; // not exchanged
+            continue;
+        }
+        const bool translated = rule != FormRule::Same;
+        // The local value as Studio would hold it (nullopt: Studio cannot hold it, which counts as different).
+        const std::optional<std::string> ls = translated && l ? in.forms->to_studio(k, *l) : l;
+        const bool                       same_as_remote = l ? (ls && r && *ls == *r) : !r;
+
         bool local_changed, remote_changed;
         if (in.pairing) {
             remote_changed = r.has_value();
-            local_changed  = l && r && *l != *r;
+            local_changed  = l && r && !same_as_remote;
         } else {
             local_changed  = l != lb;
             remote_changed = r != rb;
@@ -50,7 +62,7 @@ MergeResult merge_bodies(const MergeInput& in)
         } else if (!remote_changed) {
             result = l;
             out.pending_local.insert(k);
-        } else if (l == r) {
+        } else if (same_as_remote) {
             result = l;
         } else {
             ++out.conflicts;
@@ -62,10 +74,16 @@ MergeResult merge_bodies(const MergeInput& in)
                 take_remote = true;
             }
         }
-        if (take_remote) {
-            if (r) {
-                result = r;
+        if (take_remote && translated && l && same_as_remote) {
+            result = l; // the local value already is the remote one in Studio's view: translating back could lose list items
+        } else if (take_remote) {
+            const std::optional<std::string> taken = r && translated ? in.forms->to_orca(k, *r, l.value_or(std::string())) : r;
+            if (taken) {
+                result = taken;
                 ++out.taken_remote;
+            } else if (r) {
+                result = l; // OrcaSlicer cannot take the remote value
+                ++out.kept_local;
             } else if (in.studio_knows(k)) {
                 result.reset(); // the preset inherits it
                 ++out.taken_remote;
@@ -80,7 +98,8 @@ MergeResult merge_bodies(const MergeInput& in)
     return out;
 }
 
-ValueMap apply_local_edits(const ValueMap& remote_now, const ValueMap& local, const ValueMap& local_base, const KeyTest& orca_knows)
+ValueMap apply_local_edits(const ValueMap& remote_now, const ValueMap& local, const ValueMap& local_base, const KeyTest& orca_knows,
+                           const Forms* forms)
 {
     // The envelope fields of the downloaded body (ids, times, name...) never go back up.
     const auto& metadata = hash_ignored_keys();
@@ -95,8 +114,15 @@ ValueMap apply_local_edits(const ValueMap& remote_now, const ValueMap& local, co
         if (!orca_knows(k)) continue;
         const auto l = find_value(local, k);
         if (l == find_value(local_base, k)) continue;
-        if (l) out[k] = *l;
-        else out.erase(k);
+        const FormRule rule = forms != nullptr ? forms->rule(k) : FormRule::Same;
+        if (rule == FormRule::Never) continue; // the body keeps what remote_now has
+        if (!l) {
+            out.erase(k);
+        } else if (rule == FormRule::Same) {
+            out[k] = *l;
+        } else if (const auto studio_value = forms->to_studio(k, *l)) {
+            out[k] = *studio_value;
+        } // else Studio cannot hold the value: the body keeps what remote_now has
     }
     if (const auto t = find_value(local, "type")) out["type"] = *t;
     if (const auto v = find_value(remote_now, "version")) out["version"] = *v;
@@ -104,9 +130,9 @@ ValueMap apply_local_edits(const ValueMap& remote_now, const ValueMap& local, co
     return out;
 }
 
-ValueMap upload_with_foreign(const ValueMap& local, const ValueMap& base, const KeyTest& orca_knows)
+ValueMap upload_with_foreign(const ValueMap& local, const ValueMap& base, const KeyTest& orca_knows, const Forms* forms)
 {
-    ValueMap    out      = local;
+    ValueMap    out      = forms != nullptr ? forms->studio_body(local) : local;
     const auto& metadata = hash_ignored_keys();
     for (const auto& [k, v] : base)
         if (!metadata.count(k) && !orca_knows(k)) out.emplace(k, v);

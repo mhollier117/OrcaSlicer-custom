@@ -8,6 +8,7 @@ add_executable(${_TEST_NAME}_tests
     test_bbl_filament_new_spools.cpp
     test_bbl_filament_tap.cpp
     test_bbl_preset_sync.cpp
+    test_bbl_preset_sync_forms.cpp
     test_bbl_preset_sync_kcopy.cpp
     test_bbl_preset_sync_merge.cpp
     test_bbl_preset_sync_mirror.cpp

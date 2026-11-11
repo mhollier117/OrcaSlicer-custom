@@ -2834,3 +2834,45 @@ TEST_CASE("Cached bodies are used when the plugin answers metadata-only entries"
     CHECK(e.store.pulls[1].body.at("filament_cost") == "b");
     CHECK(e.store.pulls[0].body.at("setting_id") == "PA");
 }
+
+// ---------------------------------------------------------------------------
+// Settings whose type differs between the two slicers
+// ---------------------------------------------------------------------------
+
+TEST_CASE("A setting whose type differs goes up in Studio's form and an unchanged save in Studio changes nothing", "[BblPresetSync]")
+{
+    Env e;
+    e.seed({});
+    // Studio: one text for the notes, whole numbers for the fan speeds. OrcaSlicer: a list of texts, decimals.
+    e.mirror.set_studio_keys(sync::StudioKeys({"filament_cost", "filament_notes", "fan_max_speed"},
+                                              {{"filament_notes", "coString"}, {"fan_max_speed", "coInts"}}),
+                             "BambuStudio vTest");
+    const sync::ValueMap local{{"type", "filament"},        {"inherits", "BBL PLA"}, {"base_id", "f1"},
+                               {"filament_cost", "1"},      {"filament_notes", "\"\""}, {"fan_max_speed", "100,80"}};
+    e.add_local_body("Notes", local);
+
+    e.pass();
+    REQUIRE(e.cloud.created_values.size() == 1);
+    const sync::ValueMap sent = e.cloud.created_values[0];
+    CHECK(sent.at("filament_notes").empty());       // Studio's form of an empty note
+    CHECK(sent.at("fan_max_speed") == "100,80");    // whole numbers pass unchanged
+    CHECK(e.mirror.status().translated_keys == 2);
+    REQUIRE(e.mirror.ledger()->get(fkey("Notes")).has_value());
+
+    // Studio saves the preset again without a change: a later update time, the same body.
+    sync::ValueMap body = sent;
+    body["setting_id"]  = "PF1";
+    remote_row(e, "Notes", "PF1", e.cloud.server_time + 100, body);
+    e.store.outcome.new_upload = local;
+
+    e.pass(sync::Trigger::Manual);
+    REQUIRE(e.store.pulls.size() == 1);
+    CHECK(e.store.pulls[0].body.at("filament_notes") == "\"\""); // the local note is still empty
+    CHECK(e.store.pulls[0].body.at("fan_max_speed") == "100,80");
+    CHECK(e.cloud.count("update") == 0);
+
+    e.pass(sync::Trigger::Manual);
+    CHECK(e.cloud.count("update") == 0);
+    CHECK(e.cloud.count("create") == 1);
+    CHECK(e.store.pulls.size() == 1);
+}

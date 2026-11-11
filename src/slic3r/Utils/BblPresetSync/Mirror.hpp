@@ -2,6 +2,7 @@
 
 #include "BaseStore.hpp"
 #include "Cloud.hpp"
+#include "Forms.hpp"
 #include "Keys.hpp"
 #include "Ledger.hpp"
 #include "Snapshot.hpp"
@@ -120,6 +121,7 @@ struct Status // for the MCP tool
     bool                     first_run_confirmed{false};
     size_t                   linked{0};
     std::string              studio_keys_source; // "bundled <version>" or "BambuStudio <tag>"; empty before the first pass
+    size_t                   translated_keys{0}; // settings whose type differs between the two slicers (rules of the Forms in use)
 };
 
 class Mirror
@@ -173,8 +175,10 @@ private:
     std::shared_ptr<Ledger> m_ledger;
     std::shared_ptr<BaseStore> m_base;
     StudioKeys              m_studio; // loaded on the first pass; read on the sync thread only
+    Forms                   m_forms;  // built from m_studio whenever it is set; read on the sync thread only
     bool                    m_studio_loaded{false};
     std::atomic<size_t>     m_studio_count{0};
+    std::atomic<size_t>     m_forms_count{0};
     std::optional<std::pair<StudioKeys, std::string>> m_studio_pending; // set_studio_keys, applied at the start of a pass (m_mutex)
     std::string             m_studio_source;                              // (m_mutex)
     struct CachedBody
