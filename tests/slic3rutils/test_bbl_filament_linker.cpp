@@ -1724,6 +1724,133 @@ TEST_CASE("Ops of a round still queued when the driver is reset send nothing", "
     CHECK(d.count("sync_slots") == 0);
 }
 
+TEST_CASE("Ops of a round still queued when the mode or the allow-list changes send nothing", "[BblFilament]")
+{
+    const int variant = GENERATE(0, 1, 2); // the mode goes Off; the mode goes DryRun; an allow-list is set
+    DriverRig d;
+    d.rig.cloud->rows.push_back(rfid_row(1000001, "UUID1"));
+    d.rig.cloud->rows.push_back(row_with(1000002));
+    d.rig.cloud->rows.push_back(row_with(1000003));
+    d.load();
+    auto p = make_printer();
+    p.trays.push_back(make_rfid_tray("0", "UUID1"));
+    p.trays.push_back(make_tray("1"));
+    p.trays.push_back(make_rfid_tray("2", "UUIDN1")); // a new official spool
+    d.driver->assign(make_assignment("dev1", "1", "1000002", 0));
+
+    d.rig.svc->update(json{{"spool_id", "1000003"}, {"note", "x"}}); // runs first: the round's ops wait behind it
+    d.driver->tick({p});
+    REQUIRE(d.driver->last_plan().mounts.size() == 2);
+    REQUIRE(d.driver->last_plan().registrations.size() == 1);
+    REQUIRE(d.driver->status_json({p})["round_in_flight"] == true);
+    if (variant == 0) d.driver->config.mode = fil::LinkMode::Off;
+    if (variant == 1) d.driver->config.mode = fil::LinkMode::DryRun;
+    if (variant == 2) d.driver->config.only_slots = {"dev1:0:3"};
+    d.driver->tick({p});
+    d.rig.settle();
+    CHECK(d.count("update") == 1);
+    CHECK(d.count("sync_ams") == 0);
+    CHECK(d.count("sync_slots") == 0);
+    CHECK(d.driver->status_json({p})["round_in_flight"] == false);
+    CHECK(d.driver->status_json({p})["assignments"].size() == 1); // the rest of the state is kept
+}
+
+TEST_CASE("A tick with the same config leaves the queued round alone", "[BblFilament]")
+{
+    DriverRig d;
+    d.rig.cloud->rows.push_back(rfid_row(1000001, "UUID1"));
+    d.rig.cloud->rows.push_back(row_with(1000003));
+    d.load();
+    const auto p = with_tray(make_printer(), make_rfid_tray("0", "UUID1"));
+    d.rig.svc->update(json{{"spool_id", "1000003"}, {"note", "x"}});
+    d.driver->tick({p});
+    d.driver->tick({p});
+    d.rig.settle();
+    CHECK(d.count("sync_ams") == 1);
+}
+
+TEST_CASE("An explicit write needs linking on and an allowed slot", "[BblFilament]")
+{
+    const fil::SlotKey slot{"dev1", 0, "1"};
+    fil::LinkConfig    c;
+    CHECK(fil::write_refusal(c, &slot).empty());
+    CHECK(fil::write_refusal(c, nullptr).empty());
+    c.only_slots = {"dev1:0:1"};
+    CHECK(fil::write_refusal(c, &slot).empty());
+    c.only_slots = {"dev1:0:2"};
+    CHECK_FALSE(fil::write_refusal(c, &slot).empty());
+    CHECK(fil::write_refusal(c, nullptr).empty()); // a write without a slot does not look at the allow-list
+    c.only_slots.clear();
+    c.mode = fil::LinkMode::DryRun;
+    CHECK_FALSE(fil::write_refusal(c, &slot).empty());
+    CHECK(fil::write_refusal(c, &slot, true).empty());
+    c.mode = fil::LinkMode::Off;
+    CHECK_FALSE(fil::write_refusal(c, &slot).empty());
+    CHECK_FALSE(fil::write_refusal(c, &slot, true).empty());
+}
+
+TEST_CASE("An assignment is refused unless linking is on and the slot is allowed", "[BblFilament]")
+{
+    const int variant = GENERATE(0, 1, 2); // Off; DryRun; another slot allowed
+    DriverRig d;
+    if (variant == 0) d.driver->config.mode = fil::LinkMode::Off;
+    if (variant == 1) d.driver->config.mode = fil::LinkMode::DryRun;
+    if (variant == 2) d.driver->config.only_slots = {"dev1:0:2"};
+    const fil::Accept a = d.driver->assign(make_assignment("dev1", "1", "1000002", 0));
+    CHECK_FALSE(a.ok);
+    CHECK(a.kind == fil::FailKind::Rejected);
+    CHECK(d.driver->status_json({})["assignments"].empty());
+
+    d.driver->config = fil::LinkConfig{};
+    d.driver->config.only_slots = {"dev1:0:1"};
+    CHECK(d.driver->assign(make_assignment("dev1", "1", "1000002", 0)).ok);
+    CHECK(d.driver->status_json({})["assignments"].size() == 1);
+}
+
+TEST_CASE("Unassign is refused when linking is off or the slot is not allowed", "[BblFilament]")
+{
+    const int variant = GENERATE(0, 1); // Off; another slot allowed
+    DriverRig d;
+    d.rig.cloud->rows.push_back(mounted_json(row_with(1000002), "dev1", "sn0", 0, "1"));
+    d.load();
+    const auto p = with_tray(make_printer(), make_tray("1"));
+    if (variant == 0) d.driver->config.mode = fil::LinkMode::Off;
+    if (variant == 1) d.driver->config.only_slots = {"dev1:0:2"};
+    const fil::Accept a = d.driver->unassign(fil::SlotKey{"dev1", 0, "1"}, {p});
+    CHECK_FALSE(a.ok);
+    CHECK(a.kind == fil::FailKind::Rejected);
+    d.rig.settle();
+    CHECK(d.rig.cloud->log.empty());
+}
+
+TEST_CASE("Unassign in a dry run answers the spool it would unbind and sends nothing", "[BblFilament]")
+{
+    DriverRig d;
+    d.rig.cloud->rows.push_back(mounted_json(row_with(1000002), "dev1", "sn0", 0, "1"));
+    d.load();
+    const auto p = with_tray(make_printer(), make_tray("1"));
+    d.driver->config.mode = fil::LinkMode::DryRun;
+    std::string       would;
+    const fil::Accept a = d.driver->unassign(fil::SlotKey{"dev1", 0, "1"}, {p}, &would);
+    CHECK(a.ok);
+    CHECK(would == "1000002");
+    d.rig.settle();
+    CHECK(d.rig.cloud->log.empty());
+}
+
+TEST_CASE("A spool created for a slot linking may not touch is created but not assigned", "[BblFilament]")
+{
+    const int variant = GENERATE(0, 1); // DryRun; another slot allowed
+    DriverRig d;
+    d.load();
+    if (variant == 0) d.driver->config.mode = fil::LinkMode::DryRun;
+    if (variant == 1) d.driver->config.only_slots = {"dev1:0:2"};
+    REQUIRE(d.driver->create_and_assign(page_spool(), fil::SlotKey{"dev1", 0, "1"}).ok);
+    d.rig.settle();
+    CHECK(d.count("create") == 1);
+    CHECK(d.driver->status_json({})["creations"].empty());
+}
+
 TEST_CASE("Unassign refuses an RFID spool and an empty slot", "[BblFilament]")
 {
     DriverRig d;

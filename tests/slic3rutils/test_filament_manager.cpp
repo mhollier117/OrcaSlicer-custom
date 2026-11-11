@@ -1460,44 +1460,55 @@ TEST_CASE("An automatic weight push is reported in the shape of Bambu Studio", "
     CHECK(sent[1]["payload"]["pushed"] == 1);
 }
 
-TEST_CASE("The link settings map to the linker's mode", "[FilamentManager]")
+TEST_CASE("Without a session override or the environment the Preferences check box decides the link mode", "[FilamentManager]")
 {
-    CHECK(fm::link_config(false, false, "", "").mode == fil::LinkMode::Off);
-    CHECK(fm::link_config(false, true, "", "").mode == fil::LinkMode::Off);
-    CHECK(fm::link_config(true, true, "", "").mode == fil::LinkMode::DryRun);
-    CHECK(fm::link_config(true, false, "", "").mode == fil::LinkMode::On);
-    CHECK(fm::link_config(true, false, "", "").only_slots.empty());
-    CHECK(fm::link_config(true, false, "dev1:0:1", "").only_slots == std::set<std::string>{"dev1:0:1"});
+    CHECK(fm::link_config(false, "", std::nullopt, {}).mode == fil::LinkMode::Off);
+    CHECK(fm::link_config(true, "", std::nullopt, {}).mode == fil::LinkMode::On);
+    CHECK(fm::link_config(true, "", std::nullopt, {}).only_slots.empty());
+    CHECK(std::string(fm::link_mode_source("", std::nullopt)) == "config");
 }
 
-TEST_CASE("The environment override decides the link mode in place of the settings", "[FilamentManager]")
+TEST_CASE("The environment decides the link mode in place of the check box", "[FilamentManager]")
 {
-    // Each of the three values overrides every combination of the two settings.
-    for (bool enabled : {false, true})
-        for (bool dry_run : {false, true}) {
-            CHECK(fm::link_config(enabled, dry_run, "", "off").mode == fil::LinkMode::Off);
-            CHECK(fm::link_config(enabled, dry_run, "", "dry_run").mode == fil::LinkMode::DryRun);
-            CHECK(fm::link_config(enabled, dry_run, "", "on").mode == fil::LinkMode::On);
-        }
-    // The allow-list still comes from the settings.
-    CHECK(fm::link_config(false, false, "dev1:0:1", "on").only_slots == std::set<std::string>{"dev1:0:1"});
-    // An unknown or empty value is ignored.
-    for (const char* ignored : {"", "ON", "dryrun", "1", " on"}) {
-        CHECK(fm::link_config(false, false, "", ignored).mode == fil::LinkMode::Off);
-        CHECK(fm::link_config(true, true, "", ignored).mode == fil::LinkMode::DryRun);
-        CHECK(fm::link_config(true, false, "", ignored).mode == fil::LinkMode::On);
-        CHECK_FALSE(fm::is_link_mode_override(ignored));
+    for (bool enabled : {false, true}) {
+        CHECK(fm::link_config(enabled, "off", std::nullopt, {}).mode == fil::LinkMode::Off);
+        CHECK(fm::link_config(enabled, "dry_run", std::nullopt, {}).mode == fil::LinkMode::DryRun);
+        CHECK(fm::link_config(enabled, "on", std::nullopt, {}).mode == fil::LinkMode::On);
     }
-    CHECK(fm::is_link_mode_override("dry_run"));
+    CHECK(std::string(fm::link_mode_source("dry_run", std::nullopt)) == "env");
+    // An unknown or empty value is ignored.
+    for (const char* ignored : {"", "ON", "dryrun", "1", " on", "default"}) {
+        CHECK(fm::link_config(false, ignored, std::nullopt, {}).mode == fil::LinkMode::Off);
+        CHECK(fm::link_config(true, ignored, std::nullopt, {}).mode == fil::LinkMode::On);
+        CHECK_FALSE(fm::parse_link_mode(ignored).has_value());
+        CHECK(std::string(fm::link_mode_source(ignored, std::nullopt)) == "config");
+    }
 }
 
-TEST_CASE("The chosen slots are read from a comma-separated list", "[FilamentManager]")
+TEST_CASE("The session override decides the link mode before the environment and the check box", "[FilamentManager]")
 {
-    CHECK(fm::parse_only_slots("").empty());
-    CHECK(fm::parse_only_slots(" , ,").empty());
-    CHECK(fm::parse_only_slots("dev1:0:1, dev2:128:0 ,dev1:0:1") == std::set<std::string>{"dev1:0:1", "dev2:128:0"});
-    const std::set<std::string> slots{"dev2:0:3", "dev1:1:0"};
-    CHECK(fm::join_only_slots(slots) == "dev1:1:0,dev2:0:3");
-    CHECK(fm::parse_only_slots(fm::join_only_slots(slots)) == slots);
-    CHECK(fm::join_only_slots({}).empty());
+    for (bool enabled : {false, true})
+        for (const char* env : {"", "off", "dry_run", "on"}) {
+            CHECK(fm::link_config(enabled, env, fil::LinkMode::Off, {}).mode == fil::LinkMode::Off);
+            CHECK(fm::link_config(enabled, env, fil::LinkMode::DryRun, {}).mode == fil::LinkMode::DryRun);
+            CHECK(fm::link_config(enabled, env, fil::LinkMode::On, {}).mode == fil::LinkMode::On);
+            CHECK(std::string(fm::link_mode_source(env, fil::LinkMode::Off)) == "session");
+        }
+}
+
+TEST_CASE("The allow-list comes from the session only", "[FilamentManager]")
+{
+    const std::set<std::string> only{"dev1:0:1", "dev2:128:0"};
+    CHECK(fm::link_config(true, "", std::nullopt, only).only_slots == only);
+    CHECK(fm::link_config(false, "on", fil::LinkMode::DryRun, only).only_slots == only);
+    CHECK(fm::link_config(true, "on", std::nullopt, {}).only_slots.empty());
+}
+
+TEST_CASE("Link mode names read back as the mode they name", "[FilamentManager]")
+{
+    for (fil::LinkMode m : {fil::LinkMode::Off, fil::LinkMode::DryRun, fil::LinkMode::On}) {
+        const std::optional<fil::LinkMode> back = fm::parse_link_mode(fm::link_mode_text(m));
+        REQUIRE(back.has_value());
+        CHECK(*back == m);
+    }
 }

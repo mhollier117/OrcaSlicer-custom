@@ -607,8 +607,6 @@ void AppConfig::set_defaults()
     }
     if (get("filament_manager_link_enabled").empty())
         set_bool("filament_manager_link_enabled", true);
-    if (get("filament_manager_link_dry_run").empty())
-        set_bool("filament_manager_link_dry_run", false);
 
     if (get("keyboard_supported").empty()) {
         set("keyboard_supported", std::string("none/alt/control/shift"));

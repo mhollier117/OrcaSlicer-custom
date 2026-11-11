@@ -154,12 +154,18 @@ the app keeps that record current for every Bambu printer of the account, not on
   ten minutes, even when the next list does not show it (the cloud may store a value differently than it is compared).
   A newly registered spool is retried with a growing delay. An automatic weight push is reported to the page as
   `sync/auto_push_summary`.
-- **Settings.** `filament_manager_link_enabled` (Preferences, on by default) turns it off; `filament_manager_link_dry_run`
-  plans without sending; `filament_manager_link_only` limits it to a list of slots. While linking is on, the runtime
-  reads the list itself when it has none, so linking does not depend on the tab being open. The environment variable
-  `ORCA_FM_LINK_MODE` (`off`, `dry_run` or `on`, read once at start-up) decides the mode in place of the first two
-  settings, so a new build can be tried against a real account in report-only mode from its first second; the MCP
-  `link_status` shows it as `mode_source: "env"`.
+- **Settings.** The app config keeps one value, `filament_manager_link_enabled` (Preferences, on by default). The mode
+  (`on`, `off`, or `dry_run`, which plans without sending) is, in this order of precedence: the session override set
+  through the MCP `link_mode`, which lasts until the app closes and is never stored (`default` clears it); the
+  environment variable `ORCA_FM_LINK_MODE` (read once at start-up, so a new build can be tried against a real account in
+  report-only mode from its first second); the Preferences value. A list of slots that linking may touch is a session
+  setting of `link_mode` only (empty = every slot). `link_status` shows the mode, its `mode_source` (`session`, `env` or
+  `config`), the slots and the Preferences value. While linking is on, the runtime reads the list itself when it has
+  none, so linking does not depend on the tab being open.
+- **Explicit writes.** An assignment, an unbind asked for by hand and an answer to the new-spool queue are refused
+  unless the mode is `on`; an assignment and an unbind also for a slot outside a non-empty list of slots. In a dry run an
+  unbind answers what it would send. A spool created for a slot that linking may not touch is only added. When the mode
+  or the list of slots changes, the ops of the round still queued send nothing.
 
 ## A new official spool
 

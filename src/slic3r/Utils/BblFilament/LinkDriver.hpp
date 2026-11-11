@@ -8,6 +8,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -28,6 +29,11 @@ struct AutoPushSummary
     bool busy{false};         // that printer was busy
 };
 
+// Why an explicit write (an assignment, an unbind, an answer to the soft-match queue) is refused under `config`, or
+// empty when it may go ahead: linking must be on (in a dry run only when `dry_run_answers`, for a write that then
+// answers what it would send) and, when `slot` is given, the slot must be in the allow-list unless that is empty.
+std::string write_refusal(const LinkConfig& config, const SlotKey* slot, bool dry_run_answers = false);
+
 // Runs the linker's plans as rounds of link ops through the spool service. Lives on the service's thread and is not
 // thread-safe. It must not outlive the service.
 class LinkDriver
@@ -42,11 +48,17 @@ public:
     std::function<void(const AutoPushSummary&)>                   on_auto_push;  // after an op that pushed weights
     std::function<void(const SlotKey&, const std::string& rfid)> on_registered; // a new official spool was sent
 
-    void            tick(const std::vector<PrinterView>& printers); // call every couple of seconds
-    void            assign(const Assignment& a);                    // replaces an assignment for the same slot
-    // Creates a spool from a page-shaped spool object and assigns it to the slot once it has shown up in the list.
+    // Call every couple of seconds. A config (mode or allow-list) other than the one of the previous tick first drops
+    // the ops still queued (they send nothing); the rest of the state is kept.
+    void            tick(const std::vector<PrinterView>& printers);
+    // Replaces an assignment for the same slot. Refused (Rejected) when write_refusal() names a reason.
+    Accept          assign(const Assignment& a);
+    // Creates a spool from a page-shaped spool object and assigns it to the slot once it has shown up in the list; a
+    // plain add when write_refusal() names a reason.
     Accept          create_and_assign(const json& page_spool, const SlotKey& slot);
-    Accept          unassign(const SlotKey& slot, const std::vector<PrinterView>& printers); // unbind now (manual spools)
+    // Unbinds a manual spool from its slot now. Refused (Rejected) when write_refusal() names a reason; in a dry run it
+    // sends nothing and, when `would_unbind` is given, sets it to the spool it would unbind.
+    Accept          unassign(const SlotKey& slot, const std::vector<PrinterView>& printers, std::string* would_unbind = nullptr);
     void            sync_now();                                     // forget the round spacing, the busy cooldowns and what was sent lately, once
     void            reset();                                        // session changed: forget everything; ops still queued send nothing
     const LinkPlan& last_plan() const { return last_plan_; }
@@ -82,6 +94,8 @@ private:
     };
 
     long long now() const;
+    void      store_assignment(const Assignment& a);
+    void      drop_queued(); // queued ops send nothing and the round in flight is forgotten
     bool      waiting_for_list() const;
     void      resolve_creations();
     void      start_round(const std::vector<PrinterView>& printers);
@@ -93,7 +107,9 @@ private:
     LinkPlan       last_plan_;
 
     unsigned long long    generation_{0};      // grows with every reset: completions of an older one are ignored
-    unsigned long long    round_{0};           // grows with every round and every reset
+    unsigned long long    epoch_{0};           // grows with every reset and config change: older ops build nothing
+    unsigned long long    round_{0};           // grows with every round, every reset and every config change
+    std::optional<LinkConfig> last_config_;    // the config of the previous tick
     bool                  round_in_flight_{false};
     int                   round_pending_{0};   // ops of the round whose `done` has not been called yet
     bool                  have_round_{false};  // a round has ended since the last reset

@@ -3558,7 +3558,7 @@
         "readOnlyHint": false,
         "title": "Filament Manager"
       },
-      "description": "The filament spools kept in the user's Bambu account (the Filament Manager tab). Writes (add, update, remove) go to the user's Bambu account. Results arrive asynchronously: poll status until is_syncing is false and read recent for what happened. Linking keeps the account's record of which spool is in which AMS slot, and how much is left on it, in step with every Bambu printer of the account: link_status shows per printer what the printers report, what each tray matched, what would be sent and why not, and the last round; link_mode sets on, off or dry_run (dry_run plans without sending anything) and optionally limits linking to some slots; assign puts a spool without RFID into a slot, but binds it only when the printer reports that spool's filament and colour in that slot (within two minutes); unassign clears the slot of a spool without RFID now; sync_now runs the next round at once; soft_match reads the cloud's queue of new official spools of one AMS (shown in link_status); new_spools lists the slots that show the new-spool marker; soft_match_act answers an entry of that queue (accept the match, link_other to another spool, or create_new; the outcome shows in status recent). Printers are named by their names.",
+      "description": "The filament spools kept in the user's Bambu account (the Filament Manager tab). Writes (add, update, remove) go to the user's Bambu account. Results arrive asynchronously: poll status until is_syncing is false and read recent for what happened. Linking keeps the account's record of which spool is in which AMS slot, and how much is left on it, in step with every Bambu printer of the account: link_status shows per printer what the printers report, what each tray matched, what would be sent and why not, and the last round; link_mode sets on, off or dry_run for this session only (dry_run plans without sending anything; default returns to the ORCA_FM_LINK_MODE environment variable, else the Preferences setting; nothing is stored) and optionally limits linking to some slots for this session; link_status settings shows the mode, where it comes from and the slots. assign puts a spool without RFID into a slot, but binds it only when the printer reports that spool's filament and colour in that slot (within two minutes); unassign clears the slot of a spool without RFID now (in dry_run it answers what it would send); sync_now runs the next round at once; soft_match reads the cloud's queue of new official spools of one AMS (shown in link_status); new_spools lists the slots that show the new-spool marker; soft_match_act answers an entry of that queue (accept the match, link_other to another spool, or create_new; the outcome shows in status recent). assign, unassign and soft_match_act fail unless linking is on (unassign also in dry_run), and assign and unassign fail for a slot outside the session's slots. Printers are named by their names.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -3603,16 +3603,17 @@
             "type": "string"
           },
           "mode": {
-            "description": "link_mode: on, off, or dry_run (plans without sending). Omitted: unchanged.",
+            "description": "link_mode, for this session: on, off, dry_run (plans without sending), or default (the environment variable, else the Preferences setting). Omitted: unchanged.",
             "enum": [
               "on",
               "off",
-              "dry_run"
+              "dry_run",
+              "default"
             ],
             "type": "string"
           },
           "only": {
-            "description": "link_mode: the only slots linking may touch, each \"<printer name>:<ams id>:<slot id>\"; an empty array lifts the limit. Omitted: unchanged.",
+            "description": "link_mode, for this session: the only slots linking may touch, each \"<printer name>:<ams id>:<slot id>\"; an empty array lifts the limit. Omitted: unchanged.",
             "items": {
               "type": "string"
             },

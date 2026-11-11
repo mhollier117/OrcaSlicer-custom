@@ -11,11 +11,13 @@
 #include "slic3r/Utils/CloudProvider.hpp"
 #include "slic3r/Utils/NetworkAgentFactory.hpp"
 
-#include <cstddef>
 #include <cstdlib>
 #include <ctime>
 #include <exception>
 #include <map>
+#include <optional>
+#include <set>
+#include <string>
 #include <utility>
 
 namespace Slic3r::GUI::Fm {
@@ -102,50 +104,44 @@ std::vector<fil::PrinterView> printer_views(DeviceManager* devices, const fil::P
     return out;
 }
 
-std::set<std::string> parse_only_slots(const std::string& only)
+std::optional<fil::LinkMode> parse_link_mode(const std::string& text)
 {
-    std::set<std::string> out;
-    std::size_t           begin = 0;
-    while (begin <= only.size()) {
-        std::size_t end = only.find(',', begin);
-        if (end == std::string::npos)
-            end = only.size();
-        std::string item = only.substr(begin, end - begin);
-        const auto  first = item.find_first_not_of(" \t");
-        const auto  last  = item.find_last_not_of(" \t");
-        if (first != std::string::npos)
-            out.insert(item.substr(first, last - first + 1));
-        begin = end + 1;
-    }
-    return out;
+    if (text == "off")
+        return fil::LinkMode::Off;
+    if (text == "dry_run")
+        return fil::LinkMode::DryRun;
+    if (text == "on")
+        return fil::LinkMode::On;
+    return std::nullopt;
 }
 
-std::string join_only_slots(const std::set<std::string>& slots)
+const char* link_mode_text(fil::LinkMode mode)
 {
-    std::string out;
-    for (const std::string& s : slots) {
-        if (!out.empty())
-            out += ",";
-        out += s;
+    switch (mode) {
+    case fil::LinkMode::Off: return "off";
+    case fil::LinkMode::DryRun: return "dry_run";
+    default: return "on";
     }
-    return out;
 }
 
-bool is_link_mode_override(const std::string& mode_override)
+fil::LinkConfig link_config(bool enabled, const std::string& env, const std::optional<fil::LinkMode>& session_mode, const std::set<std::string>& session_only)
 {
-    return mode_override == "off" || mode_override == "dry_run" || mode_override == "on";
-}
-
-fil::LinkConfig link_config(bool enabled, bool dry_run, const std::string& only, const std::string& mode_override)
-{
-    if (is_link_mode_override(mode_override)) {
-        enabled = mode_override != "off";
-        dry_run = mode_override == "dry_run";
-    }
     fil::LinkConfig c;
-    c.mode       = !enabled ? fil::LinkMode::Off : dry_run ? fil::LinkMode::DryRun : fil::LinkMode::On;
-    c.only_slots = parse_only_slots(only);
+    if (session_mode)
+        c.mode = *session_mode;
+    else if (const std::optional<fil::LinkMode> from_env = parse_link_mode(env))
+        c.mode = *from_env;
+    else
+        c.mode = enabled ? fil::LinkMode::On : fil::LinkMode::Off;
+    c.only_slots = session_only;
     return c;
+}
+
+const char* link_mode_source(const std::string& env, const std::optional<fil::LinkMode>& session_mode)
+{
+    if (session_mode)
+        return "session";
+    return parse_link_mode(env) ? "env" : "config";
 }
 
 const std::string& link_mode_env()

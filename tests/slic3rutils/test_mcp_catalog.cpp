@@ -99,7 +99,7 @@ TEST_CASE("the filament_manager tool takes an action and a closed set of argumen
     CHECK(schema.at("properties").at("patch").at("type") == "object");
     CHECK(schema.at("properties").at("quantity").at("type") == "integer");
     CHECK(schema.at("properties").at("ids").at("items").at("type") == "string");
-    CHECK(schema.at("properties").at("mode").at("enum") == json::array({"on", "off", "dry_run"}));
+    CHECK(schema.at("properties").at("mode").at("enum") == json::array({"on", "off", "dry_run", "default"}));
     CHECK(schema.at("properties").at("only").at("items").at("type") == "string");
     CHECK(schema.at("properties").at("spool_id").at("type") == "string");
     CHECK(schema.at("properties").at("printer").at("type") == "string");
@@ -109,6 +109,7 @@ TEST_CASE("the filament_manager tool takes an action and a closed set of argumen
     CHECK(schema.at("properties").at("target_spool_id").at("type") == "string");
     const std::string description = tool->at("description").get<std::string>();
     CHECK(description.find("dry_run plans without sending") != std::string::npos);
+    CHECK(description.find("for this session only") != std::string::npos);
     CHECK(description.find("binds it only when the printer reports") != std::string::npos);
     CHECK(tool->at("annotations").at("readOnlyHint") == false);
 }

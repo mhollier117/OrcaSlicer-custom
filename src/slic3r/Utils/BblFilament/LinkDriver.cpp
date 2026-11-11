@@ -84,9 +84,26 @@ struct SlotEntry
 
 } // namespace
 
+std::string write_refusal(const LinkConfig& config, const SlotKey* slot, bool dry_run_answers)
+{
+    if (config.mode == LinkMode::Off) return "linking is off";
+    if (config.mode == LinkMode::DryRun && !dry_run_answers) return "linking is a dry run";
+    if (slot != nullptr && !config.only_slots.empty() && config.only_slots.count(slot->text()) == 0) return "the slot is not one of the slots linking may touch";
+    return {};
+}
+
 LinkDriver::LinkDriver(LinkDriverDeps deps) : deps_(std::move(deps)) {}
 
 long long LinkDriver::now() const { return deps_.now ? deps_.now() : 0; }
+
+void LinkDriver::drop_queued()
+{
+    ++epoch_;
+    ++round_;
+    round_in_flight_ = false;
+    round_pending_   = 0;
+    round_ops_.clear();
+}
 
 bool LinkDriver::waiting_for_list() const
 {
@@ -95,6 +112,9 @@ bool LinkDriver::waiting_for_list() const
 
 void LinkDriver::tick(const std::vector<PrinterView>& printers)
 {
+    // What was queued under another mode or allow-list is not sent.
+    if (last_config_ && (last_config_->mode != config.mode || last_config_->only_slots != config.only_slots)) drop_queued();
+    last_config_ = config;
     if (config.mode == LinkMode::Off) return;
     SpoolService* svc = deps_.service;
     if (svc == nullptr || !svc->state().signed_in) return;
@@ -159,6 +179,7 @@ void LinkDriver::start_round(const std::vector<PrinterView>& printers)
     ++round_;
     const unsigned long long round = round_;
     const unsigned long long gen   = generation_;
+    const unsigned long long epoch = epoch_;
     std::weak_ptr<int>       weak  = alive_;
 
     std::vector<std::pair<LinkRequest, std::string>> requests;
@@ -173,11 +194,11 @@ void LinkDriver::start_round(const std::vector<PrinterView>& printers)
             LinkRequest                 req;
             req.kind      = LinkRequest::Kind::AmsSync;
             req.dev_id    = dev;
-            req.build_ams = [this, weak, gen, entries, measured, keys, dev](const std::vector<Spool>& now_rows, const std::set<std::string>& busy_ids) {
+            req.build_ams = [this, weak, epoch, entries, measured, keys, dev](const std::vector<Spool>& now_rows, const std::set<std::string>& busy_ids) {
                 std::vector<AmsItem> items;
                 measured->clear();
                 keys->clear();
-                if (weak.expired() || gen != generation_) return items; // a round of before a reset: dropped without a call
+                if (weak.expired() || epoch != epoch_) return items; // queued before a reset or a config change: dropped without a call
                 for (const AmsEntry& e : entries) {
                     const Spool* row = find_row(now_rows, e.spool_id);
                     if (row == nullptr || busy_ids.count(e.spool_id) > 0 || row->rfid != e.rfid) continue;
@@ -217,8 +238,8 @@ void LinkDriver::start_round(const std::vector<PrinterView>& printers)
                 LinkRequest          req;
                 req.kind      = LinkRequest::Kind::AmsSync;
                 req.dev_id    = dev;
-                req.build_ams = [this, weak, gen, tray, ams_sn, lookup](const std::vector<Spool>& now_rows, const std::set<std::string>&) {
-                    if (weak.expired() || gen != generation_) return std::vector<AmsItem>();
+                req.build_ams = [this, weak, epoch, tray, ams_sn, lookup](const std::vector<Spool>& now_rows, const std::set<std::string>&) {
+                    if (weak.expired() || epoch != epoch_) return std::vector<AmsItem>();
                     for (const Spool& row : now_rows)
                         if (row.rfid == tray.uuid) return std::vector<AmsItem>(); // the account has it by now
                     return std::vector<AmsItem>{ams_item_from_tray(tray, ams_sn, lookup)};
@@ -248,9 +269,9 @@ void LinkDriver::start_round(const std::vector<PrinterView>& printers)
             LinkRequest                  req;
             req.kind        = LinkRequest::Kind::SlotSync;
             req.dev_id      = dev;
-            req.build_slots = [this, weak, gen, entries](const std::vector<Spool>& now_rows, const std::set<std::string>& busy_ids) {
+            req.build_slots = [this, weak, epoch, entries](const std::vector<Spool>& now_rows, const std::set<std::string>& busy_ids) {
                 std::vector<SlotItem> items;
-                if (weak.expired() || gen != generation_) return items;
+                if (weak.expired() || epoch != epoch_) return items;
                 for (const SlotEntry& e : entries) {
                     const Spool* row = find_row(now_rows, e.spool_id);
                     if (row == nullptr || busy_ids.count(e.spool_id) > 0) continue;
@@ -320,7 +341,14 @@ void LinkDriver::record_slot_results(const std::string& dev_id, const LinkOutcom
     }
 }
 
-void LinkDriver::assign(const Assignment& a)
+Accept LinkDriver::assign(const Assignment& a)
+{
+    if (!write_refusal(config, &a.slot).empty()) return {false, FailKind::Rejected};
+    store_assignment(a);
+    return {};
+}
+
+void LinkDriver::store_assignment(const Assignment& a)
 {
     Assignment copy = a;
     if (copy.created_at == 0) copy.created_at = now();
@@ -351,7 +379,8 @@ Accept LinkDriver::create_and_assign(const json& page_spool, const SlotKey& slot
     c.list_serial = svc->list_serial();
     for (const Spool& r : svc->confirmed()) c.baseline.insert(r.id);
     // Without a list there is no baseline to tell the new spool from an older identical one: it is created, not assigned.
-    const bool remember = c.list_serial > 0;
+    // It is not assigned either while linking may not write to that slot.
+    const bool remember = c.list_serial > 0 && write_refusal(config, &slot).empty();
 
     const unsigned long long gen  = generation_;
     std::weak_ptr<int>       weak = alive_;
@@ -381,7 +410,7 @@ void LinkDriver::resolve_creations()
                 a.spool_id    = found.front()->id;
                 a.filament_id = found.front()->filament_id;
                 a.colors      = found.front()->colors.empty() ? std::vector<std::string>{found.front()->color} : found.front()->colors;
-                assign(a);
+                store_assignment(a);
                 continue;
             }
             if (found.size() > 1) {
@@ -396,10 +425,11 @@ void LinkDriver::resolve_creations()
     creations_ = std::move(keep);
 }
 
-Accept LinkDriver::unassign(const SlotKey& slot, const std::vector<PrinterView>& printers)
+Accept LinkDriver::unassign(const SlotKey& slot, const std::vector<PrinterView>& printers, std::string* would_unbind)
 {
     SpoolService* svc = deps_.service;
     if (svc == nullptr) return {false, FailKind::Unavailable};
+    if (!write_refusal(config, &slot, true).empty()) return {false, FailKind::Rejected};
     const Spool* row = nullptr;
     for (const Spool& r : svc->confirmed())
         if (claims_slot(r, slot)) {
@@ -422,6 +452,10 @@ Accept LinkDriver::unassign(const SlotKey& slot, const std::vector<PrinterView>&
                 }
     }
     if (ams_sn.empty() || ams_type < 0) return {false, FailKind::BadRequest};
+    if (config.mode == LinkMode::DryRun) { // what it would send, and nothing more
+        if (would_unbind != nullptr) *would_unbind = row->id;
+        return {};
+    }
 
     state_.assignments.erase(slot);
     const std::string        spool_id     = row->id;
@@ -429,13 +463,14 @@ Accept LinkDriver::unassign(const SlotKey& slot, const std::vector<PrinterView>&
     const int                row_ams_type = row->ams_type;
     std::weak_ptr<int>       weak         = alive_;
     const unsigned long long gen          = generation_;
+    const unsigned long long epoch        = epoch_;
     const std::string        dev          = slot.dev_id;
     LinkRequest              req;
     req.kind        = LinkRequest::Kind::SlotSync;
     req.dev_id      = slot.dev_id;
-    req.build_slots = [this, weak, gen, slot, spool_id, row_ams_sn, row_ams_type, ams_sn, ams_type](const std::vector<Spool>& now_rows,
-                                                                                                    const std::set<std::string>&) {
-        if (weak.expired() || gen != generation_) return std::vector<SlotItem>();
+    req.build_slots = [this, weak, epoch, slot, spool_id, row_ams_sn, row_ams_type, ams_sn, ams_type](const std::vector<Spool>& now_rows,
+                                                                                                      const std::set<std::string>&) {
+        if (weak.expired() || epoch != epoch_) return std::vector<SlotItem>();
         if (!unbind_still_wanted(now_rows, spool_id, slot, row_ams_sn, row_ams_type)) return std::vector<SlotItem>();
         return std::vector<SlotItem>{slot_unbind(ams_sn, slot.ams_id, ams_type, slot.slot_id)};
     };
@@ -456,6 +491,7 @@ void LinkDriver::sync_now()
 void LinkDriver::reset()
 {
     ++generation_;
+    ++epoch_;
     ++round_;
     state_           = LinkerState{};
     last_plan_       = LinkPlan{};

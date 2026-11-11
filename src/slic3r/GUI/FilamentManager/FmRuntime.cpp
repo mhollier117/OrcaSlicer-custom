@@ -205,11 +205,9 @@ void Runtime::tick()
         }
         if (!s.signed_in)
             return;
-        AppConfig* config = wxGetApp().app_config;
-        if (config == nullptr)
+        if (wxGetApp().app_config == nullptr)
             return;
-        m_linker->config = link_config(config->get_bool("filament_manager_link_enabled"), config->get_bool("filament_manager_link_dry_run"),
-                                       config->get("filament_manager_link_only"), link_mode_env());
+        m_linker->config    = link_settings();
         const long long now = unix_now();
 
         // The linker needs the account's list also while the Filament Manager tab is closed.
@@ -252,17 +250,18 @@ void Runtime::tick()
     }
 }
 
+fil::LinkConfig Runtime::link_settings() const
+{
+    const AppConfig* config = wxGetApp().app_config;
+    return link_config(config != nullptr && config->get_bool("filament_manager_link_enabled"), link_mode_env(), m_session_mode, m_session_only);
+}
+
 bool Runtime::link_available(const std::string& dev_id) const
 {
     try {
         if (dev_id.empty() || !session().signed_in)
             return false;
-        AppConfig* config = wxGetApp().app_config;
-        if (config == nullptr)
-            return false;
-        const fil::LinkConfig c = link_config(config->get_bool("filament_manager_link_enabled"), config->get_bool("filament_manager_link_dry_run"),
-                                              config->get("filament_manager_link_only"), link_mode_env());
-        if (c.mode != fil::LinkMode::On)
+        if (link_settings().mode != fil::LinkMode::On)
             return false;
         for (const fil::PrinterView& v : printer_views(wxGetApp().getDeviceManager(), *m_tap, unix_now()))
             if (v.dev_id == dev_id)
@@ -274,6 +273,9 @@ bool Runtime::link_available(const std::string& dev_id) const
 
 fil::Accept Runtime::assign(const std::string& spool_id, const fil::SlotKey& slot)
 {
+    m_linker->config = link_settings();
+    if (!fil::write_refusal(m_linker->config, &slot).empty())
+        return {false, fil::FailKind::Rejected};
     const fil::Spool* row = nullptr;
     for (const fil::Spool& r : m_service->confirmed())
         if (r.id == spool_id)
@@ -289,9 +291,16 @@ fil::Accept Runtime::assign(const std::string& spool_id, const fil::SlotKey& slo
     a.colors      = row->colors.empty() ? std::vector<std::string>{row->color} : row->colors;
     if (a.colors.front().empty())
         return {false, fil::FailKind::BadRequest};
-    m_linker->assign(a);
-    log_event({{"event", "assigned"}, {"ams_id", slot.ams_id}, {"slot_id", slot.slot_id}, {"spool_id", a.spool_id}});
-    return {};
+    const fil::Accept accepted = m_linker->assign(a);
+    if (accepted.ok)
+        log_event({{"event", "assigned"}, {"ams_id", slot.ams_id}, {"slot_id", slot.slot_id}, {"spool_id", a.spool_id}});
+    return accepted;
+}
+
+fil::Accept Runtime::unassign(const fil::SlotKey& slot, std::string* would_unbind)
+{
+    m_linker->config = link_settings();
+    return m_linker->unassign(slot, views(), would_unbind);
 }
 
 fil::Accept Runtime::create_and_assign(const json& page_spool, const fil::SlotKey& slot)
@@ -300,7 +309,8 @@ fil::Accept Runtime::create_and_assign(const json& page_spool, const fil::SlotKe
         const auto it = page_spool.is_object() ? page_spool.find(key) : page_spool.end();
         return it != page_spool.end() && it->is_string() ? it->get<std::string>() : std::string();
     };
-    if (!link_available(slot.dev_id) || text("setting_id").empty() || text("color_code").empty())
+    m_linker->config = link_settings();
+    if (!link_available(slot.dev_id) || !fil::write_refusal(m_linker->config, &slot).empty() || text("setting_id").empty() || text("color_code").empty())
         return m_service->add(page_spool, 1);
     const fil::Accept a = m_linker->create_and_assign(page_spool, slot);
     if (a.ok)
@@ -334,15 +344,21 @@ fil::Accept Runtime::request_soft_match(const fil::PrinterView& printer, int ams
     return m_service->link(std::move(req));
 }
 
-fil::Accept Runtime::soft_match_act(const std::string& action, const std::string& spool_id, const std::string& target_spool_id)
+fil::Accept Runtime::soft_match_act(const std::string& action, const std::string& spool_id, const std::string& target_spool_id,
+                                    const std::string& dev_id, std::function<void(const fil::SpoolService::LinkOutcome&)> done)
 {
+    if (!fil::write_refusal(link_settings(), nullptr).empty())
+        return {false, fil::FailKind::Rejected};
     fil::SpoolService::LinkRequest req;
     req.kind            = fil::SpoolService::LinkRequest::Kind::SoftMatchAct;
+    req.dev_id          = dev_id;
     req.action          = action;
     req.spool_id        = spool_id;
     req.target_spool_id = target_spool_id;
-    req.done            = [this, action](const fil::SpoolService::LinkOutcome& out) {
+    req.done            = [this, action, done = std::move(done)](const fil::SpoolService::LinkOutcome& out) {
         log_event({{"event", "soft_match_act"}, {"action", action}, {"ok", out.ok}, {"kind", out.ok ? "" : fail_name(out.kind)}, {"message", out.message}});
+        if (done)
+            done(out);
     };
     return m_service->link(std::move(req));
 }

@@ -84,14 +84,12 @@ json spool_list()
 // linking. Printers are named, never identified by their serial (the dev id).
 
 const char* k_enabled = "filament_manager_link_enabled";
-const char* k_dry_run = "filament_manager_link_dry_run";
-const char* k_only    = "filament_manager_link_only";
 
-AppConfig& app_config()
+// An explicit write refused by the link mode or the allow-list is a tool failure that says why.
+void check_write(const char* what, const fil::SlotKey* slot, bool dry_run_answers = false)
 {
-    AppConfig* config = wxGetApp().app_config;
-    if (config == nullptr) throw ToolFailure("the app configuration is not available");
-    return *config;
+    const std::string why = fil::write_refusal(Fm::Runtime::get().link_settings(), slot, dry_run_answers);
+    if (!why.empty()) throw ToolFailure(std::string(what) + " refused: " + why);
 }
 
 const fil::PrinterView& printer_named(const std::string& name, const std::vector<fil::PrinterView>& views)
@@ -168,13 +166,15 @@ std::string slot_by_name(const std::string& text, const std::vector<fil::Printer
 
 json settings_json(const std::vector<fil::PrinterView>& views)
 {
-    const AppConfig& config = app_config();
-    json             only   = json::array();
-    for (const std::string& slot : Fm::parse_only_slots(config.get(k_only))) only.push_back(slot_by_name(slot, views));
-    return {{k_enabled, config.get_bool(k_enabled)},
-            {k_dry_run, config.get_bool(k_dry_run)},
-            {k_only, std::move(only)},
-            {"mode_source", Fm::is_link_mode_override(Fm::link_mode_env()) ? "env" : "config"}};
+    const Fm::Runtime&    runtime  = Fm::Runtime::get();
+    const fil::LinkConfig settings = runtime.link_settings();
+    const AppConfig*      config   = wxGetApp().app_config;
+    json                  only     = json::array();
+    for (const std::string& slot : settings.only_slots) only.push_back(slot_by_name(slot, views));
+    return {{"mode", Fm::link_mode_text(settings.mode)},
+            {"mode_source", Fm::link_mode_source(Fm::link_mode_env(), runtime.session_link_mode())},
+            {"only", std::move(only)},
+            {k_enabled, config != nullptr && config->get_bool(k_enabled)}};
 }
 
 json tap_json(const std::vector<fil::PrinterView>& views)
@@ -217,13 +217,15 @@ json link_status()
     return j;
 }
 
+// Session settings only: nothing is written to the app config.
 json link_mode(const json& args)
 {
-    const std::vector<fil::PrinterView> views = Fm::Runtime::get().views();
-    const std::string                   mode  = arg_string(args, "mode");
-    if (args.contains("mode") && mode != "on" && mode != "off" && mode != "dry_run") throw ToolFailure("mode must be on, off or dry_run");
+    Fm::Runtime&                        runtime = Fm::Runtime::get();
+    const std::vector<fil::PrinterView> views   = runtime.views();
+    const std::string                   mode    = arg_string(args, "mode");
+    if (args.contains("mode") && mode != "default" && !Fm::parse_link_mode(mode)) throw ToolFailure("mode must be on, off, dry_run or default");
 
-    // Everything is checked before anything is written.
+    // Everything is checked before anything is set.
     std::optional<std::set<std::string>> only;
     if (auto it = args.find("only"); it != args.end()) {
         if (!it->is_array()) throw ToolFailure("only must be an array of \"<printer name>:<ams id>:<slot id>\"");
@@ -241,19 +243,10 @@ json link_mode(const json& args)
         }
     }
 
-    AppConfig& config = app_config();
-    if (args.contains("mode")) {
-        config.set_bool(k_enabled, mode != "off");
-        config.set_bool(k_dry_run, mode == "dry_run");
-    }
-    if (only) config.set(k_only, Fm::join_only_slots(*only));
-    config.save();
-    Fm::Runtime::get().linker().config = Fm::link_config(config.get_bool(k_enabled), config.get_bool(k_dry_run), config.get(k_only), Fm::link_mode_env());
-    json reply = settings_json(views);
-    if (Fm::is_link_mode_override(Fm::link_mode_env()))
-        reply["note"] = "the environment variable ORCA_FM_LINK_MODE=" + Fm::link_mode_env() +
-                        " decides the mode while this process runs; the stored mode applies when the app starts without it";
-    return reply;
+    if (args.contains("mode")) runtime.set_session_link_mode(Fm::parse_link_mode(mode)); // "default": none
+    if (only) runtime.set_session_link_only(std::move(*only));
+    runtime.linker().config = runtime.link_settings();
+    return settings_json(views);
 }
 
 json assign(const json& args)
@@ -265,8 +258,11 @@ json assign(const json& args)
     else if (it != args.end() && it->is_number_integer()) spool_id = std::to_string(it->get<long long>());
     if (spool_id.empty()) throw ToolFailure("assign needs spool_id");
 
-    const fil::Accept a = runtime.assign(spool_id, slot_arg(args, views));
+    const fil::SlotKey slot = slot_arg(args, views);
+    check_write("assign", &slot);
+    const fil::Accept a = runtime.assign(spool_id, slot);
     if (a.ok) return {{"assigned", true}};
+    if (a.kind == fil::FailKind::Rejected) throw ToolFailure("assign refused: linking is not on or the slot is not allowed");
     if (a.kind == fil::FailKind::NotFound) throw ToolFailure("no spool " + spool_id + " in the last list of the account");
     for (const fil::Spool& r : runtime.service().confirmed()) {
         if (r.id != spool_id) continue;
@@ -317,7 +313,24 @@ json soft_match_act(const json& args)
         throw ToolFailure("match_action must be accept, link_other or create_new");
     const std::string spool_id = id_arg(args, "spool_id");
     const std::string target   = action == "link_other" ? id_arg(args, "target_spool_id") : std::string();
+    check_write("soft_match_act", nullptr);
     return accept_json(Fm::Runtime::get().soft_match_act(action, spool_id, target));
+}
+
+json unassign(const json& args)
+{
+    Fm::Runtime&                        runtime = Fm::Runtime::get();
+    const std::vector<fil::PrinterView> views   = runtime.views();
+    const fil::SlotKey                  slot    = slot_arg(args, views);
+    check_write("unassign", &slot, true);
+    std::string       would_unbind;
+    const fil::Accept a = runtime.unassign(slot, &would_unbind);
+    json              reply = accept_json(a);
+    if (a.ok && runtime.link_settings().mode == fil::LinkMode::DryRun) {
+        reply["dry_run"]    = true;
+        reply["would_send"] = {{"unbind", {{"printer", printer_name(slot.dev_id, views)}, {"ams_id", slot.ams_id}, {"slot_id", slot.slot_id}, {"spool_id", would_unbind}}}};
+    }
+    return reply;
 }
 
 json run_action(const json& args)
@@ -329,10 +342,7 @@ json run_action(const json& args)
     if (action == "link_status") return link_status();
     if (action == "link_mode") return link_mode(args);
     if (action == "assign") return assign(args);
-    if (action == "unassign") {
-        const std::vector<fil::PrinterView> views = runtime.views();
-        return accept_json(runtime.linker().unassign(slot_arg(args, views), views));
-    }
+    if (action == "unassign") return unassign(args);
     if (action == "sync_now") {
         runtime.linker().sync_now();
         return {{"requested", true}};
@@ -374,12 +384,15 @@ void register_filament_manager_tools(McpService& service)
         "account. Results arrive asynchronously: poll status until is_syncing is false and read recent for what happened. "
         "Linking keeps the account's record of which spool is in which AMS slot, and how much is left on it, in step with every Bambu printer "
         "of the account: link_status shows per printer what the printers report, what each tray matched, what would be sent and why not, and "
-        "the last round; link_mode sets on, off or dry_run (dry_run plans without sending anything) and optionally limits linking to some "
-        "slots; assign puts a spool without RFID into a slot, but binds it only when the printer reports that spool's filament and colour in "
-        "that slot (within two minutes); unassign clears the slot of a spool without RFID now; sync_now runs the next round at once; "
-        "soft_match reads the cloud's queue of new official spools of one AMS (shown in link_status); new_spools lists the slots that show the "
-        "new-spool marker; soft_match_act answers an entry of that queue (accept the match, link_other to another spool, or create_new; the "
-        "outcome shows in status recent). Printers are named by their names.",
+        "the last round; link_mode sets on, off or dry_run for this session only (dry_run plans without sending anything; default returns to "
+        "the ORCA_FM_LINK_MODE environment variable, else the Preferences setting; nothing is stored) and optionally limits linking to some "
+        "slots for this session; link_status settings shows the mode, where it comes from and the slots. assign puts a spool without RFID into "
+        "a slot, but binds it only when the printer reports that spool's filament and colour in that slot (within two minutes); unassign "
+        "clears the slot of a spool without RFID now (in dry_run it answers what it would send); sync_now runs the next round at once; "
+        "soft_match reads the cloud's queue of new official spools of one AMS (shown in link_status); new_spools lists the slots that show the new-spool marker; soft_match_act answers an entry of that queue (accept the match, "
+        "link_other to another spool, or create_new; the outcome shows in status recent). assign, unassign and soft_match_act fail unless "
+        "linking is on (unassign also in dry_run), and assign and unassign fail for a slot outside the session's slots. Printers are named "
+        "by their names.",
         object_schema({{"action", enum_prop({"status", "list", "pull", "add", "update", "remove", "link_status", "link_mode", "assign", "unassign",
                                              "sync_now", "soft_match", "new_spools", "soft_match_act"},
                                             "What to do.")},
@@ -392,8 +405,8 @@ void register_filament_manager_tools(McpService& service)
                         }()},
                        {"patch", prop("object", "update: spool_id plus the fields to change, in the page's spool shape.")},
                        {"ids", array_prop({{"type", "string"}}, "remove: the spool_id values to delete.")},
-                       {"mode", enum_prop({"on", "off", "dry_run"}, "link_mode: on, off, or dry_run (plans without sending). Omitted: unchanged.")},
-                       {"only", array_prop({{"type", "string"}}, "link_mode: the only slots linking may touch, each \"<printer name>:<ams id>:<slot id>\"; an empty array lifts the limit. Omitted: unchanged.")},
+                       {"mode", enum_prop({"on", "off", "dry_run", "default"}, "link_mode, for this session: on, off, dry_run (plans without sending), or default (the environment variable, else the Preferences setting). Omitted: unchanged.")},
+                       {"only", array_prop({{"type", "string"}}, "link_mode, for this session: the only slots linking may touch, each \"<printer name>:<ams id>:<slot id>\"; an empty array lifts the limit. Omitted: unchanged.")},
                        {"spool_id", prop("string", "assign: the spool (without RFID) to put into the slot. soft_match_act: the new spool's id (the queue entry).")},
                        {"match_action", enum_prop({"accept", "link_other", "create_new"}, "soft_match_act: accept the match, link the new spool to target_spool_id, or keep it as a new spool.")},
                        {"target_spool_id", prop("string", "soft_match_act with link_other: the existing spool the new one is.")},

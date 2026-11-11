@@ -12,10 +12,13 @@
 #include <wx/timer.h>
 
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Slic3r::GUI::Fm {
@@ -50,17 +53,30 @@ public:
     // Reads the soft-match queue of one AMS; the result shows in soft_match_json().
     BblFilament::Accept request_soft_match(const BblFilament::PrinterView& printer, int ams_id);
     const json&         soft_match_json() const { return m_soft_match; }
-    // Queues an answer to that queue: "accept", "link_other" (to target_spool_id) or "create_new" for spool_id. The
-    // outcome shows in the recent events.
-    BblFilament::Accept soft_match_act(const std::string& action, const std::string& spool_id, const std::string& target_spool_id);
+    // Queues an answer to that queue: "accept", "link_other" (to target_spool_id) or "create_new" for spool_id. Refused
+    // (Rejected) unless linking is on. The outcome shows in the recent events and is handed to `done`, if any.
+    BblFilament::Accept soft_match_act(const std::string& action, const std::string& spool_id, const std::string& target_spool_id,
+                                       const std::string& dev_id = {},
+                                       std::function<void(const BblFilament::SpoolService::LinkOutcome&)> done = {});
+
+    // The link mode and allow-list set through MCP. They last for this session and are never stored; no mode means
+    // the environment variable or the app config decides.
+    void                                        set_session_link_mode(std::optional<BblFilament::LinkMode> mode) { m_session_mode = mode; }
+    void                                        set_session_link_only(std::set<std::string> slots) { m_session_only = std::move(slots); }
+    const std::optional<BblFilament::LinkMode>& session_link_mode() const { return m_session_mode; }
+    // The linker's settings now: link_config() over the app config, ORCA_FM_LINK_MODE and the session's override.
+    BblFilament::LinkConfig link_settings() const;
 
     // Linking is on (not off, not a dry run), the user is signed in and the printer takes part (printer_views).
     bool link_available(const std::string& dev_id) const;
-    // Assigns a confirmed spool without RFID that is not in a printer to the slot.
+    // Assigns a confirmed spool without RFID that is not in a printer to the slot. Refused (Rejected) unless linking is
+    // on and the slot is allowed (BblFilament::write_refusal).
     BblFilament::Accept assign(const std::string& spool_id, const BblFilament::SlotKey& slot);
     // Creates the spool and assigns it to the slot once the list shows it; a plain add when linking is not available
-    // for that printer or the spool has no filament id or colour.
+    // for that printer or that slot, or the spool has no filament id or colour.
     BblFilament::Accept create_and_assign(const json& page_spool, const BblFilament::SlotKey& slot);
+    // LinkDriver::unassign with the current settings and printers.
+    BblFilament::Accept unassign(const BblFilament::SlotKey& slot, std::string* would_unbind = nullptr);
 
     json status_json(); // for the MCP tool
 
@@ -83,6 +99,8 @@ private:
     std::map<std::string, long long>           m_pushall_asked_at; // by dev id
     BblFilament::NewSpools                     m_new_spools;
     json                                       m_soft_match = nullptr;
+    std::optional<BblFilament::LinkMode>       m_session_mode;
+    std::set<std::string>                      m_session_only;
 };
 
 } // namespace Slic3r::GUI::Fm

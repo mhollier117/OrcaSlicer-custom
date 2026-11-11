@@ -13,6 +13,7 @@
 #include "slic3r/GUI/I18N.hpp"
 #include "slic3r/GUI/MsgDialog.hpp"
 #include "slic3r/GUI/Widgets/AMSControl.hpp"
+#include "slic3r/Utils/BblFilament/LinkDriver.hpp"
 #include "slic3r/Utils/BblFilament/Linker.hpp"
 #include "slic3r/Utils/BblFilament/NewSpools.hpp"
 #include "slic3r/Utils/BblFilament/PrinterTap.hpp"
@@ -113,14 +114,14 @@ std::set<fil::SlotKey>& in_flight()
 
 void send_choice(wxWindow* parent, const fil::SlotKey& slot, const fil::SoftMatchAct& act)
 {
-    fil::SpoolService::LinkRequest req;
-    req.kind            = fil::SpoolService::LinkRequest::Kind::SoftMatchAct;
-    req.dev_id          = slot.dev_id;
-    req.action          = act.action;
-    req.spool_id        = act.spool_id;
-    req.target_spool_id = act.target_spool_id;
+    if (!fil::write_refusal(Runtime::get().link_settings(), nullptr).empty()) {
+        MessageDialog(parent, _L("Linking spools to printer slots is not turned on, so the choice was not sent."), _L("Filament Manager"),
+                      wxOK | wxICON_WARNING)
+            .ShowModal();
+        return;
+    }
     wxWeakRef<wxWindow> weak(parent);
-    req.done = [weak](const fil::SpoolService::LinkOutcome& out) {
+    const auto          done = [weak](const fil::SpoolService::LinkOutcome& out) {
         if (out.ok)
             return; // the service pulls the list by itself
         const fil::FailKind kind = out.kind;
@@ -130,7 +131,7 @@ void send_choice(wxWindow* parent, const fil::SlotKey& slot, const fil::SoftMatc
                 show_failure(p, kind, msg);
         });
     };
-    const fil::Accept a = Runtime::get().service().link(std::move(req));
+    const fil::Accept a = Runtime::get().soft_match_act(act.action, act.spool_id, act.target_spool_id, slot.dev_id, done);
     if (!a.ok)
         show_failure(parent, a.kind, std::string());
 }

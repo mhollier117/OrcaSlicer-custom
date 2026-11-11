@@ -4,6 +4,7 @@
 #include "slic3r/Utils/BblFilament/PrinterTap.hpp"
 
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -26,15 +27,18 @@ std::map<std::string, MachineObject*> account_printers(DeviceManager& devices);
 // when it is a Bambu printer in LAN mode. Built from the device manager and the tap.
 std::vector<BblFilament::PrinterView> printer_views(DeviceManager* devices, const BblFilament::PrinterTap& tap, long long now);
 
-// The linker's settings from the app config: Off when not enabled, else DryRun when dry_run, else On; `only` is the
-// comma-separated list of SlotKey::text() values (empty = every slot). A `mode_override` of "off", "dry_run" or "on"
-// decides the mode in place of `enabled` and `dry_run`; any other text is ignored.
-BblFilament::LinkConfig link_config(bool enabled, bool dry_run, const std::string& only, const std::string& mode_override);
-// True when link_config() honours `mode_override`.
-bool is_link_mode_override(const std::string& mode_override);
+// "off", "dry_run" or "on"; nothing for any other text.
+std::optional<BblFilament::LinkMode> parse_link_mode(const std::string& text);
+const char*                          link_mode_text(BblFilament::LinkMode mode);
+
+// The linker's settings. The mode is the session's override when there is one, else `env` when parse_link_mode()
+// reads it, else On when `enabled` (the Preferences check box) and Off when not. The allow-list is the session's
+// (SlotKey::text() values; empty = every slot).
+BblFilament::LinkConfig link_config(bool enabled, const std::string& env, const std::optional<BblFilament::LinkMode>& session_mode,
+                                    const std::set<std::string>& session_only);
+// Where link_config() takes the mode from: "session", "env" or "config".
+const char* link_mode_source(const std::string& env, const std::optional<BblFilament::LinkMode>& session_mode);
 // The environment variable ORCA_FM_LINK_MODE, read once per process ("" when unset).
 const std::string& link_mode_env();
-std::set<std::string>   parse_only_slots(const std::string& only);
-std::string             join_only_slots(const std::set<std::string>& slots);
 
 } // namespace Slic3r::GUI::Fm
