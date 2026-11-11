@@ -33,10 +33,10 @@ struct MergeResult
 // Exchanges edits: a key changed locally when local != local_base, remotely when remote != remote_base.
 MergeResult merge_bodies(const MergeInput& in);
 
-// The body to upload: `remote_now` (every key of the Bambu copy, including the ones OrcaSlicer does not know and its metadata)
-// with the local edits applied: for every non-metadata key k that OrcaSlicer knows and where local[k] != local_base[k],
+// The body to upload: `remote_now` (every key of the Bambu copy, including the ones OrcaSlicer does not know, but none of the
+// envelope fields in hash_ignored_keys()) with the local edits applied: for every non-metadata key k that OrcaSlicer knows and where local[k] != local_base[k],
 // set it to local[k], or remove it when local has no such key. Then `type` is set from `local` (always), and `version`
-// from `local` only when `remote_now` has none.
+// from `remote_now` when it has one, else from `local`.
 ValueMap apply_local_edits(const ValueMap& remote_now, const ValueMap& local, const ValueMap& local_base, const KeyTest& orca_knows);
 
 // What to upload for a preset paired by fingerprint: the local map, plus every non-metadata key of `base` that OrcaSlicer

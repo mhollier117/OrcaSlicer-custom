@@ -15,12 +15,11 @@ std::string value_of(const ValueMap& m, const char* key)
     return it == m.end() ? std::string() : it->second;
 }
 
-// The Orca cloud time, user and id must not reach Bambu.
+// The Orca cloud time, user and id, and the envelope fields of a downloaded body, must not reach Bambu inside the preset.
+// The name is passed separately; "code" is only the slot the plugin writes the error code back to.
 void strip_foreign_keys(ValueMap& values)
 {
-    values.erase("updated_time");
-    values.erase("user_id");
-    values.erase("setting_id");
+    for (const char* key : {"updated_time", "update_time", "user_id", "setting_id", "nickname", "public", "code", "name"}) values.erase(key);
 }
 
 void fill_from_map(WriteResult& w, const ValueMap& values)

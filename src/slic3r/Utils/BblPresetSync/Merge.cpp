@@ -82,8 +82,11 @@ MergeResult merge_bodies(const MergeInput& in)
 
 ValueMap apply_local_edits(const ValueMap& remote_now, const ValueMap& local, const ValueMap& local_base, const KeyTest& orca_knows)
 {
-    ValueMap              out      = remote_now;
-    const auto&           metadata = hash_ignored_keys();
+    // The envelope fields of the downloaded body (ids, times, name...) never go back up.
+    const auto& metadata = hash_ignored_keys();
+    ValueMap    out;
+    for (const auto& kv : remote_now)
+        if (!metadata.count(kv.first)) out.insert(kv);
     std::set<std::string> keys;
     for (const ValueMap* m : {&local, &local_base})
         for (const auto& kv : *m)
@@ -96,8 +99,8 @@ ValueMap apply_local_edits(const ValueMap& remote_now, const ValueMap& local, co
         else out.erase(k);
     }
     if (const auto t = find_value(local, "type")) out["type"] = *t;
-    if (!out.count("version"))
-        if (const auto v = find_value(local, "version")) out["version"] = *v;
+    if (const auto v = find_value(remote_now, "version")) out["version"] = *v;
+    else if (const auto lv = find_value(local, "version")) out["version"] = *lv;
     return out;
 }
 

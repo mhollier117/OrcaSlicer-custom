@@ -300,13 +300,20 @@ TEST_CASE("apply_local_edits changes only what was edited locally", "[BblPresetS
         const auto     up = sync::apply_local_edits(remote, local, local_base, orca_k);
         CHECK(up.at("d") == "new");
     }
-    SECTION("unknown keys and the metadata of the Bambu copy survive")
+    SECTION("the envelope fields of the Bambu copy are dropped, unknown keys survive")
     {
+        ValueMap copy = remote;
+        copy["update_time"]  = "123";
+        copy["updated_time"] = "123";
+        copy["user_id"]      = "u";
+        copy["nickname"]     = "nick";
+        copy["public"]       = "false";
+        copy["code"]         = "0";
         const ValueMap local{{"a", "edited"}, {"b", "1"}, {"c", "1"}, {"name", "local-name"}};
-        const auto     up = sync::apply_local_edits(remote, local, local_base, orca_k);
+        const auto     up = sync::apply_local_edits(copy, local, local_base, orca_k);
         CHECK(up.at("studio_only") == "s");
-        CHECK(up.at("name") == "n");
-        CHECK(up.at("setting_id") == "P");
+        for (const char* k : {"update_time", "updated_time", "setting_id", "user_id", "name", "nickname", "public", "code"})
+            CHECK(up.count(k) == 0);
     }
     SECTION("an OrcaSlicer-unknown key edited locally is not applied")
     {

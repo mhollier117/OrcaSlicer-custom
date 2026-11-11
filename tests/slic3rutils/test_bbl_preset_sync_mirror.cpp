@@ -2318,8 +2318,10 @@ TEST_CASE("OrcaSlicer's own representation of a downloaded preset is not an edit
     e.pass(sync::Trigger::Manual);
     REQUIRE(e.cloud.updated_values.size() == 1);
     auto expected                = rem2;
+    expected.erase("setting_id"); // the envelope never goes back up
     expected["filament_density"] = "3";
     CHECK(e.cloud.updated_values[0] == expected); // none of the extra keys, no reformatted value
+    for (const char* k : {"update_time", "updated_time", "setting_id", "user_id", "name"}) CHECK(e.cloud.updated_values[0].count(k) == 0);
     e.pass(sync::Trigger::Manual);
     CHECK(e.cloud.count("update P1") == 1);
 }
@@ -2404,6 +2406,7 @@ TEST_CASE("Edits to different settings on both sides merge once, then upload onl
     e.pass(sync::Trigger::Manual);
     REQUIRE(e.cloud.updated_values.size() == 1);
     auto expected             = remote;
+    expected.erase("setting_id"); // the envelope never goes back up
     expected["filament_cost"] = "5";
     CHECK(e.cloud.updated_values[0] == expected);
     e.pass(sync::Trigger::Manual);
