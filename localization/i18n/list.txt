@@ -160,6 +160,7 @@ src/slic3r/GUI/Mcp/McpToolsPrint.cpp
 src/slic3r/GUI/Mcp/McpToolsPrinter.cpp
 src/slic3r/GUI/Mcp/McpToolsPrinterCtrl.cpp
 src/slic3r/GUI/Mcp/McpToolsPrinterMedia.cpp
+src/slic3r/GUI/Mcp/McpToolsPresetSync.cpp
 src/slic3r/GUI/Mcp/McpToolsProject.cpp
 src/slic3r/GUI/Mcp/McpToolsRecord.cpp
 src/slic3r/GUI/Mcp/McpToolsScene.cpp

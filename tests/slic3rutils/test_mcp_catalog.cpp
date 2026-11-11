@@ -58,3 +58,24 @@ TEST_CASE("the catalog lists tools with schemas and none named for the bridge", 
         CHECK(tool["inputSchema"].is_object());
     }
 }
+
+TEST_CASE("the preset_sync tool takes an action and a closed set of arguments", "[Mcp][McpCatalog]")
+{
+    const json catalog = McpService::catalog_json();
+    const json* tool   = nullptr;
+    for (const json& t : catalog.at("tools"))
+        if (t.at("name") == "preset_sync") tool = &t;
+    REQUIRE(tool != nullptr);
+
+    const json& schema = tool->at("inputSchema");
+    CHECK(schema.at("required") == json::array({"action"}));
+    CHECK(schema.at("additionalProperties") == false);
+    CHECK(schema.at("properties").at("action").at("enum") ==
+          json::array({"status", "sync_now", "confirm_first_run", "convert", "forget", "resolve_halt"}));
+    CHECK(schema.at("properties").at("accept").at("type") == "boolean");
+    CHECK(schema.at("properties").at("convert").at("type") == "array");
+    CHECK(schema.at("properties").at("decline").at("items").at("type") == "string");
+    CHECK(schema.at("properties").at("type").at("enum") == json::array({"print", "filament", "printer"}));
+    CHECK(schema.at("properties").at("choice").at("enum").size() == 5);
+    CHECK(tool->at("annotations").at("readOnlyHint") == false);
+}

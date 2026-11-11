@@ -746,6 +746,8 @@ public:
     void            scan_orphaned_info_files();
     // Changes whenever the signed-in account whose presets are loaded changes.
     uint64_t        user_preset_session() const { return m_cloud_delete_queue.generation(); }
+    // Asks the sync loop to push user presets on its next tick.
+    void            request_user_preset_push() { m_sync_user_presets_now.store(true, std::memory_order_release); }
 
     wxString        filter_string(wxString str);
 	wxString        current_language_code() const { return m_active_language_code.empty() && m_wxLocale ? m_wxLocale->GetCanonicalName() : m_active_language_code; }
