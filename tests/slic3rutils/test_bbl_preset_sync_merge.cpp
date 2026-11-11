@@ -26,9 +26,17 @@ namespace {
 bool orca_k(const std::string& k) { return k != "studio_only"; }
 bool studio_k(const std::string& k) { return k != "orca_only"; }
 
-sync::MergeResult merge(const ValueMap& l, const ValueMap& r, const ValueMap& b, bool local_newer = false)
+// Normal merge: local, local base, remote, remote base.
+sync::MergeResult merge(const ValueMap& l, const ValueMap& lb, const ValueMap& r, const ValueMap& rb, bool local_newer = false)
 {
-    return sync::merge_bodies(l, r, b, local_newer, orca_k, studio_k);
+    return sync::merge_bodies(sync::MergeInput{l, lb, r, rb, false, local_newer, orca_k, studio_k});
+}
+
+// First meeting of two same-named presets: there are no bases.
+sync::MergeResult merge_pairing(const ValueMap& l, const ValueMap& r, bool local_newer = false)
+{
+    const ValueMap none;
+    return sync::merge_bodies(sync::MergeInput{l, none, r, none, true, local_newer, orca_k, studio_k});
 }
 
 void write_file(const fs::path& file, const std::string& text)
@@ -117,106 +125,203 @@ TEST_CASE("StudioKeys loads the key list and treats a bad file as empty", "[BblP
 // merge_bodies
 // ---------------------------------------------------------------------------
 
-TEST_CASE("merge_bodies takes each setting from the side that changed it", "[BblPresetSync]")
+TEST_CASE("merge_bodies exchanges edits against two bases", "[BblPresetSync]")
 {
-    SECTION("unchanged")
+    SECTION("nothing changed")
     {
-        const auto m = merge({{"a", "1"}}, {{"a", "1"}}, {{"a", "1"}});
+        const auto m = merge({{"a", "1"}}, {{"a", "1"}}, {{"a", "1"}}, {{"a", "1"}});
         CHECK(m.merged == ValueMap{{"a", "1"}});
+        CHECK(m.pending_local.empty());
         CHECK(m.taken_remote == 0);
-        CHECK(m.kept_local == 0);
         CHECK(m.conflicts == 0);
-        CHECK_FALSE(m.needs_upload);
     }
-    SECTION("remote-only change")
+    SECTION("a difference that equals its own base on both sides is not a change")
     {
-        const auto m = merge({{"a", "1"}}, {{"a", "2"}}, {{"a", "1"}});
+        // OrcaSlicer formats the value its own way; neither side edited it.
+        const auto m = merge({{"a", "1.0"}}, {{"a", "1.0"}}, {{"a", "1"}}, {{"a", "1"}});
+        CHECK(m.merged == ValueMap{{"a", "1.0"}});
+        CHECK(m.pending_local.empty());
+        CHECK(m.taken_remote == 0);
+    }
+    SECTION("an extra local key that was already in the local base is not an edit")
+    {
+        const auto m = merge({{"a", "1"}, {"extra", "x"}}, {{"a", "1"}, {"extra", "x"}}, {{"a", "1"}}, {{"a", "1"}});
+        CHECK(m.merged == ValueMap{{"a", "1"}, {"extra", "x"}});
+        CHECK(m.pending_local.empty());
+    }
+    SECTION("remote-only edit")
+    {
+        const auto m = merge({{"a", "1.0"}}, {{"a", "1.0"}}, {{"a", "2"}}, {{"a", "1"}});
         CHECK(m.merged == ValueMap{{"a", "2"}});
         CHECK(m.taken_remote == 1);
-        CHECK(m.conflicts == 0);
-        CHECK_FALSE(m.needs_upload);
+        CHECK(m.pending_local.empty());
     }
-    SECTION("local-only change")
+    SECTION("local-only edit is kept and pending")
     {
-        const auto m = merge({{"a", "2"}}, {{"a", "1"}}, {{"a", "1"}});
+        const auto m = merge({{"a", "2"}}, {{"a", "1"}}, {{"a", "1"}}, {{"a", "1"}});
         CHECK(m.merged == ValueMap{{"a", "2"}});
+        CHECK(m.pending_local == std::set<std::string>{"a"});
         CHECK(m.taken_remote == 0);
-        CHECK(m.conflicts == 0);
-        CHECK(m.needs_upload);
     }
-    SECTION("both changed to the same value")
+    SECTION("a local edit of an OrcaSlicer-only key is pending")
     {
-        const auto m = merge({{"a", "2"}}, {{"a", "2"}}, {{"a", "1"}});
+        const auto m = merge({{"orca_only", "9"}}, {{"orca_only", "7"}}, {}, {});
+        CHECK(m.merged == ValueMap{{"orca_only", "9"}});
+        CHECK(m.pending_local == std::set<std::string>{"orca_only"});
+    }
+    SECTION("both edited to the same value")
+    {
+        const auto m = merge({{"a", "2"}}, {{"a", "1"}}, {{"a", "2"}}, {{"a", "1"}});
         CHECK(m.merged == ValueMap{{"a", "2"}});
         CHECK(m.conflicts == 0);
-        CHECK_FALSE(m.needs_upload);
+        CHECK(m.pending_local.empty());
     }
-    SECTION("both changed to different values, the local side newer")
+    SECTION("conflict, the local side newer")
     {
-        const auto m = merge({{"a", "L"}}, {{"a", "R"}}, {{"a", "1"}}, true);
+        const auto m = merge({{"a", "L"}}, {{"a", "1"}}, {{"a", "R"}}, {{"a", "1"}}, true);
         CHECK(m.merged == ValueMap{{"a", "L"}});
         CHECK(m.conflicts == 1);
         CHECK(m.kept_local == 1);
-        CHECK(m.taken_remote == 0);
-        CHECK(m.needs_upload);
+        CHECK(m.pending_local == std::set<std::string>{"a"});
     }
-    SECTION("both changed to different values, the remote side newer")
+    SECTION("conflict, the remote side newer")
     {
-        const auto m = merge({{"a", "L"}}, {{"a", "R"}}, {{"a", "1"}}, false);
+        const auto m = merge({{"a", "L"}}, {{"a", "1"}}, {{"a", "R"}}, {{"a", "1"}}, false);
         CHECK(m.merged == ValueMap{{"a", "R"}});
         CHECK(m.conflicts == 1);
-        CHECK(m.kept_local == 0);
         CHECK(m.taken_remote == 1);
-        CHECK_FALSE(m.needs_upload);
+        CHECK(m.pending_local.empty());
     }
     SECTION("remote removed a key Studio knows: the preset inherits it again")
     {
-        const auto m = merge({{"a", "1"}, {"b", "x"}}, {{"b", "x"}}, {{"a", "1"}, {"b", "x"}});
-        CHECK(m.merged == ValueMap{{"b", "x"}});
+        const auto m = merge({{"a", "1"}}, {{"a", "1"}}, {}, {{"a", "1"}});
+        CHECK(m.merged.empty());
         CHECK(m.taken_remote == 1);
         CHECK(m.kept_unknown_to_studio.empty());
-        CHECK_FALSE(m.needs_upload);
     }
-    SECTION("remote dropped a key Studio does not know: the local value stays and is listed")
+    SECTION("remote dropped a key Studio does not know: kept and listed, nothing pending")
     {
-        const auto m = merge({{"orca_only", "7"}, {"b", "x"}}, {{"b", "x"}}, {{"orca_only", "7"}, {"b", "x"}});
-        CHECK(m.merged == ValueMap{{"orca_only", "7"}, {"b", "x"}});
+        const auto m = merge({{"orca_only", "7"}}, {{"orca_only", "7"}}, {}, {{"orca_only", "7"}});
+        CHECK(m.merged == ValueMap{{"orca_only", "7"}});
         CHECK(m.kept_local == 1);
         CHECK(m.kept_unknown_to_studio == std::vector<std::string>{"orca_only"});
-        CHECK_FALSE(m.needs_upload); // Bambu cannot hold it
+        CHECK(m.pending_local.empty());
     }
-    SECTION("a key only the remote has and OrcaSlicer does not know stays out")
+    SECTION("a key unknown to OrcaSlicer never reaches the preset")
     {
-        const auto m = merge({}, {{"studio_only", "9"}, {"a", "1"}}, {});
+        const auto m = merge({}, {}, {{"studio_only", "9"}, {"a", "1"}}, {});
         CHECK(m.merged == ValueMap{{"a", "1"}});
-        CHECK_FALSE(m.needs_upload);
-    }
-    SECTION("an empty base (pairing) unites both sides, the newer side wins overlaps")
-    {
-        const ValueMap l{{"a", "1"}, {"b", "2"}}, r{{"a", "3"}, {"c", "4"}};
-        const auto     remote_wins = merge(l, r, {}, false);
-        CHECK(remote_wins.merged == ValueMap{{"a", "3"}, {"b", "2"}, {"c", "4"}});
-        CHECK(remote_wins.conflicts == 1);
-        const auto local_wins = merge(l, r, {}, true);
-        CHECK(local_wins.merged == ValueMap{{"a", "1"}, {"b", "2"}, {"c", "4"}});
-        CHECK(local_wins.needs_upload);
+        CHECK(m.pending_local.empty());
     }
     SECTION("metadata keys are neither merged nor compared")
     {
-        const auto m = merge({{"name", "x"}, {"version", "1"}, {"updated_time", "5"}}, {{"name", "y"}, {"setting_id", "P"}}, {});
+        const auto m = merge({{"name", "x"}, {"version", "1"}}, {}, {{"name", "y"}, {"setting_id", "P"}}, {});
         CHECK(m.merged.empty());
-        CHECK_FALSE(m.needs_upload);
     }
     SECTION("an absent key and an empty value differ")
     {
-        // Local holds "", the remote and base nothing: only the local side changed.
-        const auto a = merge({{"a", ""}}, {}, {});
+        const auto a = merge({{"a", ""}}, {}, {}, {});
         CHECK(a.merged == ValueMap{{"a", ""}});
-        CHECK(a.needs_upload);
-        // The remote cleared a key that was "" in the base: it counts as a remote change, Studio inherits it again.
-        const auto b = merge({{"a", ""}}, {}, {{"a", ""}});
+        CHECK(a.pending_local == std::set<std::string>{"a"});
+        const auto b = merge({{"a", ""}}, {{"a", ""}}, {}, {{"a", ""}});
         CHECK(b.merged.empty());
         CHECK(b.taken_remote == 1);
+    }
+    SECTION("a missing local preset takes everything of the remote body")
+    {
+        const ValueMap none;
+        const auto     m = merge(none, none, {{"a", "1"}, {"b", "2"}, {"studio_only", "s"}}, none);
+        CHECK(m.merged == ValueMap{{"a", "1"}, {"b", "2"}});
+        CHECK(m.taken_remote == 2);
+        CHECK(m.pending_local.empty());
+    }
+}
+
+TEST_CASE("merge_bodies of a pairing has no bases", "[BblPresetSync]")
+{
+    SECTION("equal keys")
+    {
+        const auto m = merge_pairing({{"a", "1"}}, {{"a", "1"}});
+        CHECK(m.merged == ValueMap{{"a", "1"}});
+        CHECK(m.conflicts == 0);
+        CHECK(m.pending_local.empty());
+    }
+    SECTION("keys only on Bambu are taken, keys only local are kept and not pending")
+    {
+        const auto m = merge_pairing({{"a", "1"}, {"local_only", "L"}}, {{"a", "1"}, {"remote_only", "R"}});
+        CHECK(m.merged == ValueMap{{"a", "1"}, {"local_only", "L"}, {"remote_only", "R"}});
+        CHECK(m.pending_local.empty());
+        CHECK(m.taken_remote == 2);
+    }
+    SECTION("a disagreement is settled by the newer side")
+    {
+        const auto remote_wins = merge_pairing({{"a", "L"}}, {{"a", "R"}}, false);
+        CHECK(remote_wins.merged == ValueMap{{"a", "R"}});
+        CHECK(remote_wins.conflicts == 1);
+        CHECK(remote_wins.pending_local.empty());
+        const auto local_wins = merge_pairing({{"a", "L"}}, {{"a", "R"}}, true);
+        CHECK(local_wins.merged == ValueMap{{"a", "L"}});
+        CHECK(local_wins.conflicts == 1);
+        CHECK(local_wins.pending_local == std::set<std::string>{"a"});
+    }
+    SECTION("a key unknown to OrcaSlicer stays out")
+    {
+        const auto m = merge_pairing({}, {{"studio_only", "s"}});
+        CHECK(m.merged.empty());
+    }
+}
+
+TEST_CASE("apply_local_edits changes only what was edited locally", "[BblPresetSync]")
+{
+    const ValueMap remote{{"a", "R-a"}, {"b", "R-b"}, {"c", "R-c"}, {"studio_only", "s"}, {"name", "n"}, {"setting_id", "P"},
+                          {"type", "filament"},  {"version", "1.0.0.0"}};
+    const ValueMap local_base{{"a", "1"}, {"b", "1"}, {"c", "1"}};
+
+    SECTION("untouched keys keep the Bambu value, whatever the local map holds")
+    {
+        const ValueMap local{{"a", "different"}, {"b", "1"}, {"c", "1"}, {"type", "filament"}};
+        const ValueMap lb{{"a", "different"}, {"b", "1"}, {"c", "1"}};
+        const auto     up = sync::apply_local_edits(remote, local, lb, orca_k);
+        CHECK(up.at("a") == "R-a");
+        CHECK(up.at("b") == "R-b");
+        CHECK(up.at("c") == "R-c");
+    }
+    SECTION("an edited key takes the local value, a removed key is removed")
+    {
+        const ValueMap local{{"a", "edited"}, {"b", "1"}, {"type", "filament"}}; // c removed
+        const auto     up = sync::apply_local_edits(remote, local, local_base, orca_k);
+        CHECK(up.at("a") == "edited");
+        CHECK(up.at("b") == "R-b");
+        CHECK(up.count("c") == 0);
+    }
+    SECTION("a key added locally is added")
+    {
+        const ValueMap local{{"a", "1"}, {"b", "1"}, {"c", "1"}, {"d", "new"}};
+        const auto     up = sync::apply_local_edits(remote, local, local_base, orca_k);
+        CHECK(up.at("d") == "new");
+    }
+    SECTION("unknown keys and the metadata of the Bambu copy survive")
+    {
+        const ValueMap local{{"a", "edited"}, {"b", "1"}, {"c", "1"}, {"name", "local-name"}};
+        const auto     up = sync::apply_local_edits(remote, local, local_base, orca_k);
+        CHECK(up.at("studio_only") == "s");
+        CHECK(up.at("name") == "n");
+        CHECK(up.at("setting_id") == "P");
+    }
+    SECTION("an OrcaSlicer-unknown key edited locally is not applied")
+    {
+        const ValueMap local{{"studio_only", "x"}, {"a", "1"}, {"b", "1"}, {"c", "1"}};
+        CHECK(sync::apply_local_edits(remote, local, local_base, orca_k).at("studio_only") == "s");
+    }
+    SECTION("type comes from the local map, version stays unless the copy has none")
+    {
+        const ValueMap local{{"a", "1"}, {"b", "1"}, {"c", "1"}, {"type", "print"}, {"version", "9.9.9.9"}};
+        const auto     up = sync::apply_local_edits(remote, local, local_base, orca_k);
+        CHECK(up.at("type") == "print");
+        CHECK(up.at("version") == "1.0.0.0");
+        ValueMap without = remote;
+        without.erase("version");
+        CHECK(sync::apply_local_edits(without, local, local_base, orca_k).at("version") == "9.9.9.9");
     }
 }
 
@@ -271,14 +376,15 @@ TEST_CASE("BaseStore keeps one body per setting id and account", "[BblPresetSync
         {
             sync::BaseStore store(dir);
             CHECK_FALSE(store.get("PF1").has_value());
-            store.put("PF1", {{"a", "1"}, {"b", ""}});
-            CHECK(store.get("PF1")->at("a") == "1");
+            store.put("PF1", {{{"a", "1"}, {"b", ""}}, {{"x", "y"}}});
+            CHECK(store.get("PF1")->remote.at("a") == "1");
             CHECK(store.has("PF1"));
         }
         sync::BaseStore again(dir);
         const auto      got = again.get("PF1");
         REQUIRE(got.has_value());
-        CHECK(*got == ValueMap{{"a", "1"}, {"b", ""}});
+        CHECK(got->remote == ValueMap{{"a", "1"}, {"b", ""}});
+        CHECK(got->local == ValueMap{{"x", "y"}});
         CHECK(fs::exists(dir / "PF1.json"));
         CHECK_FALSE(fs::exists(dir / "PF1.json.tmp"));
     }
@@ -287,8 +393,17 @@ TEST_CASE("BaseStore keeps one body per setting id and account", "[BblPresetSync
         CHECK(sync::BaseStore::dir(temp.path(), "o", "b1") != sync::BaseStore::dir(temp.path(), "o", "b2"));
         CHECK(sync::BaseStore::dir(temp.path(), "o1", "b") != sync::BaseStore::dir(temp.path(), "o2", "b"));
         sync::BaseStore one(sync::BaseStore::dir(temp.path(), "o", "b1")), two(sync::BaseStore::dir(temp.path(), "o", "b2"));
-        one.put("PF1", {{"a", "1"}});
+        one.put("PF1", {{{"a", "1"}}, {}});
         CHECK_FALSE(two.get("PF1").has_value());
+    }
+    SECTION("a file in the old single-map form reads as the remote base")
+    {
+        write_file(dir / "PF1.json", R"({"a": "1", "b": "2"})");
+        sync::BaseStore store(dir);
+        const auto      got = store.get("PF1");
+        REQUIRE(got.has_value());
+        CHECK(got->remote == ValueMap{{"a", "1"}, {"b", "2"}});
+        CHECK(got->local.empty());
     }
     SECTION("a corrupt file counts as missing")
     {
@@ -297,13 +412,13 @@ TEST_CASE("BaseStore keeps one body per setting id and account", "[BblPresetSync
         sync::BaseStore store(dir);
         CHECK_FALSE(store.get("PF1").has_value());
         CHECK_FALSE(store.get("PF2").has_value());
-        store.put("PF1", {{"a", "1"}});
+        store.put("PF1", {{{"a", "1"}}, {}});
         CHECK(store.get("PF1").has_value());
     }
     SECTION("erase removes the file and the cached copy")
     {
         sync::BaseStore store(dir);
-        store.put("PF1", {{"a", "1"}});
+        store.put("PF1", {{{"a", "1"}}, {}});
         store.erase("PF1");
         CHECK_FALSE(store.get("PF1").has_value());
         CHECK_FALSE(fs::exists(dir / "PF1.json"));
@@ -312,7 +427,7 @@ TEST_CASE("BaseStore keeps one body per setting id and account", "[BblPresetSync
     SECTION("reads come from the cache once loaded")
     {
         sync::BaseStore store(dir);
-        store.put("PF1", {{"a", "1"}});
+        store.put("PF1", {{{"a", "1"}}, {}});
         fs::remove(dir / "PF1.json");
         CHECK(store.get("PF1").has_value());
     }
@@ -322,7 +437,7 @@ TEST_CASE("BaseStore keeps one body per setting id and account", "[BblPresetSync
         auto            work = [&store](const std::string& prefix) {
             for (int i = 0; i < 40; ++i) {
                 const std::string id = prefix + std::to_string(i % 5);
-                store.put(id, {{"n", std::to_string(i)}});
+                store.put(id, {{{"n", std::to_string(i)}}, {{"m", std::to_string(i)}}});
                 store.get(id);
                 if (i % 7 == 0) store.erase(id);
             }
@@ -334,7 +449,12 @@ TEST_CASE("BaseStore keeps one body per setting id and account", "[BblPresetSync
         for (const char* prefix : {"A", "B"})
             for (int i = 0; i < 5; ++i) {
                 const std::string id = std::string(prefix) + std::to_string(i);
-                CHECK(store.get(id) == reread.get(id));
+                const auto a = store.get(id), b = reread.get(id);
+                CHECK(a.has_value() == b.has_value());
+                if (a && b) {
+                    CHECK(a->remote == b->remote);
+                    CHECK(a->local == b->local);
+                }
             }
     }
 }

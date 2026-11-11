@@ -11,7 +11,14 @@
 
 namespace Slic3r::BblPresetSync {
 
-// The base copies: per Bambu setting id, the last body known to be on Bambu. One JSON file each.
+// The two bases of a linked preset, one per side.
+struct Bases
+{
+    ValueMap remote; // the body on Bambu at the last sync
+    ValueMap local;  // OrcaSlicer's upload map of the preset at the last sync
+};
+
+// The bases per Bambu setting id. One JSON file each: {"remote": {...}, "local": {...}}.
 class BaseStore
 {
 public:
@@ -20,19 +27,19 @@ public:
 
     explicit BaseStore(boost::filesystem::path dir);
 
-    std::optional<ValueMap> get(const std::string& setting_id) const;
-    void                    put(const std::string& setting_id, const ValueMap& body);
+    std::optional<Bases>    get(const std::string& setting_id) const;
+    void                    put(const std::string& setting_id, const Bases& bases);
     void                    erase(const std::string& setting_id);
     bool                    has(const std::string& setting_id) const;
 
 private:
     boost::filesystem::path file_of(const std::string& setting_id) const;
     // Reads into the cache when not cached yet. Caller holds the mutex.
-    const std::optional<ValueMap>& cached(const std::string& setting_id) const;
+    const std::optional<Bases>& cached(const std::string& setting_id) const;
 
     boost::filesystem::path                                  m_dir;
     mutable std::mutex                                       m_mutex;
-    mutable std::map<std::string, std::optional<ValueMap>>   m_cache;
+    mutable std::map<std::string, std::optional<Bases>>        m_cache;
 };
 
 } // namespace Slic3r::BblPresetSync

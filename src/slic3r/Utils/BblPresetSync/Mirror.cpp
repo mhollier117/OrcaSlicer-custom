@@ -130,16 +130,15 @@ void Mirror::finish_pull(const Session& s, const std::shared_ptr<Ledger>& ledger
         LedgerEntry e = ledger->get(action.key).value_or(LedgerEntry{});
         e.setting_id    = action.setting_id;
         e.update_time   = row_update_time;
-        if (follow.needs_upload) {
-            // The merged preset differs from Bambu's: the next pass sees a local change and uploads it once.
-            e.synced_hash = upload_hash(follow.remote_body);
-        } else {
-            // Exactly what the pass computes for the unchanged preset, so a plain download uploads nothing.
-            const PresetType type = action.key.type;
-            const KeyTest    orca = [type](const std::string& k) { return orca_knows(type, k); };
-            e.synced_hash = fingerprint(upload_with_foreign(outcome.new_upload, follow.remote_body, orca), follow.remote_body, orca,
-                                        [this](const std::string& k) { return m_studio.knows(k); });
+        // The preset now holds the remote edits; the local edits still to go up stay differences from the local base.
+        ValueMap new_local_base = outcome.new_upload;
+        for (const std::string& k : follow.pending_local) {
+            const ValueMap& old = follow.pairing ? follow.remote_body : follow.old_local_base;
+            auto            it  = old.find(k);
+            if (it != old.end()) new_local_base[k] = it->second;
+            else new_local_base.erase(k);
         }
+        e.synced_hash = upload_hash(new_local_base);
         e.state         = "linked";
         e.absent_passes = 0;
         e.absent_since  = 0;
@@ -149,7 +148,7 @@ void Mirror::finish_pull(const Session& s, const std::shared_ptr<Ledger>& ledger
             if (old && !old->setting_id.empty() && old->setting_id != action.setting_id && follow.base) follow.base->erase(old->setting_id);
             ledger->erase(action.rename_from);
         }
-        if (follow.base) follow.base->put(action.setting_id, follow.remote_body);
+        if (follow.base) follow.base->put(action.setting_id, Bases{follow.remote_body, new_local_base});
         break;
     }
     case OpResult::Unresolvable: {
@@ -270,6 +269,7 @@ void Mirror::run_pass(Trigger trigger)
         m_studio        = StudioKeys::load(m_host.resources_dir() / "printers" / "bambu_studio_option_keys.json");
         m_studio_loaded = true;
         m_studio_count  = m_studio.size();
+        if (m_studio.empty()) BOOST_LOG_TRIVIAL(warning) << "bbl preset sync: the Bambu Studio key list is empty or missing";
     }
     const KeyTest studio = [this](const std::string& k) { return m_studio.knows(k); };
 
@@ -313,7 +313,6 @@ void Mirror::run_pass(Trigger trigger)
     auto build_locals = [&](const LedgerView& lv, const std::map<Key, const ValueMap*>* remote_bodies) {
         std::vector<LocalPreset> out;
         fp_hash.clear();
-        static const ValueMap none;
         for (const LocalItem& item : snap.items) {
             LocalPreset l;
             l.key   = item.key;
@@ -324,17 +323,17 @@ void Mirror::run_pass(Trigger trigger)
             }
             const auto e      = lv.entries.find(item.key);
             const bool linked = e != lv.entries.end() && (e->second.state == "linked" || e->second.state == "too_large");
-            ValueMap   ref;
-            if (linked) {
-                if (auto b = base->get(e->second.setting_id)) ref = std::move(*b);
-            } else if (remote_bodies != nullptr) {
-                auto r = remote_bodies->find(item.key);
-                if (r != remote_bodies->end()) ref = *r->second;
-            }
-            const PresetType type = item.key.type;
-            const KeyTest    orca = [type](const std::string& k) { return orca_knows(type, k); };
             l.state = (item.cls.eligibility == Eligibility::Eligible || linked) ? LocalState::Eligible : LocalState::Ineligible;
-            l.hash  = fingerprint(upload_with_foreign(item.upload, ref, orca), ref, orca, studio);
+            l.hash  = upload_hash(item.upload); // a linked preset: every edit counts, whatever its representation
+            if (!linked && remote_bodies != nullptr) {
+                // Not linked, a row with a body at the key: identical presets pair as a Link.
+                auto r = remote_bodies->find(item.key);
+                if (r != remote_bodies->end()) {
+                    const PresetType type = item.key.type;
+                    const KeyTest    orca = [type](const std::string& k) { return orca_knows(type, k); };
+                    l.hash = fingerprint(upload_with_foreign(item.upload, *r->second, orca), *r->second, orca, studio);
+                }
+            }
             l.mtime = item.mtime;
             fp_hash[item.key] = l.hash;
             out.push_back(std::move(l));
@@ -647,11 +646,11 @@ void Mirror::run_pass(Trigger trigger)
                 break;
             }
             wrote                 = true;
-            const ValueMap values = upload_with_foreign(item->upload, ValueMap{}, [t = a.key.type](const std::string& k) { return orca_knows(t, k); });
-            WriteResult    w      = m_cloud.create(a.key.name, values);
+            const ValueMap& values = item->upload; // there is no Bambu copy yet
+            WriteResult     w      = m_cloud.create(a.key.name, values);
             if (w.ok) {
-                base->put(w.setting_id, values);
-                link(a.key, w.setting_id, w.update_time, upload_hash(values));
+                base->put(w.setting_id, Bases{values, item->upload});
+                link(a.key, w.setting_id, w.update_time, upload_hash(item->upload));
                 if (w.update_time > 0) ledger->set_clock_offset(w.update_time - now);
                 clear_backoff(a.key);
             } else if (fail(a.key, w, item)) {
@@ -662,12 +661,15 @@ void Mirror::run_pass(Trigger trigger)
         case ActionType::Update: {
             if (item == nullptr) break;
             wrote                 = true;
-            const ValueMap values = upload_with_foreign(item->upload, base->get(a.setting_id).value_or(ValueMap{}),
-                                                        [t = a.key.type](const std::string& k) { return orca_knows(t, k); });
+            // The Bambu copy with only the local edits applied; without bases (a lost file) the whole local map.
+            const auto     bases  = base->get(a.setting_id);
+            const ValueMap values = bases ? apply_local_edits(bases->remote, item->upload, bases->local,
+                                                              [t = a.key.type](const std::string& k) { return orca_knows(t, k); })
+                                          : item->upload;
             WriteResult    w      = m_cloud.update(a.setting_id, a.key.name, values);
             if (w.ok) {
-                base->put(a.setting_id, values);
-                link(a.key, a.setting_id, w.update_time, upload_hash(values));
+                base->put(a.setting_id, Bases{values, item->upload});
+                link(a.key, a.setting_id, w.update_time, upload_hash(item->upload));
                 if (w.update_time > 0) ledger->set_clock_offset(w.update_time - now);
                 clear_backoff(a.key);
             } else if (w.http_code == 422) {
@@ -693,8 +695,8 @@ void Mirror::run_pass(Trigger trigger)
         }
         case ActionType::Link:
             if (item != nullptr && row != nullptr && row->has_body) {
-                base->put(a.setting_id, row_bodies[ri]);
-                link(a.key, a.setting_id, row->update_time, upload_hash(row_bodies[ri]));
+                base->put(a.setting_id, Bases{row_bodies[ri], item->upload});
+                link(a.key, a.setting_id, row->update_time, upload_hash(item->upload));
             }
             break;
         case ActionType::DropEntry:
@@ -744,11 +746,17 @@ void Mirror::run_pass(Trigger trigger)
                     break;
                 }
             }
-            // A preset that is gone locally is downloaded whole: its base says nothing about what it holds.
-            const ValueMap  base_body = item != nullptr ? base->get(a.setting_id).value_or(ValueMap{}) : ValueMap{};
-            const PresetType type     = a.key.type;
-            const MergeResult m       = merge_bodies(item != nullptr ? item->upload : ValueMap{}, remote_body, base_body, a.local_newer,
-                                                     [type](const std::string& k) { return orca_knows(type, k); }, studio);
+            // A preset that is gone locally is downloaded whole. Without stored bases the two presets meet for the first time.
+            static const ValueMap none;
+            const auto            entry = ledger->get(a.key);
+            std::optional<Bases>  bases;
+            if (item != nullptr && entry) bases = base->get(a.setting_id);
+            const bool       pairing = item != nullptr && !bases;
+            const PresetType type    = a.key.type;
+            const Bases      no_bases;
+            const Bases&     bs = bases ? *bases : no_bases;
+            const MergeResult m = merge_bodies(MergeInput{item != nullptr ? item->upload : none, bs.local, remote_body, bs.remote, pairing,
+                                                          a.local_newer, [type](const std::string& k) { return orca_knows(type, k); }, studio});
             PullOp op;
             op.session             = s;
             op.key                 = a.key;
@@ -770,7 +778,9 @@ void Mirror::run_pass(Trigger trigger)
                 if (a.rename_from_set) m_pending.insert(a.rename_from);
             }
             const long long row_time = row->update_time;
-            PullFollowUp    follow{remote_body, m.needs_upload, base};
+            if (!m.pending_local.empty())
+                notes.push_back(std::to_string(m.pending_local.size()) + " local edits of " + a.key.str() + " will be uploaded");
+            PullFollowUp follow{remote_body, bs.local, m.pending_local, pairing, base};
             m_store.apply_pull(std::move(op), [this, s, ledger, a, row_time, follow](OpOutcome outcome) { finish_pull(s, ledger, a, row_time, outcome, follow); });
             break;
         }

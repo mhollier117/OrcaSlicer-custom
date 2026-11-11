@@ -150,8 +150,10 @@ private:
     void       end_pass(const std::string& result, long long now);
     struct PullFollowUp
     {
-        ValueMap                   remote_body; // what Bambu holds now: becomes the base
-        bool                       needs_upload{false};
+        ValueMap                   remote_body;   // what Bambu holds now: becomes the remote base
+        ValueMap                   old_local_base; // the local base before the pull
+        std::set<std::string>      pending_local; // keys whose local edit is still to be uploaded
+        bool                       pairing{false};
         std::shared_ptr<BaseStore> base;
     };
     void       finish_pull(const Session& s, const std::shared_ptr<Ledger>& ledger, const Action& action, long long row_update_time,

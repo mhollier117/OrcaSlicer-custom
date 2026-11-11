@@ -18,34 +18,45 @@ std::optional<std::string> find_value(const ValueMap& m, const std::string& key)
 
 } // namespace
 
-MergeResult merge_bodies(const ValueMap& local, const ValueMap& remote, const ValueMap& base, bool local_newer, const KeyTest& orca_knows,
-                         const KeyTest& studio_knows)
+MergeResult merge_bodies(const MergeInput& in)
 {
     MergeResult           out;
     const auto&           metadata = hash_ignored_keys();
     std::set<std::string> keys;
-    for (const ValueMap* m : {&local, &remote, &base})
+    for (const ValueMap* m : {&in.local, &in.local_base, &in.remote, &in.remote_base})
         for (const auto& kv : *m)
             if (!metadata.count(kv.first)) keys.insert(kv.first);
 
     for (const std::string& k : keys) {
-        if (!orca_knows(k)) continue;
-        const auto l = find_value(local, k), r = find_value(remote, k), b = find_value(base, k);
+        if (!in.orca_knows(k)) continue;
+        const auto l = find_value(in.local, k), lb = find_value(in.local_base, k), r = find_value(in.remote, k),
+                   rb = find_value(in.remote_base, k);
+
+        bool local_changed, remote_changed;
+        if (in.pairing) {
+            remote_changed = r.has_value();
+            local_changed  = l && r && *l != *r;
+        } else {
+            local_changed  = l != lb;
+            remote_changed = r != rb;
+        }
 
         std::optional<std::string> result;
-        const bool                 remote_changed = r != b;
-        const bool                 local_changed  = l != b;
-        bool                       take_remote    = false;
-        if (!remote_changed) {
+        bool                       take_remote = false;
+        if (!local_changed && !remote_changed) {
             result = l;
         } else if (!local_changed) {
             take_remote = true;
+        } else if (!remote_changed) {
+            result = l;
+            out.pending_local.insert(k);
         } else if (l == r) {
             result = l;
         } else {
             ++out.conflicts;
-            if (local_newer) {
+            if (in.local_newer) {
                 result = l;
+                out.pending_local.insert(k);
                 ++out.kept_local;
             } else {
                 take_remote = true;
@@ -55,7 +66,7 @@ MergeResult merge_bodies(const ValueMap& local, const ValueMap& remote, const Va
             if (r) {
                 result = r;
                 ++out.taken_remote;
-            } else if (studio_knows(k)) {
+            } else if (in.studio_knows(k)) {
                 result.reset(); // the preset inherits it
                 ++out.taken_remote;
             } else {
@@ -65,9 +76,28 @@ MergeResult merge_bodies(const ValueMap& local, const ValueMap& remote, const Va
             }
         }
         if (result) out.merged[k] = *result;
-
-        if ((studio_knows(k) || r) && result != r) out.needs_upload = true;
     }
+    return out;
+}
+
+ValueMap apply_local_edits(const ValueMap& remote_now, const ValueMap& local, const ValueMap& local_base, const KeyTest& orca_knows)
+{
+    ValueMap              out      = remote_now;
+    const auto&           metadata = hash_ignored_keys();
+    std::set<std::string> keys;
+    for (const ValueMap* m : {&local, &local_base})
+        for (const auto& kv : *m)
+            if (!metadata.count(kv.first)) keys.insert(kv.first);
+    for (const std::string& k : keys) {
+        if (!orca_knows(k)) continue;
+        const auto l = find_value(local, k);
+        if (l == find_value(local_base, k)) continue;
+        if (l) out[k] = *l;
+        else out.erase(k);
+    }
+    if (const auto t = find_value(local, "type")) out["type"] = *t;
+    if (!out.count("version"))
+        if (const auto v = find_value(local, "version")) out["version"] = *v;
     return out;
 }
 
