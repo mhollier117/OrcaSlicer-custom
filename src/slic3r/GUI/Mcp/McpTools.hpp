@@ -62,6 +62,7 @@ void register_print_tools(McpService& service);         // McpToolsPrint.cpp
 void register_printer_ctrl_tools(McpService& service);  // McpToolsPrinterCtrl.cpp
 void register_printer_media_tools(McpService& service); // McpToolsPrinterMedia.cpp
 void register_preset_sync_tools(McpService& service);   // McpToolsPresetSync.cpp
+void register_filament_manager_tools(McpService& service); // McpToolsFilamentManager.cpp
 
 // How run_script_job() runs a script beyond what the script says.
 struct ScriptRunOptions

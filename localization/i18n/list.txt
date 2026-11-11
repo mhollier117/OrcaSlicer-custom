@@ -156,6 +156,7 @@ src/slic3r/GUI/Mcp/McpToolsActions.cpp
 src/slic3r/GUI/Mcp/McpToolsApp.cpp
 src/slic3r/GUI/Mcp/McpToolsCad.cpp
 src/slic3r/GUI/Mcp/McpToolsConfig.cpp
+src/slic3r/GUI/Mcp/McpToolsFilamentManager.cpp
 src/slic3r/GUI/Mcp/McpToolsLayers.cpp
 src/slic3r/GUI/Mcp/McpToolsPrint.cpp
 src/slic3r/GUI/Mcp/McpToolsPrinter.cpp

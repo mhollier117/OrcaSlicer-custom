@@ -80,3 +80,22 @@ TEST_CASE("the preset_sync tool takes an action and a closed set of arguments", 
     CHECK(schema.at("properties").at("from_filament_id").at("type") == "string");
     CHECK(tool->at("annotations").at("readOnlyHint") == false);
 }
+
+TEST_CASE("the filament_manager tool takes an action and a closed set of arguments", "[Mcp][McpCatalog]")
+{
+    const json catalog = McpService::catalog_json();
+    const json* tool   = nullptr;
+    for (const json& t : catalog.at("tools"))
+        if (t.at("name") == "filament_manager") tool = &t;
+    REQUIRE(tool != nullptr);
+
+    const json& schema = tool->at("inputSchema");
+    CHECK(schema.at("required") == json::array({"action"}));
+    CHECK(schema.at("additionalProperties") == false);
+    CHECK(schema.at("properties").at("action").at("enum") == json::array({"status", "list", "pull", "add", "update", "remove"}));
+    CHECK(schema.at("properties").at("spool").at("type") == "object");
+    CHECK(schema.at("properties").at("patch").at("type") == "object");
+    CHECK(schema.at("properties").at("quantity").at("type") == "integer");
+    CHECK(schema.at("properties").at("ids").at("items").at("type") == "string");
+    CHECK(tool->at("annotations").at("readOnlyHint") == false);
+}

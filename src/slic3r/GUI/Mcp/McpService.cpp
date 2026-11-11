@@ -667,6 +667,7 @@ void McpService::register_tools()
     register_printer_ctrl_tools(*this);
     register_printer_media_tools(*this);
     register_preset_sync_tools(*this);
+    register_filament_manager_tools(*this);
 #ifdef SLIC3R_CAD
     register_cad_tools(*this);
 #endif

@@ -209,6 +209,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/Mcp/McpToolsPrint.cpp
     GUI/Mcp/McpToolsPrinterCtrl.cpp
     GUI/Mcp/McpToolsPrinterMedia.cpp
+    GUI/Mcp/McpToolsFilamentManager.cpp
     GUI/Mcp/McpToolsPresetSync.cpp
     GUI/Mcp/ScreenCapture.cpp
     GUI/Mcp/ScreenCapture.hpp
