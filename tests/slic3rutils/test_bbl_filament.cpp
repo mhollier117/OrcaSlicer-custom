@@ -2,16 +2,25 @@
 
 #include "slic3r/Utils/BblFilament/Spool.hpp"
 #include "slic3r/Utils/BblFilament/SpoolCloud.hpp"
+#include "slic3r/Utils/BblFilament/SpoolService.hpp"
+#include "slic3r/Utils/BblFilament/SpoolWorker.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <deque>
 #include <functional>
+#include <future>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -854,4 +863,692 @@ TEST_CASE("The plugin spool cloud rejects a delete without ids", "[BblFilament]"
 {
     fil::PluginSpoolCloud cloud;
     CHECK(cloud.remove({}).error == fil::CloudError::Rejected);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// SpoolService, driven by a manual runner: the "worker" and the "ui" are queues the test steps by hand.
+
+namespace {
+
+const char* kind_text(fil::FailKind k)
+{
+    switch (k) {
+    case fil::FailKind::NotSignedIn: return "NotSignedIn";
+    case fil::FailKind::Unavailable: return "Unavailable";
+    case fil::FailKind::BadRequest: return "BadRequest";
+    case fil::FailKind::NotFound: return "NotFound";
+    case fil::FailKind::Rejected: return "Rejected";
+    default: return "Unknown";
+    }
+}
+
+struct Rig
+{
+    std::shared_ptr<FakeCloud>         cloud = std::make_shared<FakeCloud>();
+    std::deque<std::function<void()>>  worker;
+    std::deque<std::function<void()>>  ui;
+    fil::Session                       session{true, "u1", 1, false};
+    long long                          clock{1000};
+    std::vector<std::string>           events;
+    bool                               accept_async{true};
+    std::unique_ptr<fil::SpoolService> svc;
+
+    explicit Rig(fil::FilamentLookup lookup = {})
+    {
+        fil::ServiceDeps deps;
+        deps.cloud      = cloud;
+        deps.run_async  = [this](std::function<void()> job) {
+            if (!accept_async) return false;
+            worker.push_back(std::move(job));
+            return true;
+        };
+        deps.post_to_ui = [this](std::function<void()> f) { ui.push_back(std::move(f)); };
+        deps.session    = [this] { return session; };
+        deps.lookup     = std::move(lookup);
+        deps.now        = [this] { return ++clock; };
+        svc             = std::make_unique<fil::SpoolService>(std::move(deps));
+        svc->events.spools_changed = [this] { events.push_back("spools_changed"); };
+        svc->events.state_changed  = [this] { events.push_back("state_changed"); };
+        svc->events.pull_done      = [this](int a, int k) { events.push_back("pull_done " + std::to_string(a) + " " + std::to_string(k)); };
+        svc->events.push_done      = [this](const std::string& op, const std::string& id) { events.push_back("push_done " + op + " " + id); };
+        svc->events.push_failed    = [this](const std::string& op, const std::string& id, fil::FailKind k, const std::string&) {
+            events.push_back("push_failed " + op + " " + id + " " + kind_text(k));
+        };
+        svc->events.config_fetched = [this](const json&) { events.push_back("config_fetched"); };
+    }
+
+    bool step_worker()
+    {
+        if (worker.empty()) return false;
+        auto job = std::move(worker.front());
+        worker.pop_front();
+        job();
+        return true;
+    }
+    void run_ui()
+    {
+        while (!ui.empty()) {
+            auto f = std::move(ui.front());
+            ui.pop_front();
+            f();
+        }
+    }
+    void settle()
+    {
+        for (int guard = 0; guard < 1000 && (!worker.empty() || !ui.empty()); ++guard) {
+            step_worker();
+            run_ui();
+        }
+        REQUIRE(worker.empty());
+        REQUIRE(ui.empty());
+    }
+    int  count_events(const std::string& text) const { return static_cast<int>(std::count(events.begin(), events.end(), text)); }
+    bool has_event(const std::string& text) const { return count_events(text) > 0; }
+    std::string note_of(const std::string& id) const
+    {
+        for (const auto& s : svc->view())
+            if (s.id == id) return s.note;
+        return "<missing>";
+    }
+};
+
+json page_spool(const std::string& name = "New")
+{
+    return json{{"brand", "Bambu Lab"}, {"material_type", "PLA"}, {"series", name}, {"setting_id", "GFA00"}, {"color_code", "#FFFFFFFF"},
+                {"initial_weight", 1000}, {"net_weight", 1000}};
+}
+
+} // namespace
+
+TEST_CASE("The first pull fills the view and a second pull reports kept spools", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(3);
+    rig.svc->request_pull();
+    rig.settle();
+    CHECK(rig.svc->view().size() == 3);
+    CHECK(rig.has_event("pull_done 3 0"));
+    CHECK(rig.has_event("spools_changed"));
+    CHECK(rig.svc->state().last_synced_at > 0);
+    CHECK_FALSE(rig.svc->state().is_syncing);
+    rig.events.clear();
+    rig.svc->request_pull();
+    rig.settle();
+    CHECK(rig.has_event("pull_done 0 3"));
+}
+
+TEST_CASE("A failed pull keeps the list and sets the error until the next good pull", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(3);
+    rig.svc->request_pull();
+    rig.settle();
+    rig.cloud->forced["list"] = {forced_error(fil::CloudError::Unknown, "slow")};
+    rig.svc->request_pull();
+    rig.settle();
+    CHECK(rig.svc->view().size() == 3);
+    CHECK(rig.svc->state().has_error);
+    CHECK(rig.svc->state().error_kind == fil::FailKind::Unknown);
+    CHECK(rig.svc->state().error_message == "slow");
+    rig.svc->request_pull();
+    rig.settle();
+    CHECK_FALSE(rig.svc->state().has_error);
+}
+
+TEST_CASE("Repeated pull requests cause one list", "[BblFilament]")
+{
+    Rig rig;
+    rig.svc->request_pull();
+    rig.svc->request_pull();
+    rig.svc->request_pull();
+    rig.settle();
+    CHECK(rig.cloud->count("list") == 1);
+}
+
+TEST_CASE("A pull request during a running pull causes no second pull", "[BblFilament]")
+{
+    Rig rig;
+    rig.svc->request_pull();
+    rig.step_worker(); // the list ran, its completion has not been delivered yet
+    rig.svc->request_pull();
+    rig.settle();
+    CHECK(rig.cloud->count("list") == 1);
+}
+
+TEST_CASE("An added spool is created once and followed by one pull", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(2);
+    rig.svc->request_pull();
+    rig.settle();
+    rig.cloud->log.clear();
+    const auto accepted = rig.svc->add(page_spool("Fresh"));
+    CHECK(accepted.ok);
+    rig.settle();
+    CHECK(rig.cloud->log == std::vector<std::string>{"create", "list 0"});
+    CHECK(rig.has_event("push_done create "));
+    CHECK(rig.svc->view().size() == 3);
+}
+
+TEST_CASE("An add whose reply is unknown is never sent again", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->forced["create"] = {forced_error(fil::CloudError::Unknown)};
+    rig.svc->add(page_spool());
+    rig.settle();
+    CHECK(rig.cloud->count("create") == 1);
+    CHECK(rig.cloud->count("list") == 1);
+    CHECK(rig.has_event("push_failed create  Unknown"));
+}
+
+TEST_CASE("An add with a quantity creates that many spools and then pulls once", "[BblFilament]")
+{
+    Rig rig;
+    int quantity = 3;
+    int expected = 3;
+    SECTION("three") {}
+    SECTION("zero is clamped to one") { quantity = 0; expected = 1; }
+    SECTION("negative is clamped to one") { quantity = -4; expected = 1; }
+    SECTION("500 is clamped to 99") { quantity = 500; expected = 99; }
+    rig.svc->add(page_spool(), quantity);
+    rig.settle();
+    CHECK(rig.cloud->count("create") == expected);
+    CHECK(rig.cloud->count("list 0") == 1); // one pull; 99 spools take several pages
+    CHECK(rig.cloud->log.back().rfind("list", 0) == 0);
+    CHECK(rig.cloud->log.front() == "create");
+}
+
+TEST_CASE("A batch runs each entry on its own and pulls once at the end", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(2);
+    rig.svc->request_pull();
+    rig.settle();
+    rig.cloud->log.clear();
+    rig.events.clear();
+    rig.cloud->forced["create"] = {std::nullopt, forced_error(fil::CloudError::Rejected, "no")};
+
+    const auto accepted = rig.svc->batch(json::array({page_spool("A"), page_spool("B")}),
+                                         json::array({json{{"spool_id", "1000001"}, {"note", "x"}}, json{{"spool_id", "999"}, {"note", "y"}}}));
+    CHECK(accepted.ok);
+    CHECK(rig.has_event("push_failed update 999 BadRequest"));
+    rig.settle();
+    CHECK(rig.cloud->log == std::vector<std::string>{"create", "create", "update 1000001", "list 0"});
+    CHECK(rig.has_event("push_done create "));
+    CHECK(rig.has_event("push_failed create  Rejected"));
+    CHECK(rig.has_event("push_done update 1000001"));
+}
+
+TEST_CASE("A batch needs two arrays", "[BblFilament]")
+{
+    Rig rig;
+    CHECK_FALSE(rig.svc->batch(json::object(), json::array()).ok);
+    CHECK(rig.svc->batch(json::array(), json::object()).kind == fil::FailKind::BadRequest);
+    CHECK(rig.cloud->log.empty());
+}
+
+TEST_CASE("An edit shows in the view at once and the cloud gets the update body", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(2);
+    rig.svc->request_pull();
+    rig.settle();
+    rig.cloud->log.clear();
+    rig.cloud->bodies.clear();
+    const fil::Spool before = rig.svc->view().front();
+
+    const json patch{{"spool_id", "1000001"}, {"note", "hello"}};
+    CHECK(rig.svc->update(patch).ok);
+    CHECK(rig.note_of("1000001") == "hello");
+    rig.settle();
+
+    const auto expected = fil::update_body(before, patch, {});
+    REQUIRE(expected.has_value());
+    REQUIRE(rig.cloud->bodies.size() == 1);
+    CHECK(rig.cloud->bodies.front() == *expected);
+    CHECK(rig.cloud->log == std::vector<std::string>{"update 1000001", "list 0"});
+    CHECK(rig.note_of("1000001") == "hello");
+}
+
+TEST_CASE("A rejected edit brings the old values back", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(2);
+    rig.svc->request_pull();
+    rig.settle();
+    rig.cloud->log.clear();
+    rig.events.clear();
+    rig.cloud->forced["update"] = {forced_error(fil::CloudError::Rejected, "bad")};
+    rig.svc->update(json{{"spool_id", "1000001"}, {"note", "hello"}});
+    CHECK(rig.note_of("1000001") == "hello");
+    rig.settle();
+    CHECK(rig.note_of("1000001").empty());
+    CHECK(rig.has_event("push_failed update 1000001 Rejected"));
+    CHECK(rig.cloud->count("list") == 0);
+    CHECK(rig.svc->state().has_error);
+}
+
+TEST_CASE("An edit of a spool the cloud no longer has is not turned into a create", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(2);
+    rig.svc->request_pull();
+    rig.settle();
+    rig.cloud->log.clear();
+    rig.events.clear();
+    rig.cloud->rows.erase(rig.cloud->rows.begin()); // gone on the server; the update answers 404
+    rig.svc->update(json{{"spool_id", "1000001"}, {"note", "hello"}});
+    rig.settle();
+    CHECK(rig.cloud->count("create") == 0);
+    CHECK(rig.cloud->count("update") == 1);
+    CHECK(rig.cloud->count("list") == 1);
+    CHECK(rig.has_event("push_failed update 1000001 NotFound"));
+    CHECK(rig.svc->view().size() == 1);
+}
+
+TEST_CASE("An edit that changes nothing the cloud stores is accepted without any work", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(1);
+    rig.svc->request_pull();
+    rig.settle();
+    rig.cloud->log.clear();
+    rig.events.clear();
+    const auto accepted = rig.svc->update(json{{"spool_id", "1000001"}, {"color_name", "Red"}, {"remain_percent", 3}});
+    CHECK(accepted.ok);
+    CHECK(rig.events.empty());
+    CHECK(rig.cloud->log.empty());
+    CHECK(rig.worker.empty());
+}
+
+TEST_CASE("An edit of an unknown spool or without an id is a bad request", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(1);
+    rig.svc->request_pull();
+    rig.settle();
+    CHECK(rig.svc->update(json{{"spool_id", "42"}, {"note", "x"}}).kind == fil::FailKind::BadRequest);
+    CHECK_FALSE(rig.svc->update(json{{"note", "x"}}).ok);
+    CHECK_FALSE(rig.svc->update(json::array()).ok);
+}
+
+TEST_CASE("The second of two queued edits is built from the result of the first", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(1);
+    rig.svc->request_pull();
+    rig.settle();
+    rig.cloud->log.clear();
+    rig.cloud->bodies.clear();
+    rig.svc->update(json{{"spool_id", "1000001"}, {"series", "Renamed"}});
+    rig.svc->update(json{{"spool_id", "1000001"}, {"note", "n"}});
+    rig.settle();
+    REQUIRE(rig.cloud->bodies.size() == 2);
+    CHECK(rig.cloud->bodies[0]["filamentName"] == "Renamed");
+    CHECK(rig.cloud->bodies[1]["filamentName"] == "Renamed");
+    CHECK(rig.cloud->bodies[1]["note"] == "n");
+    CHECK(rig.cloud->log == std::vector<std::string>{"update 1000001", "update 1000001", "list 0"});
+}
+
+TEST_CASE("The second of two queued edits does not carry a first edit the cloud refused", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(1);
+    rig.svc->request_pull();
+    rig.settle();
+    rig.cloud->bodies.clear();
+    rig.cloud->forced["update"] = {forced_error(fil::CloudError::Rejected), std::nullopt};
+    rig.svc->update(json{{"spool_id", "1000001"}, {"series", "Renamed"}});
+    rig.svc->update(json{{"spool_id", "1000001"}, {"note", "n"}});
+    rig.settle();
+    REQUIRE(rig.cloud->bodies.size() == 2);
+    CHECK(rig.cloud->bodies[1]["filamentName"] == "Spool 1000001");
+    CHECK(rig.cloud->bodies[1]["note"] == "n");
+}
+
+TEST_CASE("An edit queued behind a pull for a spool the pull dropped ends as not found without an update call", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(3);
+    rig.svc->request_pull();
+    rig.settle();
+    rig.cloud->log.clear();
+    rig.events.clear();
+    rig.svc->request_pull(); // its job is queued but has not run
+    rig.svc->update(json{{"spool_id", "1000002"}, {"note", "x"}});
+    rig.cloud->rows.erase(rig.cloud->rows.begin() + 1);
+    rig.settle();
+    CHECK(rig.cloud->count("update") == 0);
+    CHECK(rig.has_event("push_failed update 1000002 NotFound"));
+    CHECK(rig.svc->view().size() == 2);
+}
+
+TEST_CASE("A removal hides the rows at once and the pull confirms it", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(3);
+    rig.svc->request_pull();
+    rig.settle();
+    rig.cloud->log.clear();
+    CHECK(rig.svc->remove({"1000001", "1000002", "1000002", "abc", "777"}).ok);
+    CHECK(rig.svc->view().size() == 1);
+    rig.settle();
+    CHECK(rig.cloud->log == std::vector<std::string>{"remove 1000001,1000002", "list 0"});
+    CHECK(rig.svc->view().size() == 1);
+    CHECK(rig.cloud->rows.size() == 1);
+    CHECK(rig.has_event("push_done delete 1000001"));
+}
+
+TEST_CASE("A rejected delete brings the rows back", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(3);
+    rig.svc->request_pull();
+    rig.settle();
+    rig.cloud->forced["remove"] = {forced_error(fil::CloudError::Rejected)};
+    rig.svc->remove({"1000001"});
+    CHECK(rig.svc->view().size() == 2);
+    rig.settle();
+    CHECK(rig.svc->view().size() == 3);
+    CHECK(rig.has_event("push_failed delete 1000001 Rejected"));
+}
+
+TEST_CASE("A removal of nothing known is a bad request", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(1);
+    rig.svc->request_pull();
+    rig.settle();
+    CHECK(rig.svc->remove({"555"}).kind == fil::FailKind::BadRequest);
+    CHECK(rig.svc->remove({}).kind == fil::FailKind::BadRequest);
+}
+
+TEST_CASE("A write queued while a pull runs goes after it and is followed by a new pull", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(2);
+    rig.svc->request_pull(); // job queued, not run
+    rig.svc->add(page_spool());
+    rig.settle();
+    CHECK(rig.cloud->log == std::vector<std::string>{"list 0", "create", "list 0"});
+}
+
+TEST_CASE("A pull never starts while a write is queued", "[BblFilament]")
+{
+    Rig rig;
+    rig.svc->add(page_spool()); // running
+    rig.svc->request_pull();
+    rig.svc->add(page_spool()); // queued
+    rig.settle();
+    CHECK(rig.cloud->log == std::vector<std::string>{"create", "create", "list 0"});
+}
+
+TEST_CASE("A settled update keeps showing its edit when the next pull fails", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(2);
+    rig.svc->request_pull();
+    rig.settle();
+    rig.cloud->forced["list"] = {forced_error(fil::CloudError::Unknown)};
+    rig.svc->update(json{{"spool_id", "1000001"}, {"note", "mine"}});
+    rig.settle();
+    CHECK(rig.svc->state().has_error);
+    CHECK(rig.note_of("1000001") == "mine");
+    rig.cloud->rows[0]["note"] = "server";
+    rig.svc->request_pull();
+    rig.settle();
+    CHECK(rig.note_of("1000001") == "server");
+    CHECK_FALSE(rig.svc->state().has_error);
+}
+
+TEST_CASE("Signed out, every write is refused and nothing reaches the cloud", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(2);
+    rig.svc->request_pull();
+    rig.settle();
+    rig.cloud->log.clear();
+    SECTION("signed out") { rig.session.signed_in = false; }
+    SECTION("closing") { rig.session.closing = true; }
+    CHECK(rig.svc->add(page_spool()).kind == fil::FailKind::NotSignedIn);
+    CHECK(rig.svc->batch(json::array(), json::array()).kind == fil::FailKind::NotSignedIn);
+    CHECK(rig.svc->update(json{{"spool_id", "1000001"}, {"note", "x"}}).kind == fil::FailKind::NotSignedIn);
+    CHECK(rig.svc->remove({"1000001"}).kind == fil::FailKind::NotSignedIn);
+    CHECK_FALSE(rig.svc->add(page_spool()).ok);
+    CHECK(rig.svc->view().empty());
+    rig.svc->request_pull();
+    rig.svc->request_config(true);
+    CHECK(rig.worker.empty());
+    CHECK(rig.cloud->log.empty());
+    CHECK_FALSE(rig.svc->state().signed_in);
+}
+
+TEST_CASE("A reset while a call is in flight makes its completion do nothing", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(2);
+    rig.svc->request_pull();
+    rig.step_worker();
+    rig.svc->reset();
+    rig.events.clear();
+    rig.run_ui();
+    CHECK(rig.events.empty());
+    CHECK(rig.svc->view().empty());
+    CHECK_FALSE(rig.svc->status().have_list);
+}
+
+TEST_CASE("A changed account while a call is in flight drops the completion and clears the state", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(3);
+    rig.svc->request_pull();
+    rig.settle();
+    rig.svc->request_pull();
+    rig.step_worker();
+    rig.events.clear();
+    SECTION("another user") { rig.session.uid = "u2"; }
+    SECTION("another plugin generation") { rig.session.generation = 2; }
+    rig.run_ui();
+    CHECK(rig.count_events("pull_done 0 3") == 0);
+    CHECK(rig.svc->view().empty());
+    CHECK_FALSE(rig.svc->status().have_list);
+    CHECK(rig.worker.empty());
+}
+
+TEST_CASE("A completion after the service is gone does nothing", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(2);
+    SECTION("job ran, completion queued")
+    {
+        rig.svc->request_pull();
+        rig.step_worker();
+        rig.svc.reset();
+        rig.run_ui();
+    }
+    SECTION("job still queued")
+    {
+        rig.svc->request_pull();
+        rig.svc.reset();
+        rig.settle();
+    }
+    CHECK(rig.ui.empty());
+    CHECK(rig.worker.empty());
+}
+
+TEST_CASE("A worker that refuses jobs fails writes and pulls as unavailable", "[BblFilament]")
+{
+    Rig rig;
+    rig.accept_async = false;
+    rig.svc->add(page_spool());
+    CHECK(rig.has_event("push_failed create  Unavailable"));
+    CHECK(rig.cloud->log.empty());
+    rig.svc->request_pull();
+    CHECK(rig.svc->state().has_error);
+    CHECK(rig.svc->state().error_kind == fil::FailKind::Unavailable);
+    CHECK_FALSE(rig.svc->state().is_syncing);
+}
+
+TEST_CASE("The config is fetched once, again on force, kept on failure and cleared by a reset", "[BblFilament]")
+{
+    Rig rig;
+    rig.svc->request_config(false);
+    rig.settle();
+    CHECK(rig.has_event("config_fetched"));
+    REQUIRE(rig.svc->cached_config() != nullptr);
+    CHECK(rig.svc->cached_config()->contains("filamentColors"));
+    CHECK(rig.cloud->count("config") == 1);
+
+    rig.svc->request_config(false);
+    rig.settle();
+    CHECK(rig.cloud->count("config") == 1);
+
+    rig.svc->request_config(true);
+    rig.settle();
+    CHECK(rig.cloud->count("config") == 2);
+
+    rig.cloud->forced["config"] = {forced_error(fil::CloudError::Unknown)};
+    rig.svc->request_config(true);
+    rig.settle();
+    CHECK(rig.cloud->count("config") == 3);
+    CHECK(rig.svc->cached_config() != nullptr);
+
+    rig.svc->reset();
+    CHECK(rig.svc->cached_config() == nullptr);
+}
+
+TEST_CASE("The service status reports the queue and the list", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(2);
+    rig.svc->request_pull();
+    rig.settle();
+    rig.svc->add(page_spool());
+    const auto st = rig.svc->status();
+    CHECK(st.have_list);
+    CHECK(st.spool_count == 2);
+    CHECK(st.pending_writes == 1);
+    CHECK(st.state.is_syncing);
+    rig.settle();
+    CHECK(rig.svc->status().pending_writes == 0);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// SpoolWorker, on a real thread
+
+namespace {
+
+bool ready(std::future<void>& f) { return f.wait_for(std::chrono::seconds(10)) == std::future_status::ready; }
+
+} // namespace
+
+TEST_CASE("The spool worker runs jobs in the order they were posted", "[BblFilament]")
+{
+    fil::SpoolWorker   worker;
+    std::mutex         mutex;
+    std::vector<int>   order;
+    std::promise<void> done;
+    auto               finished  = done.get_future();
+    bool               all_taken = true;
+    for (int i = 0; i < 20; ++i) {
+        const bool taken = worker.post([&, i] {
+            std::lock_guard<std::mutex> lock(mutex);
+            order.push_back(i);
+            if (i == 19) done.set_value();
+        });
+        all_taken = all_taken && taken;
+    }
+    REQUIRE(ready(finished));
+    CHECK(all_taken);
+    std::vector<int> expected(20);
+    for (int i = 0; i < 20; ++i) expected[i] = i;
+    std::lock_guard<std::mutex> lock(mutex);
+    CHECK(order == expected);
+}
+
+TEST_CASE("Draining the spool worker waits for the running job and forgets the queued ones", "[BblFilament]")
+{
+    fil::SpoolWorker   worker;
+    std::promise<void> started, release, after_resume;
+    auto               started_f = started.get_future();
+    auto               release_f = release.get_future().share();
+    auto               resumed_f = after_resume.get_future();
+    std::atomic<bool>  released{false};
+    std::atomic<bool>  first_done{false};
+    std::atomic<bool>  second_ran{false};
+
+    worker.post([&] {
+        started.set_value();
+        release_f.wait();
+        first_done = true;
+    });
+    worker.post([&] { second_ran = true; });
+    REQUIRE(ready(started_f));
+
+    std::thread helper([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        released = true;
+        release.set_value();
+    });
+    worker.drain();
+    const bool released_at_return   = released.load();
+    const bool first_done_at_return = first_done.load();
+    helper.join();
+
+    CHECK(released_at_return);
+    CHECK(first_done_at_return);
+    CHECK_FALSE(second_ran.load());
+    CHECK_FALSE(worker.accepting());
+    CHECK_FALSE(worker.busy());
+    CHECK_FALSE(worker.post([] {}));
+    worker.drain(); // idempotent
+
+    worker.resume();
+    CHECK(worker.accepting());
+    CHECK(worker.post([&] { after_resume.set_value(); }));
+    CHECK(ready(resumed_f));
+    CHECK_FALSE(second_ran.load());
+}
+
+TEST_CASE("Destroying a spool worker with a queued job does not hang", "[BblFilament]")
+{
+    std::promise<void> started, release;
+    auto               started_f = started.get_future();
+    auto               release_f = release.get_future().share();
+    std::atomic<bool>  queued_ran{false};
+    std::thread        helper;
+    {
+        fil::SpoolWorker worker;
+        worker.post([&] {
+            started.set_value();
+            release_f.wait();
+        });
+        worker.post([&] { queued_ran = true; });
+        REQUIRE(ready(started_f));
+        helper = std::thread([&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            release.set_value();
+        });
+    }
+    helper.join();
+    CHECK_FALSE(queued_ran.load());
+}
+
+TEST_CASE("A throwing job does not stop the spool worker", "[BblFilament]")
+{
+    fil::SpoolWorker   worker;
+    std::promise<void> done;
+    auto               done_f = done.get_future();
+    worker.post([] { throw std::runtime_error("boom"); });
+    worker.post([] { throw 5; });
+    worker.post([&] { done.set_value(); });
+    CHECK(ready(done_f));
+}
+
+TEST_CASE("A spool worker that was never used drains and is destroyed cleanly", "[BblFilament]")
+{
+    fil::SpoolWorker worker;
+    CHECK(worker.accepting());
+    CHECK_FALSE(worker.busy());
+    worker.drain();
 }

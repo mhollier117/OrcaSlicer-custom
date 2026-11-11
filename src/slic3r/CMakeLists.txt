@@ -940,6 +940,10 @@ set(SLIC3R_GUI_SOURCES
     Utils/BblFilament/Spool.hpp
     Utils/BblFilament/SpoolCloud.cpp
     Utils/BblFilament/SpoolCloud.hpp
+    Utils/BblFilament/SpoolService.cpp
+    Utils/BblFilament/SpoolService.hpp
+    Utils/BblFilament/SpoolWorker.cpp
+    Utils/BblFilament/SpoolWorker.hpp
     Utils/BBLPrinterAgent.cpp
     Utils/BBLPrinterAgent.hpp
     Utils/BBLNetworkPlugin.cpp
