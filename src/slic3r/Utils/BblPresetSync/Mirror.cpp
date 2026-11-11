@@ -199,6 +199,11 @@ void Mirror::run_pass(Trigger trigger)
             auto        fresh = std::make_shared<Ledger>(Ledger::file_path(m_host.data_dir(), s.orca_user_id, s.bambu_uid));
             std::string err;
             if (!fresh->load(&err)) BOOST_LOG_TRIVIAL(warning) << "bbl preset sync: ledger load failed, starting empty: " << err;
+            // The halted key lists do not survive a restart: the next plan recomputes and announces the halt.
+            if (!fresh->halted().empty()) {
+                fresh->set_halted("");
+                save_ledger(*fresh);
+            }
             std::lock_guard<std::mutex> lock(m_mutex);
             const bool                  uid_changed = !m_session || m_session->bambu_uid != s.bambu_uid;
             m_session                                = s;
@@ -676,6 +681,7 @@ void Mirror::confirm_first_run(bool accepted)
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!accepted) m_summary_declined = true;
+        else m_have_list = false;
         ledger = m_ledger;
     }
     if (accepted && ledger) {
@@ -692,6 +698,24 @@ void Mirror::set_declined(const Key& key)
     e.state = "declined";
     ledger->put(key, e);
     save_ledger(*ledger);
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_have_list = false;
+}
+
+void Mirror::forget(const Key& key)
+{
+    std::shared_ptr<Ledger> ledger;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_backoff.erase(key);
+        ledger = m_ledger;
+    }
+    if (ledger) {
+        ledger->erase(key);
+        save_ledger(*ledger);
+    }
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_have_list = false;
 }
 
 void Mirror::resolve_halt(HaltChoice choice)
@@ -704,6 +728,7 @@ void Mirror::resolve_halt(HaltChoice choice)
         ledger = m_ledger;
         local  = m_halted_local;
         remote = m_halted_remote;
+        m_have_list = false;
         if (choice == HaltChoice::ProceedLocalDeletes) m_proceed_local = true;
         if (choice == HaltChoice::ProceedRemoteDeletes) m_proceed_remote = true;
         if (choice == HaltChoice::KeepLocal) m_halted_local.clear();

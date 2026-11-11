@@ -35,8 +35,12 @@ std::string upload_hash(const ValueMap& values)
 {
     const std::set<std::string>& ignored = hash_ignored_keys();
     std::string                  text;
+    // A child body from Bambu carries the parent Bambu filament id, the local upload map none.
+    const auto inherits = values.find("inherits");
+    const bool is_child = inherits != values.end() && !inherits->second.empty();
     for (const auto& [key, value] : values) {
         if (ignored.count(key)) continue;
+        if (is_child && key == "filament_id") continue;
         if (key == "base_id" && value.empty()) continue;
         text += key;
         text += '=';

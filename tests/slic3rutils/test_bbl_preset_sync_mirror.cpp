@@ -1881,3 +1881,131 @@ TEST_CASE("Status reflects the last pass", "[BblPresetSync]")
     CHECK(st.linked == 2);
     CHECK(st.halted.empty());
 }
+
+// ---------------------------------------------------------------------------
+// Halt recovery, forced lists, forget, hash of children
+// ---------------------------------------------------------------------------
+
+TEST_CASE("A halt saved in the ledger is cleared on load and announced again by the next plan", "[BblPresetSync]")
+{
+    Env e;
+    local_delete_scenario(e);
+    {
+        sync::Ledger l(e.ledger_path());
+        REQUIRE(l.load());
+        l.set_halted("mass_delete");
+        REQUIRE(l.save());
+    }
+    e.pass();
+    CHECK(e.mirror.status().last_result == "halted: mass_delete");
+    REQUIRE(e.host.halts.size() == 1);
+    CHECK(e.host.halts[0].local == std::vector<Key>{fkey("K1"), fkey("K2"), fkey("K3")});
+    CHECK(e.store.deletes.empty());
+    CHECK(e.reload()->halted() == "mass_delete"); // set again by the new plan
+}
+
+TEST_CASE("A saved halt is dropped on load when the plan no longer halts", "[BblPresetSync]")
+{
+    Env e;
+    e.seed({{fkey("K"), linked("P1", 100, "h1")}});
+    {
+        sync::Ledger l(e.ledger_path());
+        REQUIRE(l.load());
+        l.set_halted("mass_delete");
+        REQUIRE(l.save());
+    }
+    e.add_local("K", "h1");
+    e.add_remote("K", "P1", 100, false);
+    e.pass();
+    CHECK(e.mirror.status().last_result == "ok");
+    CHECK(e.reload()->halted().empty());
+    CHECK(e.host.halts.empty());
+}
+
+TEST_CASE("Forcing calls make the next tick list while the controls do not", "[BblPresetSync]")
+{
+    auto lists_after = [](const std::function<void(Env&)>& call) {
+        Env e;
+        e.seed({{fkey("K"), linked("P1", 100, "h1")}});
+        e.add_local("K", "h1");
+        e.add_remote("K", "P1", 100, false);
+        e.pass();
+        e.pass();
+        call(e);
+        e.pass();
+        return e.cloud.list_calls;
+    };
+    CHECK(lists_after([](Env&) {}) == 1);
+    CHECK(lists_after([](Env& e) { e.mirror.resolve_halt(sync::HaltChoice::Later); }) == 1);
+    CHECK(lists_after([](Env& e) { e.mirror.confirm_first_run(false); }) == 1);
+    CHECK(lists_after([](Env& e) { e.mirror.resolve_halt(sync::HaltChoice::KeepLocal); }) == 2);
+    CHECK(lists_after([](Env& e) { e.mirror.resolve_halt(sync::HaltChoice::RestoreFromBambu); }) == 2);
+    CHECK(lists_after([](Env& e) { e.mirror.resolve_halt(sync::HaltChoice::ProceedLocalDeletes); }) == 2);
+    CHECK(lists_after([](Env& e) { e.mirror.resolve_halt(sync::HaltChoice::ProceedRemoteDeletes); }) == 2);
+    CHECK(lists_after([](Env& e) { e.mirror.confirm_first_run(true); }) == 2);
+    CHECK(lists_after([](Env& e) { e.mirror.set_declined(fkey("Other")); }) == 2);
+    CHECK(lists_after([](Env& e) { e.mirror.forget(fkey("Other")); }) == 2);
+}
+
+TEST_CASE("forget erases the entry and the next pass treats the preset as new", "[BblPresetSync]")
+{
+    Env e;
+    e.seed({{fkey("Mine"), linked("P1", 100, "h1")}});
+    e.add_local("Mine", "h1");
+    e.add_remote("Mine", "P1", 100, false);
+    e.pass();
+    REQUIRE(e.cloud.calls.empty());
+
+    SECTION("no row left: it is created again")
+    {
+        e.cloud.rows.clear();
+        e.mirror.forget(fkey("Mine"));
+        CHECK_FALSE(e.mirror.ledger()->get(fkey("Mine")).has_value());
+        CHECK_FALSE(e.reload()->get(fkey("Mine")).has_value());
+        e.pass();
+        CHECK(e.cloud.count("create Mine") == 1);
+    }
+    SECTION("an identical row is still there: it is paired")
+    {
+        e.cloud.rows.clear();
+        e.cloud.rows.push_back({PresetType::Filament, "Mine", "P2", 400});
+        e.cloud.bodies["Mine"] = valid_body("P2", "x");
+        e.set_local_hash("Mine", sync::upload_hash(valid_body("P2", "x")));
+        e.mirror.forget(fkey("Mine"));
+        e.pass();
+        const auto entry = e.mirror.ledger()->get(fkey("Mine"));
+        REQUIRE(entry.has_value());
+        CHECK(entry->setting_id == "P2");
+        CHECK(e.cloud.calls.empty());
+    }
+    SECTION("it clears the backoff of the key")
+    {
+        e.set_local_hash("Mine", "h2");
+        e.cloud.update_script.push_back(sync::WriteResult{false, 500, "", "", 0});
+        e.pass();
+        CHECK(e.cloud.count("update") == 1);
+        e.mirror.forget(fkey("Mine"));
+        e.cloud.rows.clear();
+        e.pass(); // no 60 second wait
+        CHECK(e.cloud.count("create Mine") == 1);
+    }
+}
+
+TEST_CASE("The upload hash of a child ignores filament_id and a root keeps it", "[BblPresetSync]")
+{
+    const sync::ValueMap child   = {{"inherits", "BBL PLA"}, {"base_id", "f1"}, {"filament_cost", "3"}};
+    sync::ValueMap       with_id = child;
+    with_id["filament_id"]       = "GFA00";
+    CHECK(sync::upload_hash(child) == sync::upload_hash(with_id));
+
+    const sync::ValueMap root_a = {{"filament_cost", "3"}, {"filament_id", "P1111111"}};
+    sync::ValueMap       root_b = root_a;
+    root_b["filament_id"]       = "P2222222";
+    CHECK(sync::upload_hash(root_a) != sync::upload_hash(root_b));
+
+    sync::ValueMap empty_a = root_a;
+    empty_a["inherits"]    = "";
+    sync::ValueMap empty_b = root_b;
+    empty_b["inherits"]    = "";
+    CHECK(sync::upload_hash(empty_a) != sync::upload_hash(empty_b));
+}

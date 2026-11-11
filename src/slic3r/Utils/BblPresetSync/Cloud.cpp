@@ -15,6 +15,14 @@ std::string value_of(const ValueMap& m, const char* key)
     return it == m.end() ? std::string() : it->second;
 }
 
+// The Orca cloud time, user and id must not reach Bambu.
+void strip_foreign_keys(ValueMap& values)
+{
+    values.erase("updated_time");
+    values.erase("user_id");
+    values.erase("setting_id");
+}
+
 void fill_from_map(WriteResult& w, const ValueMap& values)
 {
     w.server_code = value_of(values, "code");
@@ -60,6 +68,7 @@ WriteResult AgentCloud::create(const std::string& name, ValueMap values)
 {
     WriteResult w;
     if (m_agent == nullptr) return w;
+    strip_foreign_keys(values);
     unsigned          http = 0;
     const std::string id   = m_agent->request_setting_id(name, &values, &http, BBL_CLOUD_PROVIDER);
     w.http_code            = http;
@@ -73,6 +82,7 @@ WriteResult AgentCloud::update(const std::string& setting_id, const std::string&
 {
     WriteResult w;
     if (m_agent == nullptr) return w;
+    strip_foreign_keys(values);
     unsigned http = 0;
     const int rc  = m_agent->put_setting(setting_id, name, &values, &http, BBL_CLOUD_PROVIDER, false);
     w.http_code   = http;

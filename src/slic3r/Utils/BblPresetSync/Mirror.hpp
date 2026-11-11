@@ -120,6 +120,7 @@ public:
     void                    confirm_first_run(bool accepted); // any thread
     void                    resolve_halt(HaltChoice choice);  // any thread
     void                    set_declined(const Key& key);     // any thread: conversion refused
+    void                    forget(const Key& key);           // any thread: the preset is treated as new on the next pass
     Status                  status() const;                   // any thread
     std::shared_ptr<Ledger> ledger() const;                   // current ledger or null
 
