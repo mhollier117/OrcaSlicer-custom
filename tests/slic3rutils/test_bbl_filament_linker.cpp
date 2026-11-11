@@ -1817,3 +1817,132 @@ TEST_CASE("The link status names printers and never shows a serial or an RFID", 
     CHECK(j["last_round"]["ops"][0]["kind"] == "ams");
     CHECK(j["last_round"]["ops"][0]["ok"] == true);
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// create and assign
+
+namespace {
+
+bool has_note_containing(const json& status, const std::string& text)
+{
+    for (const json& n : status["notes"])
+        if (n.is_string() && n.get<std::string>().find(text) != std::string::npos) return true;
+    return false;
+}
+
+} // namespace
+
+TEST_CASE("A spool created for a slot is assigned once the list shows it, and a tray that agrees binds it", "[BblFilament]")
+{
+    DriverRig d;
+    d.rig.cloud->apply_mounts = true;
+    d.load(); // an empty account
+    const std::vector<fil::PrinterView> printers{with_tray(make_printer(), make_tray("1"))};
+
+    REQUIRE(d.driver->create_and_assign(page_spool(), fil::SlotKey{"dev1", 0, "1"}).ok);
+    CHECK(d.driver->status_json(printers)["creations"].size() == 1);
+    d.rig.settle(); // the create, then the pull it asks for
+    REQUIRE(d.count("create") == 1);
+
+    d.run(printers);
+    const json status = d.driver->status_json(printers);
+    CHECK(status["creations"].empty());
+    REQUIRE(d.rig.cloud->slots_got.size() == 1);
+    REQUIRE(d.rig.cloud->slots_got[0].size() == 1);
+    CHECK(d.rig.cloud->slots_got[0][0].spool_id == "2000001");
+    CHECK(d.rig.cloud->slots_got[0][0].slot_id == "1");
+}
+
+TEST_CASE("Two new identical spools in one list leave the slot unassigned with a note", "[BblFilament]")
+{
+    DriverRig d;
+    d.load();
+    const std::vector<fil::PrinterView> printers{with_tray(make_printer(), make_tray("1"))};
+    REQUIRE(d.driver->create_and_assign(page_spool(), fil::SlotKey{"dev1", 0, "1"}).ok);
+    d.rig.cloud->rows.push_back(row_with(1000005)); // an identical spool made elsewhere in the meantime
+    d.rig.settle();
+
+    d.run(printers);
+    const json status = d.driver->status_json(printers);
+    CHECK(status["creations"].empty());
+    CHECK(status["assignments"].empty());
+    CHECK(has_note_containing(status, "could not tell which new spool belongs to the slot"));
+    CHECK(d.count("sync_slots") == 0);
+
+    d.driver->reset();
+    CHECK_FALSE(has_note_containing(d.driver->status_json(printers), "could not tell"));
+}
+
+TEST_CASE("A created spool that does not show up within two minutes is forgotten", "[BblFilament]")
+{
+    DriverRig d;
+    d.load();
+    const std::vector<fil::PrinterView> printers{with_tray(make_printer(), make_tray("1"))};
+    d.rig.cloud->forced["create"].push_back(FakeCloud::ok(json::object())); // accepted, but no row appears
+    const long long start = d.t;
+    REQUIRE(d.driver->create_and_assign(page_spool(), fil::SlotKey{"dev1", 0, "1"}).ok);
+    d.rig.settle();
+    REQUIRE(d.count("list") == 1); // a newer list, without the spool
+
+    d.t = start + fil::k_assignment_seconds;
+    d.run(printers);
+    CHECK(d.driver->status_json(printers)["creations"].size() == 1);
+    d.t = start + fil::k_assignment_seconds + 1;
+    d.run(printers);
+    CHECK(d.driver->status_json(printers)["creations"].empty());
+
+    // A matching spool that shows up later is not assigned.
+    d.rig.cloud->rows.push_back(row_with(1000005));
+    d.rig.svc->request_pull();
+    d.rig.settle();
+    d.t += fil::LinkDriver::k_round_spacing_seconds;
+    d.run(printers);
+    CHECK(d.driver->status_json(printers)["assignments"].empty());
+    CHECK(d.count("sync_slots") == 0);
+}
+
+TEST_CASE("A refused create remembers nothing", "[BblFilament]")
+{
+    DriverRig d;
+    d.load();
+    json no_filament = page_spool();
+    no_filament.erase("setting_id");
+    const fil::Accept bad = d.driver->create_and_assign(no_filament, fil::SlotKey{"dev1", 0, "1"});
+    CHECK_FALSE(bad.ok);
+    CHECK(bad.kind == fil::FailKind::BadRequest);
+    json no_colour = page_spool();
+    no_colour["color_code"] = "";
+    CHECK_FALSE(d.driver->create_and_assign(no_colour, fil::SlotKey{"dev1", 0, "1"}).ok);
+    CHECK_FALSE(d.driver->create_and_assign(json::array(), fil::SlotKey{"dev1", 0, "1"}).ok);
+
+    d.rig.session.signed_in = false;
+    const fil::Accept out = d.driver->create_and_assign(page_spool(), fil::SlotKey{"dev1", 0, "1"});
+    CHECK_FALSE(out.ok);
+    CHECK(out.kind == fil::FailKind::NotSignedIn);
+    d.rig.settle();
+    CHECK(d.count("create") == 0);
+    CHECK(d.driver->status_json({})["creations"].empty());
+}
+
+TEST_CASE("The baseline keeps an older identical spool from being assigned", "[BblFilament]")
+{
+    DriverRig d;
+    d.rig.cloud->rows.push_back(row_with(1000001)); // the same filament and colour, not in a printer
+    d.load();
+    const std::vector<fil::PrinterView> printers{with_tray(make_printer(), make_tray("1"))};
+    REQUIRE(d.driver->create_and_assign(page_spool(), fil::SlotKey{"dev1", 0, "1"}).ok);
+    d.rig.settle();
+    d.run(printers);
+    REQUIRE(d.rig.cloud->slots_got.size() == 1);
+    REQUIRE(d.rig.cloud->slots_got[0].size() == 1);
+    CHECK(d.rig.cloud->slots_got[0][0].spool_id == "2000001");
+}
+
+TEST_CASE("A spool created before the first list is created but not assigned", "[BblFilament]")
+{
+    DriverRig d; // no list yet
+    REQUIRE(d.driver->create_and_assign(page_spool(), fil::SlotKey{"dev1", 0, "1"}).ok);
+    CHECK(d.driver->status_json({})["creations"].empty());
+    d.rig.settle();
+    CHECK(d.count("create") == 1);
+}

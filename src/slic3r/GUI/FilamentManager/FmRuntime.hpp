@@ -50,6 +50,14 @@ public:
     BblFilament::Accept request_soft_match(const BblFilament::PrinterView& printer, int ams_id);
     const json&         soft_match_json() const { return m_soft_match; }
 
+    // Linking is on (not off, not a dry run), the user is signed in and the printer takes part (printer_views).
+    bool link_available(const std::string& dev_id) const;
+    // Assigns a confirmed spool without RFID that is not in a printer to the slot.
+    BblFilament::Accept assign(const std::string& spool_id, const BblFilament::SlotKey& slot);
+    // Creates the spool and assigns it to the slot once the list shows it; a plain add when linking is not available
+    // for that printer or the spool has no filament id or colour.
+    BblFilament::Accept create_and_assign(const json& page_spool, const BblFilament::SlotKey& slot);
+
     json status_json(); // for the MCP tool
 
 private:

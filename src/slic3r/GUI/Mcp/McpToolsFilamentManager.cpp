@@ -263,21 +263,15 @@ json assign(const json& args)
     else if (it != args.end() && it->is_number_integer()) spool_id = std::to_string(it->get<long long>());
     if (spool_id.empty()) throw ToolFailure("assign needs spool_id");
 
-    const fil::Spool* row = nullptr;
-    for (const fil::Spool& r : runtime.service().confirmed())
-        if (r.id == spool_id) row = &r;
-    if (row == nullptr) throw ToolFailure("no spool " + spool_id + " in the last list of the account");
-    if (!row->rfid.empty()) throw ToolFailure("spool " + spool_id + " has an RFID tag: the printer reports where it is");
-    if (row->filament_id.empty()) throw ToolFailure("spool " + spool_id + " has no filament id");
-
-    fil::Assignment a;
-    a.slot        = slot_arg(args, views);
-    a.spool_id    = row->id;
-    a.filament_id = row->filament_id;
-    a.colors      = row->colors.empty() ? std::vector<std::string>{row->color} : row->colors;
-    if (a.colors.front().empty()) throw ToolFailure("spool " + spool_id + " has no colour");
-    runtime.linker().assign(a);
-    return {{"assigned", true}};
+    const fil::Accept a = runtime.assign(spool_id, slot_arg(args, views));
+    if (a.ok) return {{"assigned", true}};
+    if (a.kind == fil::FailKind::NotFound) throw ToolFailure("no spool " + spool_id + " in the last list of the account");
+    for (const fil::Spool& r : runtime.service().confirmed()) {
+        if (r.id != spool_id) continue;
+        if (!r.rfid.empty()) throw ToolFailure("spool " + spool_id + " has an RFID tag: the printer reports where it is");
+        if (r.in_printer) throw ToolFailure("spool " + spool_id + " is in a printer already: unassign it from its slot first");
+    }
+    throw ToolFailure("spool " + spool_id + " has no filament id or no colour");
 }
 
 json soft_match(const json& args)

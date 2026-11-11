@@ -8,6 +8,7 @@
 
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -43,6 +44,8 @@ public:
 
     void            tick(const std::vector<PrinterView>& printers); // call every couple of seconds
     void            assign(const Assignment& a);                    // replaces an assignment for the same slot
+    // Creates a spool from a page-shaped spool object and assigns it to the slot once it has shown up in the list.
+    Accept          create_and_assign(const json& page_spool, const SlotKey& slot);
     Accept          unassign(const SlotKey& slot, const std::vector<PrinterView>& printers); // unbind now (manual spools)
     void            sync_now();                                     // forget the round spacing, the busy cooldowns and what was sent lately, once
     void            reset();                                        // session changed: forget everything; ops still queued send nothing
@@ -62,8 +65,25 @@ private:
         int         items{0};
     };
 
+    // A spool created for a slot, waiting for the list that shows it.
+    struct Creation
+    {
+        std::set<std::string>    baseline; // the ids of the rows when it was created
+        SlotKey                  slot;
+        std::string              filament_id;
+        std::vector<std::string> colors;
+        long long                created_at{0};
+        unsigned long long       list_serial{0};
+    };
+    struct CreationNote
+    {
+        SlotKey     slot;
+        std::string text;
+    };
+
     long long now() const;
     bool      waiting_for_list() const;
+    void      resolve_creations();
     void      start_round(const std::vector<PrinterView>& printers);
     void      op_finished(unsigned long long round, const OpRecord& record);
     void      record_slot_results(const std::string& dev_id, const SpoolService::LinkOutcome& out); // refusals and accepted items
@@ -82,6 +102,8 @@ private:
     long long             pull_asked_at_{0};
     bool                  skip_spacing_{false};
     std::vector<OpRecord> round_ops_, last_round_ops_;
+    std::vector<Creation>     creations_;
+    std::vector<CreationNote> creation_notes_; // the latest few
 
     std::shared_ptr<int> alive_ = std::make_shared<int>(0);
 };

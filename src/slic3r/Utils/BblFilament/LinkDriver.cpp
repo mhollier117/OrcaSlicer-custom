@@ -97,7 +97,9 @@ void LinkDriver::tick(const std::vector<PrinterView>& printers)
 {
     if (config.mode == LinkMode::Off) return;
     SpoolService* svc = deps_.service;
-    if (svc == nullptr || !svc->state().signed_in || round_in_flight_) return;
+    if (svc == nullptr || !svc->state().signed_in) return;
+    resolve_creations();
+    if (round_in_flight_) return;
     const long long t = now();
     if (waiting_for_list()) {
         // The pull the last round asked for has not brought a list (it failed, or was dropped): ask again now and then.
@@ -325,6 +327,75 @@ void LinkDriver::assign(const Assignment& a)
     state_.assignments[copy.slot] = copy;
 }
 
+Accept LinkDriver::create_and_assign(const json& page_spool, const SlotKey& slot)
+{
+    SpoolService* svc = deps_.service;
+    if (svc == nullptr) return {false, FailKind::Unavailable};
+    if (!page_spool.is_object()) return {false, FailKind::BadRequest};
+    const auto text = [&page_spool](const char* key) {
+        const auto it = page_spool.find(key);
+        return it != page_spool.end() && it->is_string() ? it->get<std::string>() : std::string();
+    };
+    const std::string setting_id = text("setting_id");
+    const std::string color_code = text("color_code");
+    if (setting_id.empty() || color_code.empty()) return {false, FailKind::BadRequest};
+
+    Creation c;
+    c.slot        = slot;
+    c.filament_id = setting_id;
+    if (auto it = page_spool.find("colors"); it != page_spool.end() && it->is_array())
+        for (const json& v : *it)
+            if (v.is_string() && !v.get<std::string>().empty()) c.colors.push_back(v.get<std::string>());
+    if (c.colors.empty()) c.colors.push_back(color_code);
+    c.created_at  = now();
+    c.list_serial = svc->list_serial();
+    for (const Spool& r : svc->confirmed()) c.baseline.insert(r.id);
+    // Without a list there is no baseline to tell the new spool from an older identical one: it is created, not assigned.
+    const bool remember = c.list_serial > 0;
+
+    const unsigned long long gen  = generation_;
+    std::weak_ptr<int>       weak = alive_;
+    const Accept             a    = svc->add(page_spool, 1);
+    if (!a.ok || weak.expired() || gen != generation_ || !remember) return a; // a reset meanwhile forgets it too
+    creations_.push_back(std::move(c));
+    return a;
+}
+
+void LinkDriver::resolve_creations()
+{
+    if (creations_.empty()) return;
+    SpoolService&            svc    = *deps_.service;
+    const long long          t      = now();
+    const unsigned long long serial = svc.list_serial();
+    std::vector<Creation>    keep;
+    for (Creation& c : creations_) {
+        if (serial > c.list_serial) {
+            std::vector<const Spool*> found;
+            for (const Spool& r : svc.confirmed()) {
+                if (c.baseline.count(r.id) > 0 || !r.rfid.empty() || r.in_printer || r.filament_id != c.filament_id) continue;
+                if (same_rgb(r.colors.empty() ? r.color : r.colors.front(), c.colors.front())) found.push_back(&r);
+            }
+            if (found.size() == 1) {
+                Assignment a;
+                a.slot        = c.slot;
+                a.spool_id    = found.front()->id;
+                a.filament_id = found.front()->filament_id;
+                a.colors      = found.front()->colors.empty() ? std::vector<std::string>{found.front()->color} : found.front()->colors;
+                assign(a);
+                continue;
+            }
+            if (found.size() > 1) {
+                creation_notes_.push_back(CreationNote{c.slot, "could not tell which new spool belongs to the slot"});
+                if (creation_notes_.size() > 5) creation_notes_.erase(creation_notes_.begin());
+                continue;
+            }
+        }
+        if (t - c.created_at > k_assignment_seconds) continue; // nothing new showed up in time
+        keep.push_back(std::move(c));
+    }
+    creations_ = std::move(keep);
+}
+
 Accept LinkDriver::unassign(const SlotKey& slot, const std::vector<PrinterView>& printers)
 {
     SpoolService* svc = deps_.service;
@@ -397,6 +468,8 @@ void LinkDriver::reset()
     skip_spacing_    = false;
     round_ops_.clear();
     last_round_ops_.clear();
+    creations_.clear();
+    creation_notes_.clear();
 }
 
 json LinkDriver::status_json(const std::vector<PrinterView>& printers) const
@@ -464,13 +537,19 @@ json LinkDriver::status_json(const std::vector<PrinterView>& printers) const
         lines.push_back("register " + where(r.slot) + " new spool" + (g ? " " + std::to_string(*g) + " g" : std::string()));
     }
     j["plan"]  = lines;
-    j["notes"] = last_plan_.notes;
+    json notes = last_plan_.notes;
+    for (const CreationNote& n : creation_notes_) notes.push_back(where(n.slot) + ": " + n.text);
+    j["notes"] = notes;
 
     const long long t       = now();
     json            assigns = json::array();
     for (const auto& [key, a] : state_.assignments)
         assigns.push_back(json{{"ams_id", key.ams_id}, {"slot_id", key.slot_id}, {"spool_id", a.spool_id}, {"age_s", t - a.created_at}});
     j["assignments"] = assigns;
+    json creations   = json::array();
+    for (const Creation& c : creations_)
+        creations.push_back(json{{"ams_id", c.slot.ams_id}, {"slot_id", c.slot.slot_id}, {"age_s", t - c.created_at}});
+    j["creations"] = creations;
 
     if (have_round_) {
         json ops = json::array();

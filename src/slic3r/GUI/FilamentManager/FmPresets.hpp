@@ -23,6 +23,11 @@ using ToBambuId = std::function<std::string(const std::string& preset_filament_i
 // {"vendors":[{"name":V,"types":[{"name":T,"series":[names...],"items":[{"name":N,"series":N,"filament_id":B,("is_user":true)}]}]}]}
 json preset_tree(PresetCollection& filaments, const ToBambuId& to_bambu);
 
+// The page-shaped spool for a filament preset, or null when Bambu does not know the filament's id. The preset is the
+// first one with that filament id that preset_tree() offers. `colors` counts only with more than one colour.
+json page_spool_for_filament(PresetCollection& filaments, const std::string& preset_filament_id, const ToBambuId& to_bambu,
+                             const std::string& color, const std::vector<std::string>& colors, int color_type);
+
 // Lookups for the request bodies; `filaments` and `colors` may be null.
 BblFilament::FilamentLookup filament_lookup(const PresetCollection* filaments, ToBambuId to_bambu, const ColorCodes* colors);
 

@@ -248,6 +248,62 @@ void Runtime::tick()
     }
 }
 
+bool Runtime::link_available(const std::string& dev_id) const
+{
+    try {
+        if (dev_id.empty() || !session().signed_in)
+            return false;
+        AppConfig* config = wxGetApp().app_config;
+        if (config == nullptr)
+            return false;
+        const fil::LinkConfig c = link_config(config->get_bool("filament_manager_link_enabled"), config->get_bool("filament_manager_link_dry_run"),
+                                              config->get("filament_manager_link_only"), link_mode_env());
+        if (c.mode != fil::LinkMode::On)
+            return false;
+        for (const fil::PrinterView& v : printer_views(wxGetApp().getDeviceManager(), *m_tap, unix_now()))
+            if (v.dev_id == dev_id)
+                return fil::takes_part(v);
+    } catch (...) {
+    }
+    return false;
+}
+
+fil::Accept Runtime::assign(const std::string& spool_id, const fil::SlotKey& slot)
+{
+    const fil::Spool* row = nullptr;
+    for (const fil::Spool& r : m_service->confirmed())
+        if (r.id == spool_id)
+            row = &r;
+    if (row == nullptr)
+        return {false, fil::FailKind::NotFound};
+    if (!row->rfid.empty() || row->in_printer || row->filament_id.empty())
+        return {false, fil::FailKind::BadRequest};
+    fil::Assignment a;
+    a.slot        = slot;
+    a.spool_id    = row->id;
+    a.filament_id = row->filament_id;
+    a.colors      = row->colors.empty() ? std::vector<std::string>{row->color} : row->colors;
+    if (a.colors.front().empty())
+        return {false, fil::FailKind::BadRequest};
+    m_linker->assign(a);
+    log_event({{"event", "assigned"}, {"ams_id", slot.ams_id}, {"slot_id", slot.slot_id}, {"spool_id", a.spool_id}});
+    return {};
+}
+
+fil::Accept Runtime::create_and_assign(const json& page_spool, const fil::SlotKey& slot)
+{
+    const auto text = [&page_spool](const char* key) {
+        const auto it = page_spool.is_object() ? page_spool.find(key) : page_spool.end();
+        return it != page_spool.end() && it->is_string() ? it->get<std::string>() : std::string();
+    };
+    if (!link_available(slot.dev_id) || text("setting_id").empty() || text("color_code").empty())
+        return m_service->add(page_spool, 1);
+    const fil::Accept a = m_linker->create_and_assign(page_spool, slot);
+    if (a.ok)
+        log_event({{"event", "create_and_assign"}, {"ams_id", slot.ams_id}, {"slot_id", slot.slot_id}});
+    return a;
+}
+
 fil::Accept Runtime::request_soft_match(const fil::PrinterView& printer, int ams_id)
 {
     auto sn = printer.ams_sn.find(ams_id);

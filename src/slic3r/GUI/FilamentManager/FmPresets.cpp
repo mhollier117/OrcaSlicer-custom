@@ -6,7 +6,9 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace Slic3r::GUI::Fm {
 
@@ -17,6 +19,37 @@ std::string bambu_of(const ToBambuId& to_bambu, const std::string& id)
     return to_bambu ? to_bambu(id) : id;
 }
 
+// A preset as preset_tree() offers it.
+struct Offered
+{
+    std::string bid, vendor, type, name;
+    bool        user{false};
+};
+
+// A system root preset whose id Bambu knows, or a user preset, with a vendor and a name; nullopt for any other.
+std::optional<Offered> offered(PresetCollection& filaments, Preset& preset, const ToBambuId& to_bambu)
+{
+    Offered o;
+    o.user = !preset.is_system && !preset.is_default;
+    if (!o.user && filaments.get_preset_base(preset) != &preset)
+        return std::nullopt;
+    o.bid = bambu_of(to_bambu, preset.filament_id);
+    if (o.bid.empty() || o.bid.rfind("OF", 0) == 0)
+        return std::nullopt;
+    o.vendor = preset.config.get_filament_vendor();
+    if (o.vendor.empty())
+        return std::nullopt;
+    o.type = preset.config.get_filament_type();
+    if (o.type.empty())
+        o.type = "Other";
+    o.name = filaments.get_preset_alias(preset, true);
+    if (o.name.empty())
+        o.name = preset.name;
+    if (o.name.empty())
+        return std::nullopt;
+    return o;
+}
+
 } // namespace
 
 json preset_tree(PresetCollection& filaments, const ToBambuId& to_bambu)
@@ -25,31 +58,17 @@ json preset_tree(PresetCollection& filaments, const ToBambuId& to_bambu)
     std::set<std::string>                                          seen;
 
     for (Preset& preset : filaments) {
-        const bool user = !preset.is_system && !preset.is_default;
-        if (!user && filaments.get_preset_base(preset) != &preset)
+        const std::optional<Offered> o = offered(filaments, preset, to_bambu);
+        if (!o)
             continue;
-        const std::string bid = bambu_of(to_bambu, preset.filament_id);
-        if (bid.empty() || bid.rfind("OF", 0) == 0)
-            continue;
-        const std::string vendor = preset.config.get_filament_vendor();
-        if (vendor.empty())
-            continue;
-        std::string type = preset.config.get_filament_type();
-        if (type.empty())
-            type = "Other";
-        const std::string key = user ? vendor + "\n" + type + "\n" + preset.name : bid;
+        const std::string key = o->user ? o->vendor + "\n" + o->type + "\n" + preset.name : o->bid;
         if (seen.count(key))
             continue;
-        std::string name = filaments.get_preset_alias(preset, true);
-        if (name.empty())
-            name = preset.name;
-        if (name.empty())
-            continue;
         seen.insert(key);
-        json item = {{"name", name}, {"series", name}, {"filament_id", bid}};
-        if (user)
+        json item = {{"name", o->name}, {"series", o->name}, {"filament_id", o->bid}};
+        if (o->user)
             item["is_user"] = true;
-        tree[vendor][type].push_back(std::move(item));
+        tree[o->vendor][o->type].push_back(std::move(item));
     }
 
     json vendors = json::array();
@@ -67,6 +86,47 @@ json preset_tree(PresetCollection& filaments, const ToBambuId& to_bambu)
         vendors.push_back({{"name", vendor}, {"types", std::move(type_list)}});
     }
     return {{"vendors", std::move(vendors)}};
+}
+
+json page_spool_for_filament(PresetCollection& filaments, const std::string& preset_filament_id, const ToBambuId& to_bambu,
+                             const std::string& color, const std::vector<std::string>& colors, int color_type)
+{
+    if (preset_filament_id.empty())
+        return nullptr;
+    const std::string color_code = ColorCodes::normalize_hex(color);
+    if (color_code.empty())
+        return nullptr;
+    std::vector<std::string> list;
+    if (colors.size() > 1) {
+        for (const std::string& c : colors) {
+            const std::string hex = ColorCodes::normalize_hex(c);
+            if (hex.empty())
+                return nullptr;
+            list.push_back(hex);
+        }
+    }
+    for (Preset& preset : filaments) {
+        if (preset.filament_id != preset_filament_id)
+            continue;
+        const std::optional<Offered> o = offered(filaments, preset, to_bambu);
+        if (!o)
+            continue;
+        json spool = {{"brand", o->vendor},
+                      {"material_type", o->type},
+                      {"series", o->name},
+                      {"setting_id", o->bid},
+                      {"color_code", color_code},
+                      {"color_type", list.empty() ? 2 : BblFilament::normalize_color_type(color_type, list.size())},
+                      {"initial_weight", 1000},
+                      {"net_weight", 1000},
+                      {"spool_weight", 0},
+                      {"entry_method", "manual"},
+                      {"note", ""}};
+        if (!list.empty())
+            spool["colors"] = list;
+        return spool;
+    }
+    return nullptr;
 }
 
 std::string tray_id_name_for(const ColorCodes& colors, const std::string& bambu_id, const std::vector<std::string>& hex, int color_type)
