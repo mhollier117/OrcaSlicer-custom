@@ -873,6 +873,72 @@ TEST_CASE("A percent does not overrule a row whose own percent is the same", "[B
     }
 }
 
+TEST_CASE("A percent a little above the stored weight does not raise it", "[BblFilament]")
+{
+    const auto plan_for = [](long long row_g, int remain, int remain_g = -1) {
+        auto row       = mounted_row(make_row("1", "UUID1"), "dev1", "sn0", 0, "0");
+        row.net_weight = static_cast<double>(row_g); // of 1000 g
+        auto t         = make_rfid_tray("0", "UUID1");
+        t.remain       = remain;
+        t.remain_g     = remain_g;
+        Ctx c;
+        return c.plan({with_tray(make_printer(), t)}, {row});
+    };
+    const auto has_note = [](const fil::LinkPlan& plan) {
+        for (const std::string& n : plan.notes)
+            if (n == "The printer's estimate for spool 1 is a little above the stored weight: kept.") return true;
+        return false;
+    };
+    {
+        const auto plan = plan_for(90, 11); // 110 g against 90 g stored
+        CHECK(plan.weights.empty());
+        CHECK_FALSE(plan.has_actions());
+        CHECK(has_note(plan));
+        REQUIRE(plan.trays.size() == 1);
+        CHECK_FALSE(plan.trays[0].note.empty());
+    }
+    {
+        const auto plan = plan_for(90, 14); // 50 g above: still inside 5 % of 1000 g
+        CHECK(plan.weights.empty());
+        CHECK(has_note(plan));
+    }
+    {
+        const auto plan = plan_for(90, 15);
+        REQUIRE(plan.weights.size() == 1);
+        CHECK(plan.weights[0].grams == 150);
+        CHECK_FALSE(has_note(plan));
+    }
+    {
+        const auto plan = plan_for(0, 60); // nothing stored for a spool the printer sees more than half full
+        REQUIRE(plan.weights.size() == 1);
+        CHECK(plan.weights[0].grams == 600);
+    }
+    {
+        const auto plan = plan_for(110, 9); // lowering is sent whatever the difference
+        REQUIRE(plan.weights.size() == 1);
+        CHECK(plan.weights[0].grams == 90);
+        CHECK_FALSE(has_note(plan));
+    }
+    {
+        const auto plan = plan_for(90, 11, 110); // grams the printer reports are sent
+        REQUIRE(plan.weights.size() == 1);
+        CHECK(plan.weights[0].grams == 110);
+        CHECK_FALSE(has_note(plan));
+    }
+    {
+        // An RFID mount carries no weight for such a rise.
+        auto row       = make_row("1", "UUID1");
+        row.net_weight = 90;
+        auto t         = make_rfid_tray("0", "UUID1");
+        t.remain       = 11;
+        Ctx        c;
+        const auto plan = c.plan({with_tray(make_printer(), t)}, {row});
+        REQUIRE(plan.mounts.size() == 1);
+        CHECK(plan.mounts[0].rfid);
+        CHECK_FALSE(plan.mounts[0].grams.has_value());
+    }
+}
+
 TEST_CASE("A claim on an occupied slot whose spool cannot be identified yet is left alone", "[BblFilament]")
 {
     const auto run = [](const fil::TrayFacts& t, const fil::Spool& claim) {

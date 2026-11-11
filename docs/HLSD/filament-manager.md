@@ -148,7 +148,9 @@ the app keeps that record current for every Bambu printer of the account, not on
 - **Changes.** A matched spool not recorded in its slot is mounted there (an RFID spool through the AMS sync, a manual
   one through the slot mappings). The remaining weight of an RFID spool is sent when the printer measures another
   value: the grams the printer reports, else its percentage of the full weight. A percentage never overrules a spool
-  whose own weight rounds to the same percentage, and a busy printer gets a new weight at most every ten minutes. A
+  whose own weight rounds to the same percentage, nor raises a spool's weight by 5 % of the full weight or less (a
+  spool does not gain filament and the AMS estimate drifts by a few percent; the link status notes the weight was
+  kept), and a busy printer gets a new weight at most every ten minutes. A
   spool recorded in a slot where no tray matched it is unbound only after three different status messages, 30 seconds
   and a newer list, and never while another spool is matched in that slot, the spool in that slot cannot be identified
   yet (its tag is being read or was not read since the AMS restarted), or the spool has a change waiting. A new

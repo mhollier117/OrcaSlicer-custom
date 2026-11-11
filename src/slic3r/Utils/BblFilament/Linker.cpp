@@ -87,15 +87,25 @@ bool same_colour_or_both_unknown(const std::string& a, const std::string& b)
     return same_rgb(a, b);
 }
 
-// The grams a weight push or an RFID mount sends; nothing when the row keeps its own weight: no valid measurement, or
-// a measurement from the percent while the row's own weight rounds to that percent (a percent cannot overrule a finer
-// number: a row with 304 of 1000 g and a tray at 30 % stay at 304).
-std::optional<long long> grams_to_send(const TrayFacts& t, const Spool& r)
+// A spool does not gain filament and the AMS estimate drifts by a few percent: a rise this small is no evidence.
+constexpr long long k_percent_rise_kept = 5;
+
+// The grams a weight push or an RFID mount sends; nothing when the row keeps its own weight: no valid measurement, a
+// measurement from the percent while the row's own weight rounds to that percent (a percent cannot overrule a finer
+// number: a row with 304 of 1000 g and a tray at 30 % stay at 304), or one from the percent above the row's weight by
+// no more than k_percent_rise_kept % of the total (then `kept_above` is set, when given).
+std::optional<long long> grams_to_send(const TrayFacts& t, const Spool& r, bool* kept_above = nullptr)
 {
+    if (kept_above != nullptr) *kept_above = false;
     const auto g = measured_grams(t, r);
     if (!g || t.remain_g >= 0) return g;
     const long long total = percent_total(t, r);
-    if (total > 0 && std::llround(static_cast<double>(bounded_grams(r.net_weight)) * 100.0 / static_cast<double>(total)) == t.remain) return std::nullopt;
+    const long long row_g = bounded_grams(r.net_weight);
+    if (total > 0 && std::llround(static_cast<double>(row_g) * 100.0 / static_cast<double>(total)) == t.remain) return std::nullopt;
+    if (*g > row_g && (*g - row_g) * 100 <= k_percent_rise_kept * total) {
+        if (kept_above != nullptr) *kept_above = true;
+        return std::nullopt;
+    }
     return g;
 }
 
@@ -416,7 +426,9 @@ LinkPlan plan_links(const std::vector<PrinterView>& printers, const std::vector<
                 if (m.rfid) m.grams = grams_to_send(t, R);
                 plan.mounts.push_back(m);
             } else if (!R.rfid.empty()) {
-                const auto g = grams_to_send(t, R);
+                bool       kept_above = false;
+                const auto g          = grams_to_send(t, R, &kept_above);
+                if (kept_above) note("The printer's estimate for spool " + R.id + " is a little above the stored weight: kept.");
                 if (g && *g != bounded_grams(R.net_weight)) {
                     auto pushed = state.pushed.find(R.rfid);
                     if (p.busy && pushed != state.pushed.end() && now - pushed->second.sent_at < k_busy_push_seconds) {
