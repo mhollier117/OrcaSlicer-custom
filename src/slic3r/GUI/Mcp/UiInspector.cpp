@@ -73,6 +73,7 @@
 #include <wx/grid.h>
 #include <wx/kbdstate.h>
 #include <wx/listbox.h>
+#include <wx/listctrl.h>
 #include <wx/menu.h>
 #include <wx/mousestate.h>
 #include <wx/notebook.h>
@@ -172,7 +173,8 @@ std::string kind_of(wxWindow* w)
         return "text";
     if (dynamic_cast<wxSlider*>(w) != nullptr)
         return "slider";
-    if (dynamic_cast<wxListBox*>(w) != nullptr || dynamic_cast<wxDataViewCtrl*>(w) != nullptr || dynamic_cast<wxGrid*>(w) != nullptr)
+    if (dynamic_cast<wxListBox*>(w) != nullptr || dynamic_cast<wxListCtrl*>(w) != nullptr || dynamic_cast<wxDataViewCtrl*>(w) != nullptr ||
+        dynamic_cast<wxGrid*>(w) != nullptr)
         return "list";
 #ifdef SLIC3R_CAD
     if (dynamic_cast<DesignRowList*>(w) != nullptr)
@@ -1324,6 +1326,25 @@ void list_box_rows(wxListBox& box, std::vector<ListRow>& out)
     }
 }
 
+// A list control's items (wxListCtrl, wxListView). In report mode a row is named by its first column, with every other
+// column as the value, empty ones kept so positions stay stable, as a table row is.
+void list_ctrl_rows(wxListCtrl& list, std::vector<ListRow>& out)
+{
+    const bool report = list.InReportView();
+    const int  cols   = report ? list.GetColumnCount() : 1;
+    for (long i = 0; i < list.GetItemCount(); ++i) {
+        ListRow                  row;
+        std::vector<std::string> cells;
+        for (int c = 1; c < cols; ++c)
+            cells.push_back(into_u8(list.GetItemText(i, c)));
+        row.path     = {into_u8(list.GetItemText(i, 0))};
+        row.value    = joined(cells, " | ");
+        row.selected = list.GetItemState(i, wxLIST_STATE_SELECTED) != 0;
+        row.index    = int(i);
+        out.push_back(std::move(row));
+    }
+}
+
 // A drop-down list's items; one of a group, which shows in a sublist, has the group's label above it.
 // The picked item is the checked one.
 void drop_down_rows(DropDown& drop, std::vector<ListRow>& out)
@@ -1563,6 +1584,39 @@ json click_list_box_row(wxListBox& box, const ListRow& row, const ClickOptions& 
     return {{"clicked", joined(row.path, ">")}, {"selected", selected_rows(box)}};
 }
 
+// As click_list_box_row: the control reports the selection it is given itself, so no second event is sent.
+json click_list_ctrl_row(wxListCtrl& list, const ListRow& row, const ClickOptions& o)
+{
+    const bool right    = o.button == "right";
+    const long n        = row.index;
+    const int  mods     = parse_modifiers(o.modifiers);
+    const bool multiple = !list.HasFlag(wxLC_SINGLE_SEL);
+    const bool selected = list.GetItemState(n, wxLIST_STATE_SELECTED) != 0;
+    if (!right || !selected) {
+        if (multiple && !right && (mods & (wxMOD_CONTROL | wxMOD_SHIFT)) != 0) {
+            list.SetItemState(n, selected ? 0 : wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED, wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED);
+        } else {
+            for (long i = 0; i < list.GetItemCount(); ++i)
+                if (i != n && list.GetItemState(i, wxLIST_STATE_SELECTED) != 0)
+                    list.SetItemState(i, 0, wxLIST_STATE_SELECTED);
+            list.SetItemState(n, wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED, wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED);
+        }
+    }
+    list.EnsureVisible(n);
+    if (o.double_click && !right) {
+        wxListEvent activated(wxEVT_LIST_ITEM_ACTIVATED, list.GetId());
+        activated.m_itemIndex     = n;
+        activated.m_item.m_itemId = n;
+        send(&list, activated);
+    }
+    if (right) {
+        // As from the keyboard: the menu is for the selection.
+        wxContextMenuEvent menu(wxEVT_CONTEXT_MENU, list.GetId(), wxDefaultPosition);
+        send(&list, menu);
+    }
+    return {{"clicked", joined(row.path, ">")}, {"selected", selected_rows(list)}};
+}
+
 json click_grid_row(wxGrid& grid, const ListRow& row, const std::string& column, const ClickOptions& o)
 {
     if (o.button != "left" || o.double_click)
@@ -1619,6 +1673,8 @@ std::vector<ListRow> list_rows(wxWindow* list)
         data_view_rows(*view, out);
     else if (auto* box = dynamic_cast<wxListBox*>(list))
         list_box_rows(*box, out);
+    else if (auto* ctrl = dynamic_cast<wxListCtrl*>(list))
+        list_ctrl_rows(*ctrl, out);
     else if (auto* drop = dynamic_cast<DropDown*>(list))
         drop_down_rows(*drop, out);
     else if (auto* grid = dynamic_cast<wxGrid*>(list))
@@ -1640,8 +1696,8 @@ bool is_row_list(wxWindow* w)
     if (dynamic_cast<DesignRowList*>(w) != nullptr)
         return true;
 #endif
-    return dynamic_cast<wxDataViewCtrl*>(w) != nullptr || dynamic_cast<wxListBox*>(w) != nullptr || dynamic_cast<DropDown*>(w) != nullptr ||
-           dynamic_cast<wxGrid*>(w) != nullptr;
+    return dynamic_cast<wxDataViewCtrl*>(w) != nullptr || dynamic_cast<wxListBox*>(w) != nullptr || dynamic_cast<wxListCtrl*>(w) != nullptr ||
+           dynamic_cast<DropDown*>(w) != nullptr || dynamic_cast<wxGrid*>(w) != nullptr;
 }
 
 std::vector<std::string> list_columns(wxWindow* list)
@@ -1706,6 +1762,8 @@ json click_row(wxWindow& list, const ListRow& row, const std::string& column, co
         throw ToolFailure("This list has no columns; leave out column");
     if (auto* box = dynamic_cast<wxListBox*>(&list))
         return click_list_box_row(*box, row, o);
+    if (auto* ctrl = dynamic_cast<wxListCtrl*>(&list))
+        return click_list_ctrl_row(*ctrl, row, o);
     if (auto* drop = dynamic_cast<DropDown*>(&list)) {
         if (o.button != "left" || o.double_click || !o.modifiers.empty())
             throw ToolFailure("A drop-down list's row takes a plain left click, which picks it");

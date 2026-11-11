@@ -285,8 +285,8 @@ std::string within_of(wxWindow* w);
 std::vector<wxWindow*> popups_of(wxWindow* top);
 
 // Rows of the lists ui_snapshot reads: wxDataViewCtrl (every row, collapsed branches too), wxListBox and
-// wxCheckListBox, Orca's DropDown, wxGrid (read-only) and the Design tab's DesignRowList. Empty for
-// other windows.
+// wxCheckListBox, wxListCtrl (wxListView), Orca's DropDown, wxGrid (read-only) and the Design tab's
+// DesignRowList. Empty for other windows.
 std::vector<ListRow> list_rows(wxWindow* list);
 bool                 is_row_list(wxWindow* w);
 // The names a row's cell is picked by (`column`): header text, "#n" for a column without one, and for
@@ -298,7 +298,7 @@ std::vector<std::pair<wxWindow*, ListRow>> find_rows(const std::vector<wxWindow*
 // Acts on a row as a person's click on its cell under `column` does: a data view row is selected as
 // the click would select it, with one wxEVT_DATAVIEW_SELECTION_CHANGED for it, while the pointer is
 // held over the cell for code that reads where it is; a double click activates it and a right click
-// sends its context menu event. A list box row is selected, a drop-down row picked, a table row's cell
+// sends its context menu event. A list box or list control row is selected, a drop-down row picked, a table row's cell
 // made current, a Design list row clicked at its cell. Throws ToolFailure.
 nlohmann::json click_row(wxWindow& list, const ListRow& row, const std::string& column, const ClickOptions& options);
 // Ticks or clears a row's checkbox cell as a person's click on it does. Throws ToolFailure.
