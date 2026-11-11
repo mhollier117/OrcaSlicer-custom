@@ -15,6 +15,8 @@ constexpr long long TIE_WINDOW_SECONDS = 120;
 constexpr int ABSENT_PASSES_TO_DELETE = 2;
 // Fewest deletes (and at least half the linked entries) that trigger the mass-delete stop.
 constexpr int MASS_DELETE_MIN = 3;
+// A row must have been absent for at least this long (and ABSENT_PASSES_TO_DELETE lists) before a local delete.
+constexpr long long ABSENT_MIN_SECONDS = 240;
 
 enum class LocalState { Missing, Eligible, Ineligible };
 
@@ -56,6 +58,7 @@ struct Action
     bool        rename_from_set{false};
     Key         rename_from{};          // Pull with rename_from_set: afterwards the old local preset rename_from is deleted
     int         absent_passes{0};       // SetAbsent: the new count
+    long long   absent_since{0};        // SetAbsent: the new absent_since (0 = cleared)
     std::string reason;                 // MarkUnresolvable, or a note
 };
 
@@ -64,7 +67,7 @@ struct Plan
     std::vector<Action>      actions;
     std::vector<std::string> notes; // human-readable, e.g. duplicate rows, body unavailable
     bool                     dry_run{false}; // first_run_confirmed was false
-    std::string              halt;           // "" or "mass_delete"
+    std::string              halt;           // "", "mass_delete" or "empty_list"
     std::vector<Key>         halted_local_deletes;
     std::vector<Key>         halted_remote_deletes;
 };
@@ -72,6 +75,7 @@ struct Plan
 // Called from the list's check function, row by row: should this row's body be downloaded?
 bool want_body(const Key& row_key, const std::string& row_setting_id, long long row_update_time, const LedgerView& ledger);
 
-Plan make_plan(const std::vector<LocalPreset>& locals, const std::vector<RemoteRow>& remote, const LedgerView& ledger);
+// now: unix seconds, local clock.
+Plan make_plan(const std::vector<LocalPreset>& locals, const std::vector<RemoteRow>& remote, const LedgerView& ledger, long long now);
 
 } // namespace Slic3r::BblPresetSync

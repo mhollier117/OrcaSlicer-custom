@@ -6,10 +6,10 @@
 
 namespace Slic3r::BblPresetSync {
 
-bool want_body(const Key& /*row_key*/, const std::string& row_setting_id, long long row_update_time, const LedgerView& ledger)
+bool want_body(const Key& row_key, const std::string& row_setting_id, long long row_update_time, const LedgerView& ledger)
 {
     for (const auto& kv : ledger.entries)
-        if (kv.second.setting_id == row_setting_id) return kv.second.update_time < row_update_time;
+        if (kv.second.setting_id == row_setting_id) return !(kv.first == row_key) || kv.second.update_time < row_update_time;
     return true;
 }
 
@@ -18,8 +18,8 @@ namespace {
 class Planner
 {
 public:
-    Planner(const std::vector<LocalPreset>& locals, const std::vector<RemoteRow>& remote, const LedgerView& ledger)
-        : m_ledger(ledger)
+    Planner(const std::vector<LocalPreset>& locals, const std::vector<RemoteRow>& remote, const LedgerView& ledger, long long now)
+        : m_ledger(ledger), m_now(now), m_remote_empty(remote.empty())
     {
         for (const LocalPreset& l : locals) m_locals[l.key] = &l;
         reduce_duplicates(remote);
@@ -36,15 +36,19 @@ public:
     }
 
 private:
-    const LedgerView&                    m_ledger;
-    std::map<Key, const LocalPreset*>    m_locals;
-    std::vector<RemoteRow>               m_rows; // after duplicate reduction
+    const LedgerView&                       m_ledger;
+    long long                               m_now;
+    bool                                    m_remote_empty;
+    std::map<Key, const LocalPreset*>       m_locals;
+    std::vector<RemoteRow>                  m_rows; // after duplicate reduction
     std::map<std::string, const RemoteRow*> m_row_by_id;
-    std::set<Key>                        m_row_keys;
-    std::set<std::string>                m_handled; // ids consumed by step A
-    std::set<std::string>                m_released; // ids released to step B by A.3
-    std::set<Key>                        m_used;     // keys that already have an action
-    Plan                                 m_plan;
+    std::map<Key, const RemoteRow*>         m_free_row_at_key; // a row whose id is in no ledger entry
+    std::set<Key>                           m_row_keys;
+    std::set<std::string>                   m_handled;  // ids consumed by step A
+    std::set<std::string>                   m_released; // ids released to step B by A.3
+    std::set<Key>                           m_relink;   // keys whose free row step B pairs despite the entry
+    std::set<Key>                           m_used;     // keys that already have an action
+    Plan                                    m_plan;
 
     void reduce_duplicates(const std::vector<RemoteRow>& remote)
     {
@@ -65,6 +69,7 @@ private:
         for (const RemoteRow& r : m_rows) {
             m_row_by_id.emplace(r.setting_id, &r);
             m_row_keys.insert(r.key);
+            if (!ledger_ids.count(r.setting_id)) m_free_row_at_key.emplace(r.key, &r);
         }
     }
 
@@ -110,6 +115,12 @@ private:
 
     void body_unavailable(const Key& key) { m_plan.notes.push_back("body unavailable for " + key.str()); }
 
+    void release(const std::string& id)
+    {
+        m_handled.erase(id);
+        m_released.insert(id);
+    }
+
     void pull(const Key& key, const std::string& id, const RemoteRow& r, bool backup_local)
     {
         if (!r.has_body) {
@@ -138,9 +149,11 @@ private:
                 continue;
             }
             if (e.state == "unresolvable") {
-                if (r && r->update_time > e.update_time) {
-                    m_handled.erase(e.setting_id);
-                    m_released.insert(e.setting_id);
+                if (r && !(r->key == key)) {
+                    emit(make(ActionType::DropEntry, key, e.setting_id));
+                    release(e.setting_id);
+                } else if (r && r->update_time > e.update_time) {
+                    release(e.setting_id);
                 }
                 continue;
             }
@@ -148,27 +161,31 @@ private:
 
             if (ls == LocalState::Ineligible) continue;
 
-            if (r && !(r->key == key)) {
-                const LocalState target = local_state(r->key);
-                if (target == LocalState::Missing && ls == LocalState::Eligible) {
+            if (r && !(r->key == key)) { // renamed remotely
+                if (ls == LocalState::Missing) {
+                    emit(make(ActionType::DropEntry, key, e.setting_id));
+                    release(e.setting_id);
+                } else if (local_state(r->key) == LocalState::Missing) {
                     if (!r->has_body) {
                         body_unavailable(r->key);
                         continue;
                     }
-                    Action a           = make(ActionType::Pull, r->key, r->setting_id);
-                    a.rename_from_set  = true;
-                    a.rename_from      = key;
-                    a.backup_local     = true;
+                    Action a          = make(ActionType::Pull, r->key, r->setting_id);
+                    a.rename_from_set = true;
+                    a.rename_from     = key;
+                    a.backup_local    = true;
                     emit(std::move(a));
-                } else if (target != LocalState::Missing) {
-                    Action a  = make(ActionType::MarkUnresolvable, key, e.setting_id);
-                    a.reason  = "remote renamed onto an existing name";
+                } else {
+                    Action a = make(ActionType::MarkUnresolvable, key, "");
+                    a.reason = "remote renamed onto an existing name";
                     emit(std::move(a));
-                    m_handled.erase(e.setting_id);
-                } else { // local preset missing
-                    emit(make(ActionType::DropEntry, key, e.setting_id));
-                    m_handled.erase(e.setting_id);
+                    release(e.setting_id);
                 }
+                continue;
+            }
+
+            if (!r && m_free_row_at_key.count(key)) { // the row was re-created under another id
+                m_relink.insert(key);
                 continue;
             }
 
@@ -177,9 +194,10 @@ private:
 
             if (ls == LocalState::Eligible && r) {
                 if (!lc && !rc) {
-                    if (e.absent_passes != 0) {
-                        Action a       = make(ActionType::SetAbsent, key, e.setting_id);
+                    if (e.absent_passes != 0 || e.absent_since != 0) {
+                        Action a        = make(ActionType::SetAbsent, key, e.setting_id);
                         a.absent_passes = 0;
+                        a.absent_since  = 0;
                         emit(std::move(a));
                     }
                 } else if (lc && !rc) {
@@ -201,17 +219,21 @@ private:
                 if (!rc) emit(make(ActionType::DeleteRemote, key, e.setting_id));
                 else pull(key, e.setting_id, *r, false);
             } else if (ls == LocalState::Eligible) { // row absent
-                const int n = e.absent_passes + 1;
-                if (n < ABSENT_PASSES_TO_DELETE) {
+                const int       n     = e.absent_passes + 1;
+                const long long since = e.absent_since != 0 ? e.absent_since : m_now;
+                if (n >= ABSENT_PASSES_TO_DELETE && m_now - since >= ABSENT_MIN_SECONDS) {
+                    if (!lc) {
+                        Action a       = make(ActionType::DeleteLocal, key, e.setting_id);
+                        a.backup_local = true;
+                        emit(std::move(a));
+                    } else {
+                        emit(make(ActionType::Create, key));
+                    }
+                } else {
                     Action a        = make(ActionType::SetAbsent, key, e.setting_id);
                     a.absent_passes = n;
+                    a.absent_since  = since;
                     emit(std::move(a));
-                } else if (!lc) {
-                    Action a       = make(ActionType::DeleteLocal, key, e.setting_id);
-                    a.backup_local = true;
-                    emit(std::move(a));
-                } else {
-                    emit(make(ActionType::Create, key));
                 }
             } else { // local missing, row absent
                 emit(make(ActionType::DropEntry, key, e.setting_id));
@@ -232,7 +254,7 @@ private:
         for (const RemoteRow* r : rows) {
             const Key& key = r->key;
             auto       it  = m_ledger.entries.find(key);
-            if (it != m_ledger.entries.end() &&
+            if (it != m_ledger.entries.end() && !m_relink.count(key) &&
                 !(it->second.setting_id == r->setting_id && m_released.count(r->setting_id))) {
                 m_plan.notes.push_back("unlinked remote row for " + key.str());
                 continue;
@@ -275,17 +297,31 @@ private:
         for (const auto& kv : m_ledger.entries)
             if (kv.second.state == "linked") ++linked;
 
-        auto stop = [&](ActionType type, std::vector<Key>& halted_keys) {
-            size_t n = 0;
-            for (const Action& a : m_plan.actions)
-                if (a.type == type) ++n;
-            if (n < static_cast<size_t>(MASS_DELETE_MIN) || n * 2 < linked) return;
+        auto take = [&](ActionType type, std::vector<Key>& halted_keys) {
             for (const Action& a : m_plan.actions)
                 if (a.type == type) halted_keys.push_back(a.key);
             m_plan.actions.erase(std::remove_if(m_plan.actions.begin(), m_plan.actions.end(),
                                                 [type](const Action& a) { return a.type == type; }),
                                  m_plan.actions.end());
-            m_plan.halt = "mass_delete";
+        };
+        auto count = [&](ActionType type) {
+            size_t n = 0;
+            for (const Action& a : m_plan.actions)
+                if (a.type == type) ++n;
+            return n;
+        };
+
+        // An empty list is never believed as "everything was deleted".
+        if (m_remote_empty && count(ActionType::DeleteLocal) > 0) {
+            take(ActionType::DeleteLocal, m_plan.halted_local_deletes);
+            m_plan.halt = "empty_list";
+        }
+
+        auto stop = [&](ActionType type, std::vector<Key>& halted_keys) {
+            const size_t n = count(type);
+            if (n < static_cast<size_t>(MASS_DELETE_MIN) || n * 2 < linked) return;
+            take(type, halted_keys);
+            if (m_plan.halt.empty()) m_plan.halt = "mass_delete";
         };
         stop(ActionType::DeleteLocal, m_plan.halted_local_deletes);
         stop(ActionType::DeleteRemote, m_plan.halted_remote_deletes);
@@ -294,9 +330,9 @@ private:
 
 } // namespace
 
-Plan make_plan(const std::vector<LocalPreset>& locals, const std::vector<RemoteRow>& remote, const LedgerView& ledger)
+Plan make_plan(const std::vector<LocalPreset>& locals, const std::vector<RemoteRow>& remote, const LedgerView& ledger, long long now)
 {
-    return Planner(locals, remote, ledger).run();
+    return Planner(locals, remote, ledger, now).run();
 }
 
 } // namespace Slic3r::BblPresetSync

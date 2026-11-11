@@ -70,13 +70,17 @@ RemoteRow remote_row(const std::string& name, const std::string& id, long long u
     return r;
 }
 
-LedgerEntry linked(const std::string& id, long long update_time, const std::string& hash, int absent = 0)
+constexpr long long kNow     = 1000000;
+constexpr long long kLongAgo = kNow - 1000;
+
+LedgerEntry linked(const std::string& id, long long update_time, const std::string& hash, int absent = 0, long long since = 0)
 {
     LedgerEntry e;
     e.setting_id    = id;
     e.update_time   = update_time;
     e.synced_hash   = hash;
     e.absent_passes = absent;
+    e.absent_since  = since;
     return e;
 }
 
@@ -88,7 +92,8 @@ struct Fixture
 
     Fixture() { view.first_run_confirmed = true; }
     void entry(const std::string& name, const LedgerEntry& e) { view.entries[fk(name)] = e; }
-    Plan plan() const { return make_plan(locals, rows, view); }
+    long long now{kNow};
+    Plan plan() const { return make_plan(locals, rows, view, now); }
 };
 
 const Action* find_action(const Plan& plan, const std::string& name)
@@ -540,8 +545,10 @@ TEST_CASE("Planner handles linked entries", "[BblPresetSync]")
     }
     SECTION("row absent: second pass deletes locally with backup when unchanged")
     {
-        f.entry("A", linked("P1", 100, "h0", 1));
+        f.entry("A", linked("P1", 100, "h0", 1, kLongAgo));
         f.locals = {local_preset("A", "h0")};
+        f.locals.push_back(local_preset("other", "", 0, LocalState::Ineligible));
+        f.rows = {remote_row("other", "P9", 1)};
         auto plan = f.plan();
         REQUIRE(plan.actions.size() == 1);
         CHECK(plan.actions[0].type == ActionType::DeleteLocal);
@@ -549,7 +556,7 @@ TEST_CASE("Planner handles linked entries", "[BblPresetSync]")
     }
     SECTION("row absent: second pass creates again when local changed")
     {
-        f.entry("A", linked("P1", 100, "h0", 1));
+        f.entry("A", linked("P1", 100, "h0", 1, kLongAgo));
         f.locals = {local_preset("A", "h1")};
         auto plan = f.plan();
         REQUIRE(plan.actions.size() == 1);
@@ -615,6 +622,7 @@ TEST_CASE("Planner handles remote renames", "[BblPresetSync]")
         CHECK(plan.actions[0].type == ActionType::MarkUnresolvable);
         CHECK(plan.actions[0].key == fk("A"));
         CHECK(plan.actions[0].reason == "remote renamed onto an existing name");
+        CHECK(plan.actions[0].setting_id.empty());
         CHECK(plan.actions[1].type == ActionType::Link);
         CHECK(plan.actions[1].key == fk("B"));
         CHECK(plan.actions[1].setting_id == "P1");
@@ -717,15 +725,15 @@ TEST_CASE("Planner pairs and creates for unknown rows and locals", "[BblPresetSy
         CHECK(plan.actions.empty());
         CHECK(has_note(plan, "duplicate remote rows for filament/A"));
     }
-    SECTION("unlinked row note when the entry has another id")
+    SECTION("a free row at the key of an entry with another id is paired (relink)")
     {
         f.entry("A", linked("P1", 100, "h0"));
         f.locals = {local_preset("A", "h0")};
         f.rows   = {remote_row("A", "P9", 100)};
         auto plan = f.plan();
-        CHECK(has_note(plan, "unlinked remote row for filament/A"));
         REQUIRE(find_action(plan, "A") != nullptr);
-        CHECK(find_action(plan, "A")->type == ActionType::SetAbsent);
+        CHECK(find_action(plan, "A")->type == ActionType::Update);
+        CHECK(find_action(plan, "A")->setting_id == "P9");
     }
     SECTION("ineligible local with an unknown row: no action")
     {
@@ -838,7 +846,7 @@ TEST_CASE("Planner stops mass deletes", "[BblPresetSync]")
         for (int i = 0; i < total; ++i) {
             const std::string name = "k" + std::to_string(i);
             const bool        gone = i < deleted;
-            f.entry(name, linked("P" + std::to_string(i), 100, "h", gone ? 1 : 0));
+            f.entry(name, linked("P" + std::to_string(i), 100, "h", gone ? 1 : 0, gone ? kLongAgo : 0));
             f.locals.push_back(local_preset(name, "h"));
             if (!gone) f.rows.push_back(remote_row(name, "P" + std::to_string(i), 100));
         }
@@ -873,7 +881,7 @@ TEST_CASE("Planner stops mass deletes", "[BblPresetSync]")
     }
     SECTION("2 of 2 local deletes are below the minimum")
     {
-        auto plan = build_local_deletes(2, 2).plan();
+        auto plan = build_local_deletes(2, 3).plan();
         CHECK(plan.halt.empty());
         CHECK(plan.actions.size() == 2);
     }
@@ -958,7 +966,7 @@ TEST_CASE("Planner emits at most one action per key in a mixed scenario", "[BblP
     f.entry("k5", linked("P5", 100, "h"));
     f.locals.push_back(local_preset("k5", "h"));
 
-    f.entry("k6", linked("P6", 100, "h", 1));
+    f.entry("k6", linked("P6", 100, "h", 1, kLongAgo));
     f.locals.push_back(local_preset("k6", "h"));
 
     f.entry("k7", linked("P7", 100, "h"));
@@ -992,4 +1000,258 @@ TEST_CASE("Planner emits at most one action per key in a mixed scenario", "[BblP
     CHECK(find_action(plan, "k10")->type == ActionType::Create);
     CHECK(find_action(plan, "k11") == nullptr);
     CHECK(plan.halt.empty());
+}
+
+TEST_CASE("want_body also asks for a row stored under another key", "[BblPresetSync]")
+{
+    LedgerView view;
+    view.entries[fk("A")] = linked("P1", 100, "h");
+    CHECK(want_body(fk("B"), "P1", 100, view));
+    CHECK(want_body(fk("B"), "P1", 50, view));
+    CHECK_FALSE(want_body(fk("A"), "P1", 100, view));
+}
+
+TEST_CASE("Planner delays local deletes until a row has been absent long enough", "[BblPresetSync]")
+{
+    Fixture f;
+    f.locals = {local_preset("A", "h0")};
+
+    SECTION("first absence records absent_since = now")
+    {
+        f.entry("A", linked("P1", 100, "h0"));
+        auto plan = f.plan();
+        REQUIRE(plan.actions.size() == 1);
+        CHECK(plan.actions[0].type == ActionType::SetAbsent);
+        CHECK(plan.actions[0].absent_passes == 1);
+        CHECK(plan.actions[0].absent_since == kNow);
+    }
+    SECTION("n = 1 never deletes, however old")
+    {
+        f.entry("A", linked("P1", 100, "h0", 0, kLongAgo));
+        auto plan = f.plan();
+        REQUIRE(plan.actions.size() == 1);
+        CHECK(plan.actions[0].type == ActionType::SetAbsent);
+        CHECK(plan.actions[0].absent_passes == 1);
+        CHECK(plan.actions[0].absent_since == kLongAgo);
+    }
+    SECTION("n = 2 at 239 s keeps counting, at 240 s deletes")
+    {
+        f.entry("A", linked("P1", 100, "h0", 1, kNow - 239));
+        auto plan = f.plan();
+        REQUIRE(plan.actions.size() == 1);
+        CHECK(plan.actions[0].type == ActionType::SetAbsent);
+        CHECK(plan.actions[0].absent_passes == 2);
+        CHECK(plan.actions[0].absent_since == kNow - 239);
+
+        f.locals.push_back(local_preset("other", "", 0, LocalState::Ineligible));
+        f.rows = {remote_row("other", "P9", 1)};
+        f.entry("A", linked("P1", 100, "h0", 1, kNow - 240));
+        plan = f.plan();
+        REQUIRE(plan.actions.size() == 1);
+        CHECK(plan.actions[0].type == ActionType::DeleteLocal);
+        CHECK(plan.actions[0].backup_local);
+    }
+    SECTION("a changed local re-creates only after the delay")
+    {
+        f.locals = {local_preset("A", "h1")};
+        f.entry("A", linked("P1", 100, "h0", 1, kNow - 239));
+        CHECK(f.plan().actions[0].type == ActionType::SetAbsent);
+        f.entry("A", linked("P1", 100, "h0", 1, kNow - 240));
+        CHECK(f.plan().actions[0].type == ActionType::Create);
+    }
+    SECTION("reappearance clears absent_since")
+    {
+        f.entry("A", linked("P1", 100, "h0", 0, kLongAgo));
+        f.rows = {remote_row("A", "P1", 100)};
+        auto plan = f.plan();
+        REQUIRE(plan.actions.size() == 1);
+        CHECK(plan.actions[0].type == ActionType::SetAbsent);
+        CHECK(plan.actions[0].absent_passes == 0);
+        CHECK(plan.actions[0].absent_since == 0);
+        f.entry("A", linked("P1", 100, "h0"));
+        CHECK(f.plan().actions.empty());
+    }
+    SECTION("absent_since persists in the ledger")
+    {
+        TempDir dir;
+        Ledger  a(Ledger::file_path(dir.path, "u", "b"));
+        a.put(fk("A"), linked("P1", 100, "h0", 1, 777));
+        REQUIRE(a.save());
+        Ledger b(Ledger::file_path(dir.path, "u", "b"));
+        REQUIRE(b.load());
+        CHECK(b.get(fk("A"))->absent_since == 777);
+    }
+}
+
+TEST_CASE("Planner handles renames and unresolvable rows under other keys", "[BblPresetSync]")
+{
+    Fixture f;
+
+    SECTION("old local missing and the new name taken: drop, and the row goes to step B")
+    {
+        f.entry("A", linked("P1", 100, "h0"));
+        f.locals = {local_preset("B", "hb", 5000)};
+        f.rows   = {remote_row("B", "P1", 150, true, "hb")};
+        auto plan = f.plan();
+        REQUIRE(plan.actions.size() == 2);
+        CHECK(plan.actions[0].type == ActionType::DropEntry);
+        CHECK(plan.actions[0].key == fk("A"));
+        CHECK(plan.actions[1].type == ActionType::Link);
+        CHECK(plan.actions[1].key == fk("B"));
+    }
+    SECTION("rename onto an existing name leaves an empty setting_id")
+    {
+        f.entry("A", linked("P1", 100, "h0"));
+        f.locals = {local_preset("A", "h0"), local_preset("B", "hb", 5000)};
+        f.rows   = {remote_row("B", "P1", 150, true, "hb")};
+        auto plan = f.plan();
+        REQUIRE(plan.actions.size() == 2);
+        CHECK(plan.actions[0].type == ActionType::MarkUnresolvable);
+        CHECK(plan.actions[0].setting_id.empty());
+        CHECK(plan.actions[0].reason == "remote renamed onto an existing name");
+        CHECK(plan.actions[1].type == ActionType::Link);
+    }
+    SECTION("unresolvable entry whose row was renamed is dropped and the row released")
+    {
+        LedgerEntry e = linked("P1", 100, "h0");
+        e.state       = "unresolvable";
+        f.entry("A", e);
+        f.rows = {remote_row("B", "P1", 100)};
+        auto plan = f.plan();
+        REQUIRE(plan.actions.size() == 2);
+        CHECK(plan.actions[0].type == ActionType::DropEntry);
+        CHECK(plan.actions[0].key == fk("A"));
+        CHECK(plan.actions[1].type == ActionType::Pull);
+        CHECK(plan.actions[1].key == fk("B"));
+    }
+    SECTION("unresolvable entry with an unchanged row at its key does nothing")
+    {
+        LedgerEntry e = linked("P1", 100, "h0");
+        e.state       = "unresolvable";
+        f.entry("A", e);
+        f.rows = {remote_row("A", "P1", 100)};
+        CHECK(f.plan().actions.empty());
+    }
+}
+
+TEST_CASE("Planner relinks a row re-created under a new id", "[BblPresetSync]")
+{
+    Fixture f;
+    f.entry("A", linked("P1", 100, "h0"));
+
+    SECTION("equal hash links")
+    {
+        f.locals = {local_preset("A", "h")};
+        f.rows   = {remote_row("A", "P2", 100, true, "h")};
+        auto plan = f.plan();
+        REQUIRE(plan.actions.size() == 1);
+        CHECK(plan.actions[0].type == ActionType::Link);
+        CHECK(plan.actions[0].setting_id == "P2");
+        CHECK(plan.notes.empty());
+    }
+    SECTION("local wins updates with remote backup")
+    {
+        f.locals = {local_preset("A", "h", 1000)};
+        f.rows   = {remote_row("A", "P2", 1120, true, "x")};
+        auto plan = f.plan();
+        REQUIRE(plan.actions.size() == 1);
+        CHECK(plan.actions[0].type == ActionType::Update);
+        CHECK(plan.actions[0].setting_id == "P2");
+        CHECK(plan.actions[0].backup_remote);
+    }
+    SECTION("remote wins pulls with local backup")
+    {
+        f.locals = {local_preset("A", "h", 1000)};
+        f.rows   = {remote_row("A", "P2", 1121, true, "x")};
+        auto plan = f.plan();
+        REQUIRE(plan.actions.size() == 1);
+        CHECK(plan.actions[0].type == ActionType::Pull);
+        CHECK(plan.actions[0].backup_local);
+    }
+    SECTION("no body gives a note and no action")
+    {
+        f.locals = {local_preset("A", "h")};
+        f.rows   = {remote_row("A", "P2", 100, false)};
+        auto plan = f.plan();
+        CHECK(plan.actions.empty());
+        CHECK(has_note(plan, "body unavailable for filament/A"));
+    }
+    SECTION("local missing pulls")
+    {
+        f.rows = {remote_row("A", "P2", 100)};
+        auto plan = f.plan();
+        REQUIRE(plan.actions.size() == 1);
+        CHECK(plan.actions[0].type == ActionType::Pull);
+        CHECK(plan.actions[0].setting_id == "P2");
+    }
+    SECTION("ineligible local does nothing")
+    {
+        f.locals = {local_preset("A", "", 0, LocalState::Ineligible)};
+        f.rows   = {remote_row("A", "P2", 100)};
+        CHECK(f.plan().actions.empty());
+    }
+    SECTION("a row whose id is in another ledger entry is not a relink candidate")
+    {
+        f.entry("Z", linked("P2", 100, "h"));
+        f.locals = {local_preset("A", "h0")};
+        f.rows   = {remote_row("A", "P2", 100)};
+        auto plan = f.plan();
+        REQUIRE(find_action(plan, "A") != nullptr);
+        CHECK(find_action(plan, "A")->type == ActionType::SetAbsent);
+    }
+}
+
+TEST_CASE("Planner refuses to delete locally on an empty list", "[BblPresetSync]")
+{
+    Fixture f;
+    f.entry("A", linked("P1", 100, "h0", 1, kLongAgo));
+    f.locals = {local_preset("A", "h0")};
+
+    SECTION("one planned local delete halts")
+    {
+        auto plan = f.plan();
+        CHECK(plan.halt == "empty_list");
+        CHECK(plan.actions.empty());
+        REQUIRE(plan.halted_local_deletes.size() == 1);
+        CHECK(plan.halted_local_deletes[0] == fk("A"));
+    }
+    SECTION("an empty list with no local delete planned does not halt")
+    {
+        f.entry("A", linked("P1", 100, "h0"));
+        auto plan = f.plan();
+        CHECK(plan.halt.empty());
+        CHECK(plan.actions.size() == 1);
+    }
+    SECTION("a non-empty list with one delete goes ahead")
+    {
+        f.rows = {remote_row("other", "P9", 1)};
+        auto plan = f.plan();
+        CHECK(plan.halt.empty());
+        REQUIRE(find_action(plan, "A") != nullptr);
+        CHECK(find_action(plan, "A")->type == ActionType::DeleteLocal);
+    }
+}
+
+TEST_CASE("Ledger serializes concurrent saves", "[BblPresetSync]")
+{
+    TempDir  dir;
+    fs::path file = Ledger::file_path(dir.path, "u", "b");
+    Ledger   l(file);
+    for (int i = 0; i < 20; ++i) l.put(fk("k" + std::to_string(i)), linked("P" + std::to_string(i), i, "h"));
+
+    std::vector<std::thread> threads;
+    std::vector<int>         failures(2, 0);
+    for (int t = 0; t < 2; ++t)
+        threads.emplace_back([&l, &failures, t] {
+            for (int i = 0; i < 50; ++i)
+                if (!l.save()) ++failures[t];
+        });
+    for (auto& th : threads) th.join();
+
+    CHECK(failures[0] == 0);
+    CHECK(failures[1] == 0);
+    CHECK_FALSE(fs::exists(fs::path(file.string() + ".tmp")));
+    Ledger back(file);
+    REQUIRE(back.load());
+    CHECK(back.entries().size() == 20);
 }

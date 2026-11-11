@@ -20,6 +20,7 @@ struct LedgerEntry
     std::string state{"linked"}; // linked | declined | unresolvable | too_large
     std::string reason;          // for unresolvable
     int         absent_passes{0};
+    long long   absent_since{0}; // local clock, unix seconds, when the row was first seen absent; 0 = not absent
     long long   retry_after{0}; // unix seconds, local clock; 0 = now
     int         fail_count{0};
     std::string last_error;
@@ -57,6 +58,7 @@ public:
 private:
     boost::filesystem::path    m_file;
     mutable std::mutex         m_mutex;
+    mutable std::mutex         m_save_mutex; // serializes whole saves (one .tmp writer at a time)
     std::map<Key, LedgerEntry> m_entries;
     bool                       m_first_run_confirmed{false};
     std::string                m_halted;

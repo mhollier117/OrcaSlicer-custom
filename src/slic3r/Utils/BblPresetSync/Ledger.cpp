@@ -51,6 +51,7 @@ LedgerEntry entry_from_json(const json& j)
     e.state          = get_string(j, "state", e.state);
     e.reason         = get_string(j, "reason", e.reason);
     e.absent_passes  = static_cast<int>(get_int(j, "absent_passes", e.absent_passes));
+    e.absent_since   = get_int(j, "absent_since", e.absent_since);
     e.retry_after    = get_int(j, "retry_after", e.retry_after);
     e.fail_count     = static_cast<int>(get_int(j, "fail_count", e.fail_count));
     e.last_error     = get_string(j, "last_error", e.last_error);
@@ -71,6 +72,7 @@ json entry_to_json(const LedgerEntry& e)
     j["state"]             = e.state;
     j["reason"]            = e.reason;
     j["absent_passes"]     = e.absent_passes;
+    j["absent_since"]      = e.absent_since;
     j["retry_after"]       = e.retry_after;
     j["fail_count"]        = e.fail_count;
     j["last_error"]        = e.last_error;
@@ -157,7 +159,8 @@ bool Ledger::load(std::string* error)
 
 bool Ledger::save(std::string* error) const
 {
-    json root;
+    std::lock_guard<std::mutex> save_lock(m_save_mutex);
+    json                        root;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         root["version"]             = 1;
