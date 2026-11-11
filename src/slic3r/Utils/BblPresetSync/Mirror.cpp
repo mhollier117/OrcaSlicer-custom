@@ -216,6 +216,7 @@ void Mirror::run_pass(Trigger trigger)
             m_last_list            = 0;
             m_last_summary.reset();
             m_summary_declined = false;
+            m_last_candidates.clear();
             m_proceed_local = m_proceed_remote = false;
             m_halted_local.clear();
             m_halted_remote.clear();
@@ -256,6 +257,25 @@ void Mirror::run_pass(Trigger trigger)
     const LocalSnapshot& snap = *snap_opt;
     std::map<Key, const LocalItem*> items;
     for (const LocalItem& item : snap.items) items[item.key] = &item;
+
+    // Filaments that became candidates after the first run are offered once per change of that list.
+    if (ledger->first_run_confirmed()) {
+        std::vector<Key> candidates;
+        for (const LocalItem& item : snap.items)
+            if (item.cls.eligibility == Eligibility::Candidate && !ledger->get(item.key)) candidates.push_back(item.key);
+        std::sort(candidates.begin(), candidates.end());
+        bool announce = false;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (candidates.empty()) {
+                m_last_candidates.clear();
+            } else if (candidates != m_last_candidates) {
+                m_last_candidates = candidates;
+                announce          = true;
+            }
+        }
+        if (announce) m_host.on_candidates(candidates);
+    }
 
     // 4. Is a list needed?
     const LedgerView view = view_of(*ledger);

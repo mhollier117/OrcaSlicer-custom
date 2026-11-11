@@ -91,6 +91,8 @@ public:
     virtual std::string            bundle_version() = 0; // BBL vendor profile version
     virtual boost::filesystem::path data_dir()      = 0;
     virtual void                   on_first_run(const FirstRunSummary& summary) = 0;
+    // Filaments that became conversion candidates after the first run; called when the list changes.
+    virtual void on_candidates(const std::vector<Key>& candidates) = 0;
     virtual void on_halt(const std::string& kind, const std::vector<Key>& local_deletes, const std::vector<Key>& remote_deletes) = 0;
     // "preset_limit", "auth", "unresolvable", "list_failed"
     virtual void notify(const std::string& code, const std::string& detail) = 0;
@@ -158,6 +160,7 @@ private:
     bool                    m_proceed_local{false};
     bool                    m_proceed_remote{false};
     std::vector<Key>        m_halted_local, m_halted_remote;
+    std::vector<Key>        m_last_candidates;
     Status                  m_status;
 };
 

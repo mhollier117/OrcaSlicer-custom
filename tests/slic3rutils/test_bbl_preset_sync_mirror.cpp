@@ -705,6 +705,7 @@ struct FakeHost : sync::IHost
     std::vector<sync::FirstRunSummary> first_runs;
     struct Halt { std::string kind; std::vector<Key> local, remote; };
     std::vector<Halt>             halts;
+    std::vector<std::vector<Key>> candidate_calls;
     std::vector<std::pair<std::string, std::string>> notes;
 
     std::optional<sync::Session> session() override
@@ -723,6 +724,7 @@ struct FakeHost : sync::IHost
     std::string bundle_version() override { return bundle; }
     fs::path    data_dir() override { return dir; }
     void        on_first_run(const sync::FirstRunSummary& s) override { first_runs.push_back(s); }
+    void        on_candidates(const std::vector<Key>& c) override { candidate_calls.push_back(c); }
     void        on_halt(const std::string& kind, const std::vector<Key>& l, const std::vector<Key>& r) override { halts.push_back({kind, l, r}); }
     void        notify(const std::string& code, const std::string& detail) override { notes.emplace_back(code, detail); }
     int         notified(const std::string& code) const
@@ -778,6 +780,13 @@ struct Env
         item.upload              = {{"filament_cost", name}, {"type", "filament"}};
         item.hash                = hash;
         item.mtime               = mtime;
+        store.snap->items.push_back(item);
+    }
+    void add_candidate(const std::string& name)
+    {
+        sync::LocalItem item;
+        item.key             = fkey(name);
+        item.cls.eligibility = sync::Eligibility::Candidate;
         store.snap->items.push_back(item);
     }
     void remove_local(const std::string& name)
@@ -1155,6 +1164,68 @@ TEST_CASE("reset_first_run_prompt makes the next dry run show its summary again"
     e.mirror.reset_first_run_prompt();
     e.pass(sync::Trigger::Manual);
     CHECK(e.host.first_runs.size() == 3);
+}
+
+TEST_CASE("Candidates that appear after the first run are announced once per change of the list", "[BblPresetSync]")
+{
+    Env e;
+    e.seed({});
+    e.add_candidate("Zed");
+    e.add_candidate("Alpha");
+
+    e.pass();
+    REQUIRE(e.host.candidate_calls.size() == 1);
+    CHECK(e.host.candidate_calls[0] == std::vector<Key>{fkey("Alpha"), fkey("Zed")}); // key order
+
+    e.pass(sync::Trigger::Manual);
+    e.pass();
+    CHECK(e.host.candidate_calls.size() == 1); // unchanged
+
+    e.add_candidate("Mid");
+    e.pass();
+    REQUIRE(e.host.candidate_calls.size() == 2);
+    CHECK(e.host.candidate_calls[1].size() == 3);
+
+    // An empty list resets the memory: the same candidate is announced again when it reappears.
+    e.store.snap->items.clear();
+    e.pass();
+    e.add_candidate("Alpha");
+    e.pass();
+    CHECK(e.host.candidate_calls.size() == 3);
+}
+
+TEST_CASE("Candidates are not announced before the first run is confirmed or when they have an entry", "[BblPresetSync]")
+{
+    Env e;
+    e.add_candidate("Cand");
+    e.pass();
+    CHECK(e.host.candidate_calls.empty());
+
+    Env d;
+    sync::LedgerEntry declined;
+    declined.state = "declined";
+    d.seed({{fkey("Refused"), declined}});
+    d.add_candidate("Refused");
+    d.pass();
+    CHECK(d.host.candidate_calls.empty());
+    d.add_candidate("Other");
+    d.pass();
+    REQUIRE(d.host.candidate_calls.size() == 1);
+    CHECK(d.host.candidate_calls[0] == std::vector<Key>{fkey("Other")});
+}
+
+TEST_CASE("The announced candidates are forgotten on a session change", "[BblPresetSync]")
+{
+    Env e;
+    e.seed({});
+    e.seed({}, true, "orca2", "bambu2");
+    e.add_candidate("Cand");
+    e.pass();
+    REQUIRE(e.host.candidate_calls.size() == 1);
+
+    e.host.sess = sync::Session{2, "orca2", "bambu2"};
+    e.pass();
+    CHECK(e.host.candidate_calls.size() == 2);
 }
 
 TEST_CASE("Ledger conversions survive a save and load and are absent from old files", "[BblPresetSync]")

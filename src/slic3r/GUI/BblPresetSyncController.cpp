@@ -291,25 +291,55 @@ void BblPresetSyncController::on_first_run(const sync::FirstRunSummary& summary)
             m_mirror->reset_first_run_prompt();
             return;
         }
-        BblPresetSyncFirstRunDialog dlg(m_app.mainframe, summary);
-        if (dlg.ShowModal() != wxID_OK) {
+        if (!run_conversion_dialog(summary)) {
             m_mirror->confirm_first_run(false);
             return;
         }
-        std::vector<std::string> not_converted;
-        for (const std::string& name : dlg.checked()) {
-            const sync::ConvertResult r = convert(name);
-            if (r.outcome.result != sync::OpResult::Applied) not_converted.push_back(name + " (" + r.outcome.reason + ")");
-        }
-        for (const std::string& name : dlg.unchecked()) m_mirror->set_declined(sync::Key{sync::PresetType::Filament, name});
         m_mirror->confirm_first_run(true);
         request_sync();
-        if (!not_converted.empty()) {
-            MessageDialog msg(m_app.mainframe,
-                              format_wxstr(_L("These filaments were not converted and will be offered again: %1%"), join_names(not_converted)),
-                              _L("Sync presets with the Bambu cloud"), wxOK);
-            msg.ShowModal();
-        }
+    });
+}
+
+bool BblPresetSyncController::run_conversion_dialog(const sync::FirstRunSummary& summary)
+{
+    BblPresetSyncFirstRunDialog dlg(m_app.mainframe, summary);
+    if (dlg.ShowModal() != wxID_OK) return false;
+
+    std::vector<std::string> not_converted;
+    for (const std::string& name : dlg.checked()) {
+        const sync::ConvertResult r = convert(name);
+        if (r.outcome.result != sync::OpResult::Applied) not_converted.push_back(name + " (" + r.outcome.reason + ")");
+    }
+    for (const std::string& name : dlg.unchecked()) m_mirror->set_declined(sync::Key{sync::PresetType::Filament, name});
+    if (!not_converted.empty()) {
+        MessageDialog msg(m_app.mainframe,
+                          format_wxstr(_L("These filaments were not converted and will be offered again: %1%"), join_names(not_converted)),
+                          _L("Sync presets with the Bambu cloud"), wxOK);
+        msg.ShowModal();
+    }
+    return true;
+}
+
+void BblPresetSyncController::on_candidates(const std::vector<sync::Key>& candidates)
+{
+    m_app.CallAfter([this, candidates] {
+        if (m_app.is_closing() || m_app.plater() == nullptr) return;
+        auto* notifications = m_app.plater()->get_notification_manager();
+        if (notifications == nullptr) return;
+        const std::string text = format(
+            _u8L("These filaments can only sync with the Bambu cloud, and be chosen in the AMS, as standalone custom filaments: %1%"),
+            join_names(candidates));
+        auto callback = [this, candidates](wxEvtHandler*) {
+            m_app.CallAfter([this, candidates] {
+                if (m_app.is_closing() || !main_window_shown(m_app)) return;
+                sync::FirstRunSummary summary;
+                summary.candidates = candidates;
+                if (run_conversion_dialog(summary)) request_sync();
+            });
+            return true;
+        };
+        notifications->push_notification(NotificationType::CustomNotification, NotificationManager::NotificationLevel::RegularNotificationLevel,
+                                         text, _u8L("Convert"), callback);
     });
 }
 

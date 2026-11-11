@@ -69,6 +69,7 @@ public:
     std::string                           bundle_version() override;
     boost::filesystem::path               data_dir() override;
     void                                  on_first_run(const BblPresetSync::FirstRunSummary& summary) override;
+    void on_candidates(const std::vector<BblPresetSync::Key>& candidates) override;
     void on_halt(const std::string& kind, const std::vector<BblPresetSync::Key>& local_deletes,
                  const std::vector<BblPresetSync::Key>& remote_deletes) override;
     void notify(const std::string& code, const std::string& detail) override;
@@ -83,6 +84,9 @@ private:
 
     BblPresetSync::LocalOpsContext ops_context(const std::string& bambu_uid) const;
     void                           refresh_ui();
+    // Shows the conversion dialog; false when cancelled. Otherwise converts the checked filaments, declines the others and
+    // reports the ones that were not converted.
+    bool                           run_conversion_dialog(const BblPresetSync::FirstRunSummary& summary);
 
     GUI_App&                       m_app;
     std::unique_ptr<CloudProxy>    m_cloud;
