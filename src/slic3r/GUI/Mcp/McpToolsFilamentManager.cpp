@@ -43,6 +43,17 @@ json object_arg(const json& args, const char* key)
     return *it;
 }
 
+int quantity_arg(const json& args)
+{
+    auto it = args.find("quantity");
+    if (it == args.end()) return 1;
+    if (!it->is_number_integer()) throw ToolFailure("quantity must be a whole number from 1 to 99");
+    const long long q = it->get<long long>();
+    if (it->is_number_unsigned() && it->get<unsigned long long>() > 99ULL) throw ToolFailure("quantity must be a whole number from 1 to 99");
+    if (q < 1 || q > 99) throw ToolFailure("quantity must be a whole number from 1 to 99");
+    return static_cast<int>(q);
+}
+
 json spool_list()
 {
     Fm::Runtime& runtime = Fm::Runtime::get();
@@ -70,7 +81,7 @@ json run_action(const json& args)
         return {{"requested", true}};
     }
 
-    if (action == "add") return accept_json(runtime.service().add(object_arg(args, "spool"), arg_int(args, "quantity", 1)));
+    if (action == "add") return accept_json(runtime.service().add(object_arg(args, "spool"), quantity_arg(args)));
 
     if (action == "update") return accept_json(runtime.service().update(object_arg(args, "patch")));
 
@@ -97,7 +108,12 @@ void register_filament_manager_tools(McpService& service)
         "account. Results arrive asynchronously: poll status until is_syncing is false and read recent for what happened.",
         object_schema({{"action", enum_prop({"status", "list", "pull", "add", "update", "remove"}, "What to do.")},
                        {"spool", prop("object", "add: the new spool in the page's shape (brand, material_type, series, setting_id, color_code, colors, color_type, initial_weight, net_weight, note, ...).")},
-                       {"quantity", prop("integer", "add: how many copies of the spool to create (default 1).")},
+                       {"quantity", [] {
+                            json q = prop("integer", "add: how many copies of the spool to create, 1 to 99 (default 1).");
+                            q["minimum"] = 1;
+                            q["maximum"] = 99;
+                            return q;
+                        }()},
                        {"patch", prop("object", "update: spool_id plus the fields to change, in the page's spool shape.")},
                        {"ids", array_prop({{"type", "string"}}, "remove: the spool_id values to delete.")}},
                       {"action"}),

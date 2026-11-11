@@ -28,6 +28,9 @@ std::string push_script(const std::string& type, std::uint64_t seq, std::uint64_
 
 // The value of the `gen` query parameter when it is 1 to 20 digits.
 std::optional<std::string> generation_of_url(const std::string& url);
+// True for the Filament Manager page's own document: `file:` and ending in /web/filament_manager/index.html (case
+// insensitive, query and fragment ignored, backslashes read as slashes). The URL is already unescaped.
+bool                       is_page_url(const std::string& url);
 std::string                page_url(const std::string& index_url, const std::string& lang, bool dark, const std::string& generation);
 
 } // namespace Slic3r::GUI::Fm

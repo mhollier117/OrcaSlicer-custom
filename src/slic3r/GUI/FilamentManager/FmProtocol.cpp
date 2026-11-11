@@ -96,6 +96,18 @@ std::optional<std::string> generation_of_url(const std::string& url)
     return std::nullopt;
 }
 
+bool is_page_url(const std::string& url)
+{
+    std::string path = url.substr(0, url.find_first_of("?#"));
+    for (char& c : path)
+        c = c == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const std::string prefix = "file:";
+    const std::string suffix = "/web/filament_manager/index.html";
+    if (path.size() < prefix.size() + suffix.size())
+        return false;
+    return path.compare(0, prefix.size(), prefix) == 0 && path.compare(path.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
 std::string page_url(const std::string& index_url, const std::string& lang, bool dark, const std::string& generation)
 {
     std::string url = index_url;

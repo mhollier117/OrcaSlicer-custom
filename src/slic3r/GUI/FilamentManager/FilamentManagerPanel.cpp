@@ -69,10 +69,6 @@ FilamentManagerPanel::FilamentManagerPanel(wxWindow* parent)
     m_vm = std::make_unique<Fm::ViewModel>(runtime.service(), make_host(), [this](const json& body) { push("report", m_report_seq++, body); });
     runtime.attach(m_vm.get());
 
-    const fil::Session session = runtime.session();
-    m_last_signed_in           = session.signed_in;
-    m_last_uid                 = session.uid;
-
     Bind(wxEVT_TIMER, &FilamentManagerPanel::on_timer, this);
 }
 
@@ -174,6 +170,11 @@ void FilamentManagerPanel::on_script_message(wxWebViewEvent& evt)
 void FilamentManagerPanel::on_navigating(wxWebViewEvent& evt)
 {
     const wxString url = evt.GetURL();
+    if (url.StartsWith("http://") || url.StartsWith("https://")) {
+        wxLaunchDefaultBrowser(url);
+        evt.Veto();
+        return;
+    }
     if (url.StartsWith("app://")) {
         // The page's fallback transport: the packet is the rest of the URL.
         handle_raw(to_utf8(wxURI::Unescape(url.Mid(6))), std::string(), false);
@@ -187,9 +188,13 @@ void FilamentManagerPanel::handle_raw(const std::string& raw, const std::string&
 {
     if (!m_vm)
         return;
-    if (use_url_generation) {
-        const std::optional<std::string> gen = Fm::generation_of_url(url);
-        if (gen && *gen != std::to_string(m_generation))
+    if (use_url_generation && !url.empty()) {
+        // Only our page, and only the current document, may talk to the bridge.
+        const std::string plain = to_utf8(wxURI::Unescape(wxString::FromUTF8(url)));
+        if (!Fm::is_page_url(plain))
+            return;
+        const std::optional<std::string> gen = Fm::generation_of_url(plain);
+        if (!gen || *gen != std::to_string(m_generation))
             return; // a message of a document that is gone
     }
     const std::optional<Fm::Request> request = Fm::parse_request(raw);
@@ -206,19 +211,15 @@ void FilamentManagerPanel::push(const std::string& type, std::uint64_t seq, cons
     if (type == "report" && !(IsShown() && m_loaded))
         return;
     const std::uint64_t now_ms = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
-    WebView::RunScript(m_browser, wxString::FromUTF8(Fm::push_script(type, seq, now_ms, body, std::to_string(m_generation))));
+    // RunScript logs the whole script in developer mode, and packets carry spool lists: use the silent runner.
+    const std::string script = "(function(){" + Fm::push_script(type, seq, now_ms, body, std::to_string(m_generation)) + "return \"\";})()";
+    WebView::RunScriptAsync(m_browser, wxString::FromUTF8(script), [](bool, const std::string&) {});
 }
 
 void FilamentManagerPanel::on_timer(wxTimerEvent&)
 {
-    Fm::Runtime&       runtime = Fm::Runtime::get();
-    const fil::Session session = runtime.session();
-    if (session.signed_in == m_last_signed_in && session.uid == m_last_uid)
-        return;
-    m_last_signed_in = session.signed_in;
-    m_last_uid       = session.uid;
-    runtime.service().reset();
-    if (session.signed_in)
+    Fm::Runtime& runtime = Fm::Runtime::get();
+    if (runtime.service().refresh_session() && runtime.session().signed_in)
         runtime.service().request_pull();
 }
 

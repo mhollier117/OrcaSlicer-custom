@@ -670,6 +670,18 @@ TEST_CASE("A server that ignores the offset stops after the second page and is f
     CHECK(cloud.log == std::vector<std::string>{"list 0", "list 20"});
 }
 
+TEST_CASE("A page with more rows than the limit proves the server does not page", "[BblFilament]")
+{
+    FakeCloud cloud;
+    cloud.fill(21);
+    cloud.ignore_limit = true;
+    const auto r       = fil::list_all(cloud, {});
+    CHECK(r.ok);
+    CHECK(r.spools.size() == 21);
+    CHECK_FALSE(r.paging_suspect);
+    CHECK(cloud.log == std::vector<std::string>{"list 0"});
+}
+
 TEST_CASE("A total in the reply ends the listing without the extra page", "[BblFilament]")
 {
     FakeCloud cloud;
@@ -1509,6 +1521,33 @@ TEST_CASE("A skipped-row count is cleared by a reset", "[BblFilament]")
     REQUIRE(rig.svc->status().skipped_rows == 1);
     rig.svc->reset();
     CHECK(rig.svc->status().skipped_rows == 0);
+}
+
+TEST_CASE("refresh_session reports an unchanged session without touching anything", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(2);
+    rig.svc->request_pull();
+    rig.settle();
+    rig.svc->add(page_spool());
+    rig.events.clear();
+    CHECK_FALSE(rig.svc->refresh_session());
+    CHECK(rig.events.empty());
+    CHECK(rig.worker.size() == 1);
+}
+
+TEST_CASE("refresh_session resets once after the account changed", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(2);
+    rig.svc->request_pull();
+    rig.settle();
+    REQUIRE(rig.svc->view().size() == 2);
+    rig.session.uid = "u2";
+    CHECK(rig.svc->refresh_session());
+    CHECK(rig.svc->view().empty());
+    CHECK_FALSE(rig.svc->status().have_list);
+    CHECK_FALSE(rig.svc->refresh_session());
 }
 
 TEST_CASE("A write waiting in the worker when the account changes never reaches the cloud", "[BblFilament]")

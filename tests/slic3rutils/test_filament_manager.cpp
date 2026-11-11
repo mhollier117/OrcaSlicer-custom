@@ -222,6 +222,17 @@ TEST_CASE("The generation is read from the page URL", "[FilamentManager]")
     CHECK_FALSE(fm::generation_of_url("file:///x/index.html#/f?gen=5").has_value());
 }
 
+TEST_CASE("Only the Filament Manager page counts as the page URL", "[FilamentManager]")
+{
+    CHECK(fm::is_page_url("file:///C:/x/resources/web/filament_manager/index.html?lang=en_US&theme=dark&gen=1#/filament_manager"));
+    CHECK(fm::is_page_url("FILE:///C:/X/Resources/Web/Filament_Manager/Index.html?gen=1"));
+    CHECK(fm::is_page_url("file:///C:\\x\\resources\\web\\filament_manager\\index.html#/a"));
+    CHECK_FALSE(fm::is_page_url("file:///C:/x/resources/web/homepage/index.html?gen=1"));
+    CHECK_FALSE(fm::is_page_url("https://example.com/web/filament_manager/index.html"));
+    CHECK_FALSE(fm::is_page_url("file:///x/index.html?u=/web/filament_manager/index.html"));
+    CHECK_FALSE(fm::is_page_url(""));
+}
+
 TEST_CASE("The page URL carries language, theme and generation", "[FilamentManager]")
 {
     CHECK(fm::page_url("file:///x/index.html", "de_DE", true, "3") == "file:///x/index.html?lang=de_DE&theme=dark&gen=3#/filament_manager");

@@ -50,6 +50,7 @@ public:
     long long                next_id     = 2000001;
 
     bool ignore_offset = false;
+    bool ignore_limit  = false; // the server sends everything whatever page is asked for
     bool null_hits     = false;
     bool omit_hits     = false;
     bool with_total    = false;
@@ -67,6 +68,10 @@ public:
         log.push_back("list " + std::to_string(offset));
         if (auto f = take("list")) return *f;
         if (ignore_offset) offset = 0;
+        if (ignore_limit) {
+            offset = 0;
+            limit  = static_cast<int>(rows.size());
+        }
         json hits = json::array();
         for (int i = offset; i < static_cast<int>(rows.size()) && i < offset + limit; ++i) hits.push_back(rows[i]);
         json body = json::object();

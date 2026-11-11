@@ -51,8 +51,6 @@ private:
     bool                        m_reset_on_show{false};
     std::uint64_t               m_report_seq{0};
     wxTimer                     m_timer;
-    bool                        m_last_signed_in{false};
-    std::string                 m_last_uid;
     std::shared_ptr<int>        m_alive;
 };
 

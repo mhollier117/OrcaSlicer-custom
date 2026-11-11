@@ -3586,7 +3586,9 @@
             "type": "object"
           },
           "quantity": {
-            "description": "add: how many copies of the spool to create (default 1).",
+            "description": "add: how many copies of the spool to create, 1 to 99 (default 1).",
+            "maximum": 99,
+            "minimum": 1,
             "type": "integer"
           },
           "spool": {

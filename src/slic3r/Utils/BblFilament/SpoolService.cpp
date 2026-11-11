@@ -174,10 +174,14 @@ bool SpoolService::do_reset(bool fire, const Session& s)
 void SpoolService::reset() { do_reset(true, deps_.session ? deps_.session() : Session{}); }
 
 // Called at the start of every request: a changed account, sign-in state or plugin generation starts a fresh state.
-void SpoolService::sync_session()
+void SpoolService::sync_session() { refresh_session(); }
+
+bool SpoolService::refresh_session()
 {
     const Session s = deps_.session ? deps_.session() : Session{};
-    if (!session_matches(s)) do_reset(!pristine(), s);
+    if (session_matches(s)) return false;
+    do_reset(!pristine(), s);
+    return true;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

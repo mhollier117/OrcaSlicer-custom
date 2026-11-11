@@ -97,6 +97,9 @@ public:
     void        request_config(bool force);
     const json* cached_config() const; // null until fetched
 
+    // What every request does first: true when the session differed and the state was reset. Starts nothing.
+    bool refresh_session();
+
     void reset(); // the account, the sign-in state or the plugin changed
 
 private:

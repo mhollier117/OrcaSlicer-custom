@@ -137,6 +137,8 @@ ListResult list_all(ISpoolCloud& cloud, const std::function<bool()>& cancelled)
         }
 
         if (n == 0) break;
+        // More rows than the limit asked for: the server does not page and sent everything.
+        if (n > k_spool_page_size) break;
         auto total = r.body.find("total");
         if (total != r.body.end() && total->is_number() && static_cast<double>(out.spools.size()) >= total->get<double>()) break;
         if (added == 0) {
