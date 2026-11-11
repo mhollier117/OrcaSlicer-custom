@@ -81,13 +81,15 @@ void on_printer_message(MachineObject& printer, const std::string& message)
     }
 }
 
+std::map<std::string, MachineObject*> account_printers(DeviceManager& devices) { return devices.get_my_cloud_machine_list(BBL_PRINTER_AGENT_ID); }
+
 std::vector<fil::PrinterView> printer_views(DeviceManager* devices, const fil::PrinterTap& tap, long long now)
 {
     std::vector<fil::PrinterView> out;
     if (devices == nullptr)
         return out;
     try {
-        std::map<std::string, MachineObject*> machines = devices->get_my_cloud_machine_list(BBL_PRINTER_AGENT_ID);
+        std::map<std::string, MachineObject*> machines = account_printers(*devices);
         MachineObject*                        selected = devices->get_selected_machine();
         if (selected != nullptr && is_bambu(*selected) && selected->is_lan_mode_printer())
             machines.emplace(selected->get_dev_id(), selected);

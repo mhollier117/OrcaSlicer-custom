@@ -10,6 +10,7 @@
 #include "Tab.hpp"
 #include "format.hpp"
 
+#include "libslic3r/AppConfig.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Utils.hpp"
@@ -18,6 +19,9 @@
 #include "slic3r/GUI/DeviceCore/DevExtruderSystem.h"
 #include "slic3r/GUI/DeviceCore/DevManager.h"
 #include "slic3r/GUI/DeviceManager.hpp"
+#include "slic3r/GUI/FilamentManager/FmPrinters.hpp"
+#include "slic3r/GUI/FilamentManager/FmRuntime.hpp"
+#include "slic3r/Utils/BblFilament/PrinterTap.hpp"
 #include "slic3r/Utils/BblPresetSync/Ledger.hpp"
 #include "slic3r/Utils/BblPresetSync/KCopy.hpp"
 #include "slic3r/Utils/BblPresetSync/Snapshot.hpp"
@@ -40,6 +44,7 @@
 #include <chrono>
 #include <ctime>
 #include <future>
+#include <map>
 #include <set>
 #include <string>
 #include <utility>
@@ -672,14 +677,6 @@ void BblPresetSyncController::refresh_studio_keys_step()
 
 namespace {
 
-struct KPrinter
-{
-    bool               ok{false};
-    std::string        dev_id, dev_name;
-    std::vector<float> diameters;
-    bool               limited{true};
-};
-
 struct KJob
 {
     sync::Key   key;
@@ -688,12 +685,39 @@ struct KJob
     bool        has_conversion{false};
 };
 
-// The selected printer when it still is the one with this dev id.
-MachineObject* selected_machine(const std::string& dev_id)
+// The printer with this dev id: the selected one or one of the account's printers; null when it is gone.
+MachineObject* k_printer(const std::string& dev_id)
 {
     DeviceManager* dev = wxGetApp().getDeviceManager();
-    MachineObject* m   = dev != nullptr ? dev->get_selected_machine() : nullptr;
-    return (m != nullptr && m->get_dev_id() == dev_id) ? m : nullptr;
+    if (dev == nullptr) return nullptr;
+    MachineObject* m = dev->get_selected_machine();
+    if (m != nullptr && m->get_dev_id() == dev_id) return m;
+    return dev->get_user_machine(dev_id, BBL_CLOUD_PROVIDER);
+}
+
+// UI thread. What the device manager and the Filament Manager's printer tap (when given) know about one printer. A
+// printer that is not selected has only its key fields parsed, so its PA flag and nozzle diameters may be unset; the
+// tap keeps both for every printer.
+sync::KPrinterFacts k_printer_facts(MachineObject& m, bool selected, const BblFilament::PrinterTap* tap)
+{
+    sync::KPrinterFacts f;
+    f.dev_id     = m.get_dev_id();
+    f.name       = m.get_dev_name();
+    f.selected   = selected;
+    f.lan        = m.is_lan_mode_printer();
+    f.connected  = m.is_connected();
+    f.info_ready = m.is_info_ready();
+    f.pa_flag    = m.is_support_pa_calibration;
+    f.series_x1  = m.get_printer_series() == PrinterSeries::SERIES_X1;
+    if (DevExtderSystem* es = m.GetExtderSystem())
+        for (int i = 0; i < es->GetTotalExtderCount(); ++i) f.diameters.push_back(es->GetNozzleDiameter(i));
+    if (tap != nullptr) {
+        if (const BblFilament::PrinterFacts* t = tap->facts(f.dev_id)) {
+            f.tap_diameter     = t->nozzle_diameter;
+            f.tap_pa_supported = t->pa_supported;
+        }
+    }
+    return f;
 }
 
 } // namespace
@@ -730,32 +754,28 @@ void BblPresetSyncController::k_copy_step()
         if (!c.to_filament_id.empty()) any = true;
     if (!any) return;
 
-    // The printer the K profiles can be copied on: the selected one, when it is ready.
-    const auto printer = run_on_ui<KPrinter>([]() {
-        KPrinter       p;
+    // The printers the K profiles can be copied on: the selected one and the account's other printers, when ready.
+    const auto printers = run_on_ui<std::vector<sync::KPrinter>>([]() {
         DeviceManager* dev = wxGetApp().getDeviceManager();
-        MachineObject* m   = dev != nullptr ? dev->get_selected_machine() : nullptr;
-        if (m == nullptr || !m->is_connected() || !m->is_info_ready() || !m->is_support_pa_calibration) return p;
-        p.ok       = true;
-        p.dev_id   = m->get_dev_id();
-        p.dev_name = m->get_dev_name();
-        p.limited  = m->get_printer_series() != PrinterSeries::SERIES_X1;
-        if (DevExtderSystem* es = m->GetExtderSystem()) {
-            for (int i = 0; i < es->GetTotalExtderCount(); ++i) {
-                const float d = es->GetNozzleDiameter(i);
-                if (d > 0.0f && std::find(p.diameters.begin(), p.diameters.end(), d) == p.diameters.end()) p.diameters.push_back(d);
-            }
-        }
-        return p;
+        if (dev == nullptr) return std::vector<sync::KPrinter>();
+        // The tap hears printers only while the Filament Manager is enabled.
+        AppConfig*                     config = wxGetApp().app_config;
+        const BblFilament::PrinterTap* tap    = config != nullptr && config->get_bool("filament_manager_enabled") ? &Fm::Runtime::get().tap() : nullptr;
+        MachineObject*                 selected = dev->get_selected_machine();
+        std::vector<sync::KPrinterFacts> facts;
+        if (selected != nullptr) facts.push_back(k_printer_facts(*selected, true, tap));
+        for (const auto& [dev_id, m] : Fm::account_printers(*dev))
+            if (m != nullptr) facts.push_back(k_printer_facts(*m, m == selected, tap));
+        return sync::k_copy_printers(facts);
     });
-    if (!printer) return;
-    if (!printer->ok || printer->diameters.empty()) {
+    if (!printers) return;
+    if (printers->empty()) {
         for (const KRequest& r : requests) set_k_last(sync::Key{sync::PresetType::Filament, r.name}.str(), "no printer");
         return;
     }
 
-    // What to copy: manual requests first, then every conversion not yet copied to this printer.
-    std::vector<KJob> jobs;
+    // Manual requests run on every printer.
+    std::vector<KJob>     manual_jobs;
     std::set<std::string> manual_names;
     for (const KRequest& r : requests) {
         const sync::Key key{sync::PresetType::Filament, r.name};
@@ -775,159 +795,187 @@ void BblPresetSyncController::k_copy_step()
             continue;
         }
         manual_names.insert(r.name);
-        jobs.push_back({key, from, to, true, conv.has_value()});
-    }
-    for (const auto& [key, c] : conversions) {
-        if (c.to_filament_id.empty() || manual_names.count(key.name)) continue;
-        if (std::find(c.k_copied_printers.begin(), c.k_copied_printers.end(), printer->dev_id) != c.k_copied_printers.end()) continue;
-        {
-            std::lock_guard<std::mutex> lock(m_k_mutex);
-            const auto                  it = m_k_retry_after.find(printer->dev_id + "|" + key.str());
-            if (it != m_k_retry_after.end() && it->second > now()) continue;
-        }
-        jobs.push_back({key, c.from_filament_id, c.to_filament_id, false, true});
+        manual_jobs.push_back({key, from, to, true, conv.has_value()});
     }
 
-    for (const KJob& job : jobs) {
-        if (cancelled()) return;
-        const std::string retry_key = printer->dev_id + "|" + job.key.str();
-        const auto        fail      = [&](const char* what) {
-            std::lock_guard<std::mutex> lock(m_k_mutex);
-            m_k_retry_after[retry_key] = now() + 600;
-            m_k_last[job.key.str()]    = printer->dev_name + ": could not " + what + " the K profile table";
-        };
+    // One line per filament: the results of every printer, joined.
+    std::map<std::string, std::string> lines;
+    const auto note = [&](const sync::Key& key, const std::string& text) {
+        std::string& line = lines[key.str()];
+        if (!line.empty()) line += "; ";
+        line += text;
+        set_k_last(key.str(), line);
+    };
 
-        int copied = 0, existing = 0, full = 0;
-        bool ok    = true;
-        for (const float diameter : printer->diameters) {
-            // a. Ask for the whole table of this nozzle.
-            const auto asked = run_on_ui<int>([dev_id = printer->dev_id, diameter]() {
-                MachineObject* m = selected_machine(dev_id);
-                if (m == nullptr) return -2;
-                PACalibExtruderInfo cali;
-                cali.extruder_id            = 0;
-                cali.use_extruder_id        = false;
-                cali.use_nozzle_volume_type = false;
-                cali.nozzle_volume_type     = nvtStandard;
-                cali.nozzle_diameter        = diameter;
-                cali.filament_id            = "";
-                return m->command_get_pa_calibration_tab(cali);
-            });
-            if (!asked || *asked == -2) return; // printer gone or shutting down: end the step
-            if (*asked != 0) {
-                fail("read");
-                ok = false;
-                break;
-            }
-
-            // b. Wait for the reply.
-            struct Table
+    // Done: every job ran. Gone: the printer went away; the next printer follows. Shutdown: the app is closing.
+    enum class KRun { Done, Gone, Shutdown };
+    const auto copy_on = [&](const sync::KPrinter& printer) -> KRun {
+        // What to copy: manual requests first, then every conversion not yet copied to this printer.
+        std::vector<KJob> jobs = manual_jobs;
+        for (const auto& [key, c] : conversions) {
+            if (c.to_filament_id.empty() || manual_names.count(key.name)) continue;
+            if (std::find(c.k_copied_printers.begin(), c.k_copied_printers.end(), printer.dev_id) != c.k_copied_printers.end()) continue;
             {
-                bool                      gone{false}, ready{false}, success{false};
-                std::vector<sync::KEntry> entries;
-            };
-            Table table;
-            for (int waited = 0; waited <= 10000; waited += 300) {
-                const auto polled = run_on_ui<Table>([dev_id = printer->dev_id]() {
-                    Table t;
-                    MachineObject* m = selected_machine(dev_id);
-                    if (m == nullptr) {
-                        t.gone = true;
-                        return t;
-                    }
-                    t.ready   = !m->request_tab_from_bbs;
-                    t.success = m->has_get_pa_calib_tab;
-                    if (t.ready && t.success)
-                        for (const PACalibResult& r : m->pa_calib_tab) {
-                            sync::KEntry e;
-                            e.filament_id        = r.filament_id;
-                            e.name               = r.name;
-                            e.k_value            = r.k_value;
-                            e.n_coef             = r.n_coef;
-                            e.nozzle_diameter    = r.nozzle_diameter;
-                            e.extruder_id        = r.extruder_id;
-                            e.nozzle_volume_type = static_cast<int>(r.nozzle_volume_type);
-                            e.cali_idx           = r.cali_idx;
-                            t.entries.push_back(std::move(e));
-                        }
-                    return t;
-                });
-                if (!polled || polled->gone) return;
-                table = *polled;
-                if (table.ready) break;
-                sleep_ms(300);
+                std::lock_guard<std::mutex> lock(m_k_mutex);
+                const auto                  it = m_k_retry_after.find(printer.dev_id + "|" + key.str());
+                if (it != m_k_retry_after.end() && it->second > now()) continue;
             }
-            if (!table.ready || !table.success) {
-                fail("read");
-                ok = false;
-                break;
-            }
+            jobs.push_back({key, c.from_filament_id, c.to_filament_id, false, true});
+        }
 
-            // c. Plan.
-            const sync::KCopyPlan plan = sync::plan_k_copy(table.entries, job.from, job.to, printer->limited);
-            existing += plan.skipped_existing;
-            full += plan.skipped_full;
-
-            // d. Write.
-            if (plan.to_write.empty()) continue;
-            std::string setting_id;
-            if (const auto entry = ledger->get(job.key); entry && entry->state == "linked") setting_id = entry->setting_id;
-            const auto written = run_on_ui<int>([dev_id = printer->dev_id, diameter, entries = plan.to_write, setting_id]() {
-                MachineObject* m = selected_machine(dev_id);
-                if (m == nullptr) return -2;
-                std::vector<PACalibResult> values;
-                for (const sync::KEntry& e : entries) {
-                    PACalibResult r;
-                    r.tray_id            = -1;
-                    r.cali_idx           = -1;
-                    r.name               = e.name;
-                    r.k_value            = e.k_value;
-                    r.n_coef             = e.n_coef;
-                    r.extruder_id        = e.extruder_id;
-                    r.nozzle_volume_type = static_cast<NozzleVolumeType>(e.nozzle_volume_type);
-                    r.nozzle_diameter    = diameter;
-                    r.filament_id        = e.filament_id;
-                    r.setting_id         = setting_id;
-                    values.push_back(std::move(r));
+        for (const KJob& job : jobs) {
+            if (cancelled()) return KRun::Shutdown;
+            const std::string retry_key = printer.dev_id + "|" + job.key.str();
+            const auto        fail      = [&](const char* what) {
+                {
+                    std::lock_guard<std::mutex> lock(m_k_mutex);
+                    m_k_retry_after[retry_key] = now() + 600;
                 }
-                return m->command_set_pa_calibration(values, true);
-            });
-            if (!written || *written == -2) return;
-            if (*written != 0) {
-                fail("write");
-                ok = false;
-                break;
-            }
-            copied += static_cast<int>(plan.to_write.size());
-        }
-        if (!ok) continue;
+                note(job.key, printer.name + ": could not " + what + " the K profile table");
+            };
 
-        {
-            std::lock_guard<std::mutex> lock(m_k_mutex);
-            m_k_retry_after.erase(retry_key);
-        }
-        if (job.has_conversion) {
-            if (auto conv = ledger->get_conversion(job.key)) {
-                if (std::find(conv->k_copied_printers.begin(), conv->k_copied_printers.end(), printer->dev_id) == conv->k_copied_printers.end())
-                    conv->k_copied_printers.push_back(printer->dev_id);
-                ledger->put_conversion(job.key, *conv);
-                std::string error;
-                if (!ledger->save(&error)) BOOST_LOG_TRIVIAL(warning) << "bbl preset sync: ledger save failed: " << error;
+            int copied = 0, existing = 0, full = 0;
+            bool ok    = true;
+            for (const float diameter : printer.diameters) {
+                // a. Ask for the whole table of this nozzle.
+                const auto asked = run_on_ui<int>([dev_id = printer.dev_id, diameter]() {
+                    MachineObject* m = k_printer(dev_id);
+                    if (m == nullptr) return -2;
+                    PACalibExtruderInfo cali;
+                    cali.extruder_id            = 0;
+                    cali.use_extruder_id        = false;
+                    cali.use_nozzle_volume_type = false;
+                    cali.nozzle_volume_type     = nvtStandard;
+                    cali.nozzle_diameter        = diameter;
+                    cali.filament_id            = "";
+                    return m->command_get_pa_calibration_tab(cali);
+                });
+                if (!asked) return KRun::Shutdown;
+                if (*asked == -2) return KRun::Gone;
+                if (*asked != 0) {
+                    fail("read");
+                    ok = false;
+                    break;
+                }
+
+                // b. Wait for the reply.
+                struct Table
+                {
+                    bool                      gone{false}, ready{false}, success{false};
+                    std::vector<sync::KEntry> entries;
+                };
+                Table table;
+                for (int waited = 0; waited <= 10000; waited += 300) {
+                    const auto polled = run_on_ui<Table>([dev_id = printer.dev_id]() {
+                        Table t;
+                        MachineObject* m = k_printer(dev_id);
+                        if (m == nullptr) {
+                            t.gone = true;
+                            return t;
+                        }
+                        t.ready   = !m->request_tab_from_bbs;
+                        t.success = m->has_get_pa_calib_tab;
+                        if (t.ready && t.success)
+                            for (const PACalibResult& r : m->pa_calib_tab) {
+                                sync::KEntry e;
+                                e.filament_id        = r.filament_id;
+                                e.name               = r.name;
+                                e.k_value            = r.k_value;
+                                e.n_coef             = r.n_coef;
+                                e.nozzle_diameter    = r.nozzle_diameter;
+                                e.extruder_id        = r.extruder_id;
+                                e.nozzle_volume_type = static_cast<int>(r.nozzle_volume_type);
+                                e.cali_idx           = r.cali_idx;
+                                t.entries.push_back(std::move(e));
+                            }
+                        return t;
+                    });
+                    if (!polled) return KRun::Shutdown;
+                    if (polled->gone) return KRun::Gone;
+                    table = *polled;
+                    if (table.ready) break;
+                    sleep_ms(300);
+                }
+                if (!table.ready || !table.success) {
+                    fail("read");
+                    ok = false;
+                    break;
+                }
+
+                // c. Plan.
+                const sync::KCopyPlan plan = sync::plan_k_copy(table.entries, job.from, job.to, printer.limited);
+                existing += plan.skipped_existing;
+                full += plan.skipped_full;
+
+                // d. Write.
+                if (plan.to_write.empty()) continue;
+                std::string setting_id;
+                if (const auto entry = ledger->get(job.key); entry && entry->state == "linked") setting_id = entry->setting_id;
+                const auto written = run_on_ui<int>([dev_id = printer.dev_id, diameter, entries = plan.to_write, setting_id]() {
+                    MachineObject* m = k_printer(dev_id);
+                    if (m == nullptr) return -2;
+                    std::vector<PACalibResult> values;
+                    for (const sync::KEntry& e : entries) {
+                        PACalibResult r;
+                        r.tray_id            = -1;
+                        r.cali_idx           = -1;
+                        r.name               = e.name;
+                        r.k_value            = e.k_value;
+                        r.n_coef             = e.n_coef;
+                        r.extruder_id        = e.extruder_id;
+                        r.nozzle_volume_type = static_cast<NozzleVolumeType>(e.nozzle_volume_type);
+                        r.nozzle_diameter    = diameter;
+                        r.filament_id        = e.filament_id;
+                        r.setting_id         = setting_id;
+                        values.push_back(std::move(r));
+                    }
+                    return m->command_set_pa_calibration(values, true);
+                });
+                if (!written) return KRun::Shutdown;
+                if (*written == -2) return KRun::Gone;
+                if (*written != 0) {
+                    fail("write");
+                    ok = false;
+                    break;
+                }
+                copied += static_cast<int>(plan.to_write.size());
+            }
+            if (!ok) continue;
+
+            {
+                std::lock_guard<std::mutex> lock(m_k_mutex);
+                m_k_retry_after.erase(retry_key);
+            }
+            if (job.has_conversion) {
+                if (auto conv = ledger->get_conversion(job.key)) {
+                    if (std::find(conv->k_copied_printers.begin(), conv->k_copied_printers.end(), printer.dev_id) == conv->k_copied_printers.end())
+                        conv->k_copied_printers.push_back(printer.dev_id);
+                    ledger->put_conversion(job.key, *conv);
+                    std::string error;
+                    if (!ledger->save(&error)) BOOST_LOG_TRIVIAL(warning) << "bbl preset sync: ledger save failed: " << error;
+                }
+            }
+            note(job.key, printer.name + ": copied " + std::to_string(copied) + ", already there " + std::to_string(existing) + ", no room " +
+                              std::to_string(full));
+            if (copied > 0 || full > 0) {
+                const std::string text = format(_u8L("K profiles copied to %1% on %2%: %3% (already there: %4%, no room: %5%)."), job.key.name,
+                                                printer.name, copied, existing, full);
+                m_app.CallAfter([this, text] {
+                    if (m_app.is_closing() || m_app.plater() == nullptr) return;
+                    auto* notifications = m_app.plater()->get_notification_manager();
+                    if (notifications == nullptr) return;
+                    notifications->push_notification(NotificationType::CustomNotification,
+                                                     NotificationManager::NotificationLevel::RegularNotificationLevel, text);
+                });
             }
         }
-        set_k_last(job.key.str(), printer->dev_name + ": copied " + std::to_string(copied) + ", already there " + std::to_string(existing) +
-                                      ", no room " + std::to_string(full));
-        if (copied > 0 || full > 0) {
-            const std::string text = format(_u8L("K profiles copied to %1% on %2%: %3% (already there: %4%, no room: %5%)."), job.key.name,
-                                            printer->dev_name, copied, existing, full);
-            m_app.CallAfter([this, text] {
-                if (m_app.is_closing() || m_app.plater() == nullptr) return;
-                auto* notifications = m_app.plater()->get_notification_manager();
-                if (notifications == nullptr) return;
-                notifications->push_notification(NotificationType::CustomNotification,
-                                                 NotificationManager::NotificationLevel::RegularNotificationLevel, text);
-            });
-        }
+        return KRun::Done;
+    };
+
+    // A printer that fails or goes away does not stop the others.
+    for (const sync::KPrinter& printer : *printers) {
+        if (cancelled()) return;
+        if (copy_on(printer) == KRun::Shutdown) return;
     }
 }
 

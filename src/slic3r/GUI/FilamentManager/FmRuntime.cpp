@@ -12,7 +12,6 @@
 #include "slic3r/Utils/BblFilament/SpoolCloud.hpp"
 #include "slic3r/Utils/CloudProvider.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
-#include "slic3r/Utils/NetworkAgentFactory.hpp"
 
 #include <wx/app.h>
 
@@ -230,7 +229,7 @@ void Runtime::tick()
 
         DeviceManager* devices = wxGetApp().getDeviceManager();
         if (devices != nullptr) {
-            for (const auto& [dev, machine] : devices->get_my_cloud_machine_list(BBL_PRINTER_AGENT_ID)) {
+            for (const auto& [dev, machine] : account_printers(*devices)) {
                 if (machine == nullptr || !machine->is_online())
                     continue;
                 const fil::PrinterFacts* f = m_tap->facts(dev);

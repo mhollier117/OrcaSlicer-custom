@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <map>
+#include <set>
 #include <utility>
 
 namespace Slic3r::BblPresetSync {
@@ -39,6 +40,32 @@ KCopyPlan plan_k_copy(const std::vector<KEntry>& table, const std::string& from_
         plan.to_write.push_back(std::move(copy));
     }
     return plan;
+}
+
+std::vector<KPrinter> k_copy_printers(const std::vector<KPrinterFacts>& printers)
+{
+    std::vector<KPrinter> out;
+    std::set<std::string> seen;
+    auto take = [&](const KPrinterFacts& f) {
+        if (f.dev_id.empty() || !seen.insert(f.dev_id).second) return;
+        if (f.lan && !f.selected) return;
+        if (!f.connected || !f.info_ready) return;
+        if (!f.pa_flag && f.tap_pa_supported != true && !f.series_x1) return;
+        KPrinter p;
+        p.dev_id  = f.dev_id;
+        p.name    = f.name;
+        p.limited = !f.series_x1;
+        for (const float d : f.diameters)
+            if (d > 0.0f && std::find(p.diameters.begin(), p.diameters.end(), d) == p.diameters.end()) p.diameters.push_back(d);
+        if (p.diameters.empty() && f.tap_diameter > 0) p.diameters.push_back(static_cast<float>(f.tap_diameter));
+        if (p.diameters.empty()) return;
+        out.push_back(std::move(p));
+    };
+    for (const KPrinterFacts& f : printers)
+        if (f.selected) take(f);
+    for (const KPrinterFacts& f : printers)
+        if (!f.selected) take(f);
+    return out;
 }
 
 } // namespace Slic3r::BblPresetSync

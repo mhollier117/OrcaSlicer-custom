@@ -129,10 +129,13 @@ remembered in the ledger and not offered again.
 ## K profiles
 
 A printer keeps flow-dynamics profiles in a table keyed by filament id, so a converted filament
-would lose its profiles. `k_copy_step` copies them: for the selected, connected printer it reads
-the table and adds a copy of each entry of the old id under the new id (`plan_k_copy`). It never
-deletes or changes an entry, and respects the table limit. Which profile a slot uses is not part
-of the table and is chosen when the slot is set.
+would lose its profiles. `k_copy_step` copies them, on the same printer: for each connected printer
+(the selected one and the other cloud printers of the account, `k_copy_printers`) it reads the table
+and adds a copy of each entry of the old id under the new id (`plan_k_copy`). A printer that is not
+selected may lack its PA flag and nozzle diameters in the app; the Filament Manager's printer tap
+supplies them. A printer that fails or goes away does not stop the others. It never deletes or
+changes an entry, and respects the table limit. Which profile a slot uses is not part of the table
+and is chosen when the slot is set.
 
 ## Loader seam
 
