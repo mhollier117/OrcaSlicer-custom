@@ -220,6 +220,7 @@ sync::Mirror& BblPresetSyncController::mirror()
 void BblPresetSyncController::request_sync()
 {
     m_manual_requested.store(true, std::memory_order_release);
+    m_app.request_user_preset_push();
 }
 
 void BblPresetSyncController::tick(const std::weak_ptr<int>& sync_token)
@@ -526,13 +527,21 @@ nlohmann::json BblPresetSyncController::status_json() const
     j["conversions"] = std::move(conversions);
 
     if (wxThread::IsMain() && m_app.preset_bundle != nullptr) {
-        json candidates = json::array(), ineligible = json::array();
+        json candidates = json::array(), ineligible = json::array(), eligible = json::array();
         const sync::LocalSnapshot snap = sync::build_snapshot(*m_app.preset_bundle, has_bambu_id);
         for (const sync::LocalItem& item : snap.items) {
-            json row = {{"type", sync::type_string(item.key.type)}, {"name", item.key.name}, {"reason", item.cls.reason}};
-            if (item.cls.eligibility == sync::Eligibility::Candidate) candidates.push_back(std::move(row));
-            else if (item.cls.eligibility == sync::Eligibility::Ineligible) ineligible.push_back(std::move(row));
+            const std::string shape = item.cls.shape == sync::Shape::Root ? "root" : "child";
+            json              row   = {{"type", sync::type_string(item.key.type)}, {"name", item.key.name}, {"reason", item.cls.reason}};
+            if (item.cls.eligibility == sync::Eligibility::Candidate) {
+                row["shape"] = shape;
+                candidates.push_back(std::move(row));
+            } else if (item.cls.eligibility == sync::Eligibility::Ineligible) {
+                ineligible.push_back(std::move(row));
+            } else {
+                eligible.push_back({{"type", sync::type_string(item.key.type)}, {"name", item.key.name}, {"shape", shape}});
+            }
         }
+        j["eligible"]   = std::move(eligible);
         j["candidates"] = std::move(candidates);
         j["ineligible"] = std::move(ineligible);
     }

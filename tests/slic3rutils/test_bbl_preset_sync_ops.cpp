@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include "slic3r/Utils/BblPresetSync/BodyCheck.hpp"
 #include "slic3r/Utils/BblPresetSync/FilamentId.hpp"
 #include "slic3r/Utils/BblPresetSync/LocalOps.hpp"
 #include "slic3r/Utils/BblPresetSync/Snapshot.hpp"
@@ -14,6 +15,7 @@
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/nowide/fstream.hpp>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <iterator>
@@ -614,4 +616,48 @@ TEST_CASE("convert_filament reuses the id for a second preset with the same base
     REQUIRE(a.outcome.result == OpResult::Applied);
     REQUIRE(b.outcome.result == OpResult::Applied);
     CHECK(a.to_filament_id == b.to_filament_id);
+}
+
+TEST_CASE("apply_pull keeps the intended parent when the new preset sorts first or last among many", "[BblPresetSync]")
+{
+    OpsFixture f;
+    for (const char* name : {"BBL ABS", "BBL ASA", "BBL PC", "BBL TPU", "BBL PVA", "BBL PA"}) {
+        Preset& p     = add_inmemory(f.filaments(), name);
+        p.is_system   = true;
+        p.vendor      = &f.bbl;
+        p.setting_id  = std::string("sys-") + name;
+        p.filament_id = "SYS1";
+    }
+    for (const char* name : {"Mine B", "Mine C", "Mine D", "Mine E", "Mine F", "Mine G"}) f.add_user(f.filaments(), name, "BBL PLA");
+
+    for (const char* target : {"AAA first", "zzz last"}) {
+        DYNAMIC_SECTION(target)
+        {
+            const auto out = sync::apply_pull(f.ctx(), OpsFixture::pull(target, OpsFixture::child_body("BBL PLA", "f1", 61.5)));
+            REQUIRE(out.result == OpResult::Applied);
+
+            const Preset* saved = f.filaments().find_preset(target, false, true);
+            REQUIRE(saved != nullptr);
+            CHECK(saved->inherits() == "BBL PLA");
+            CHECK(saved->filament_id == "SYS1");
+            CHECK(saved->base_id == "f1");
+
+            // The file holds the diff against the intended parent, which is what the upload also sends.
+            Preset copy = *saved;
+            sync::ValueMap diff;
+            REQUIRE(f.bundle.get_differed_values_to_update(copy, diff) == 0);
+            const auto json = nlohmann::json::parse(read_file(saved->file));
+            CHECK(json.at("inherits") == "BBL PLA");
+            CHECK(json.at("filament_cost").at(0) == "61.5");
+            CHECK(json.contains("filament_density") == false);
+            // Everything the file holds is part of that diff (the diff may add nil entries for per-extruder overrides).
+            for (auto it = json.begin(); it != json.end(); ++it) {
+                if (sync::metadata_keys().count(it.key()) || it.key() == "version" || it.key() == "name" || it.key() == "from" ||
+                    it.key() == "filament_settings_id")
+                    continue;
+                INFO(it.key());
+                CHECK(diff.count(it.key()) == 1);
+            }
+        }
+    }
 }

@@ -64,7 +64,6 @@ json run_action(const json& args)
 
     if (action == "sync_now") {
         c.request_sync();
-        wxGetApp().request_user_preset_push();
         return {{"requested", true}};
     }
 

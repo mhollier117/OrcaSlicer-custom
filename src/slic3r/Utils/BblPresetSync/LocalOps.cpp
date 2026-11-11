@@ -143,10 +143,12 @@ OpOutcome apply_pull(const LocalOpsContext& ctx, const PullOp& op)
     if (dirty(collection)) return outcome(OpResult::Postponed, "unsaved edits");
     if (current_hash(ctx, op.key) != op.expected_local_hash) return outcome(OpResult::Postponed, "changed since planning");
 
-    Preset* old_preset = nullptr;
+    // Pointers into the collection do not survive save_current_preset or delete_preset (a deque insert or erase), so only
+    // names are kept across them.
+    bool has_old = false;
     if (op.rename_from_set) {
-        old_preset = find_user_preset(collection, op.rename_from.name);
-        if (old_preset != nullptr) {
+        has_old = find_user_preset(collection, op.rename_from.name) != nullptr;
+        if (has_old) {
             const std::string reason = in_use(ctx, collection, op.rename_from.name);
             if (!reason.empty()) return outcome(OpResult::Postponed, "old preset " + reason);
         }
@@ -172,10 +174,12 @@ OpOutcome apply_pull(const LocalOpsContext& ctx, const PullOp& op)
         return outcome(OpResult::Unresolvable, "parent profile or version not usable");
 
     const bool is_root = value_of(op.body, BBL_JSON_KEY_BASE_ID).empty() && value_of(op.body, BBL_JSON_KEY_INHERITS).empty();
-    Preset* parent = nullptr;
+    std::string parent_name, parent_filament_id;
     if (!is_root) {
-        parent = collection.find_preset2(Preset::inherits(config), true);
+        const Preset* parent = collection.find_preset2(Preset::inherits(config), true);
         if (parent == nullptr) return outcome(OpResult::Unresolvable, "parent profile not found");
+        parent_name        = parent->name;
+        parent_filament_id = parent->filament_id;
     }
     const bool is_filament = op.key.type == PresetType::Filament;
 
@@ -187,26 +191,32 @@ OpOutcome apply_pull(const LocalOpsContext& ctx, const PullOp& op)
     temp.is_system = temp.is_default = false;
     temp.vendor                 = nullptr;
     temp.version                = *version;
-    if (is_filament) temp.filament_id = is_root ? value_of(op.body, BBL_JSON_KEY_FILAMENT_ID) : parent->filament_id;
+    if (is_filament) temp.filament_id = is_root ? value_of(op.body, BBL_JSON_KEY_FILAMENT_ID) : parent_filament_id;
 
     const std::string prev = collection.get_selected_preset_name();
     collection.save_current_preset(op.key.name, /*detach*/ is_root, /*save_to_project*/ false, &temp);
     Preset* saved = collection.find_preset(op.key.name, false, true);
     if (saved == nullptr) return outcome(OpResult::Failed, "could not save");
+    // The save above moved the collection's presets: find the parent again.
+    Preset* parent = nullptr;
+    if (!is_root) {
+        parent = collection.find_preset2(parent_name, true);
+        if (parent == nullptr) return outcome(OpResult::Failed, "parent profile lost");
+    }
 
     if (is_root) {
         if (is_filament) saved->filament_id = value_of(op.body, BBL_JSON_KEY_FILAMENT_ID);
         saved->base_id.clear();
     } else if (is_filament) {
-        saved->filament_id = parent->filament_id;
+        saved->filament_id = parent_filament_id;
     }
     if (saved->setting_id.empty()) saved->sync_info = "create";
     saved->save(parent != nullptr ? &parent->config : nullptr);
 
     if (prev != op.key.name && !prev.empty()) collection.select_preset_by_name(prev, true);
 
-    if (old_preset != nullptr) {
-        // The pointer may be stale after the save; look the old preset up again.
+    if (has_old) {
+        // Look the old preset up again: the saves above moved the collection's presets.
         Preset* old_again = find_user_preset(collection, op.rename_from.name);
         if (old_again != nullptr) {
             const OpOutcome deleted = delete_checked(ctx, collection, *old_again, op.backup_local);
