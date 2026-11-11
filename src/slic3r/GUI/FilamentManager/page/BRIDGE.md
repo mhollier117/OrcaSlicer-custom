@@ -48,7 +48,7 @@ Types are in `features/filament-manager/types.ts`. `R` = response `payload`. Cal
 | colors | query_for_id | `{ fila_id: string }` | `FilamentColorCodesResponse { fila_id; fila_type; candidates: CandidateColor[] }` | HB:359 and `AddEditDialog.tsx:761` |
 | sync | status | `{}` | `CloudSyncState { logged_in; is_syncing; is_pulling; last_synced_at: string; last_error: { code: number; message: string } }` | HB:661 |
 | sync | pull | `{}` | `CloudSyncState` | HB:670 |
-| sync | push_all_now | `{}` | `CloudSyncState` (exported by the hook, no UI calls it after the trim: `StatsView` is gone) | HB:685 |
+| sync | push_all_now | `{}` | `CloudSyncState` (the hook still exports it; the toolbar button that called it is removed in this copy (see `NOTICE.md`), so the page never sends it) | HB:685 |
 | config | fetch | `{ force?: true }` | when `message === 'cached'`: `CloudFilamentConfig` (otherwise ignored; data comes by report `config/fetched`) | HB:703 |
 
 Failed `spool` writes show an error toast. Spool writes that succeed replace the whole list from `R`.

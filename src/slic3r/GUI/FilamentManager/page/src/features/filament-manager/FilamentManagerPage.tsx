@@ -43,7 +43,7 @@ export function FilamentManagerPage() {
     removeSpool, batchRemoveSpool,
     fetchMachines, requestMachinePushall, fetchAmsData,
     fetchPresets,
-    fetchCloudSyncStatus, triggerCloudPull, pushAllNow, fetchCloudFilamentConfig,
+    fetchCloudSyncStatus, triggerCloudPull, fetchCloudFilamentConfig,
   } = useFilamentManagerBridge();
 
   // STUDIO-18110: 进入耗材管理页面时同步刷新所有耗材列表来源——
@@ -314,21 +314,6 @@ export function FilamentManagerPage() {
     ]);
   }, [isLoggedIn, triggerCloudPull, fetchCloudFilamentConfig]);
 
-  // STUDIO-18155：手动"推送本地到云端"按钮的加载态。pushAllNow 入队是同步
-  // 操作（C++ 立即把所有 RFID + total>0 spool 入 dispatcher 队列），所以
-  // loading 时间通常 < 100 ms，但 dispatcher 串行 PUT 会持续若干秒——这里
-  // 仅守住"入队 RPC 往返"这段时间，结果通过 auto_push_summary toast 反馈。
-  const [pushingAll, setPushingAll] = useState(false);
-  const handlePushAllNowClick = useCallback(async () => {
-    if (!isLoggedIn || pushingAll) return;
-    setPushingAll(true);
-    try {
-      await pushAllNow();
-    } finally {
-      setPushingAll(false);
-    }
-  }, [isLoggedIn, pushingAll, pushAllNow]);
-
   // STUDIO-18155：CloudBadge tooltip 显示最近一次 auto-push 摘要。device_state
   // 让用户解释"为啥被节流"（busy=打印中走 10 min cooldown）。
   const autoPushTooltip = useMemo(() => {
@@ -438,31 +423,6 @@ export function FilamentManagerPage() {
                   onPullClick={handleCloudSyncClick}
                   tooltipExtra={autoPushTooltip}
                 />
-                {/* STUDIO-18155: 手动"推送本地到云端"按钮。和"同步"（pull）
-                    分离：pull 是云端→本地，本按钮是本地→云端，绕过 throttle。 */}
-                <button
-                  type="button"
-                  data-testid="filament-push-all"
-                  data-pushing={pushingAll ? 'true' : 'false'}
-                  className={`inline-flex items-center justify-center h-[30px] w-[30px] rounded-lg border border-fm-border-focus/50 bg-fm-inner text-fm-text-secondary transition-colors duration-150 ${(!isLoggedIn || pushingAll) ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer hover:bg-fm-hover'}`}
-                  title={t('Push Local to Cloud')}
-                  aria-label={t('Push Local to Cloud')}
-                  onClick={handlePushAllNowClick}
-                  disabled={!isLoggedIn || pushingAll}
-                >
-                  {pushingAll ? (
-                    <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.3" strokeWidth="2"/>
-                      <path d="M21 12a9 9 0 0 1-9 9" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-                    </svg>
-                  ) : (
-                    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
-                      <path d="M4.5 13.5h9" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
-                      <path d="M9 4v7" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
-                      <path d="M5.5 7.5L9 4l3.5 3.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
-                    </svg>
-                  )}
-                </button>
                 <button
                   type="button"
                   className={`inline-flex items-center justify-center h-[30px] w-[30px] rounded-lg border border-fm-border-focus/50 bg-fm-inner text-fm-text-secondary transition-colors duration-150 ${!isLoggedIn ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer hover:bg-fm-hover'}`}

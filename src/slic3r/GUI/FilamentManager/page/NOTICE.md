@@ -40,6 +40,7 @@ The rest of this repository is AGPL v3 as well. The built bundle in `resources/w
    - `index.html`: removed `<link rel="icon" href="/vite.svg">` (the file was in the removed `public/`).
    - `src/routes/__root.tsx`, `src/routes/index.tsx`, `src/routeTree.gen.ts`: as described above.
    - `src/dev/mockBridge.ts`: removed the device-page branches.
+5. "Push Local to Cloud" toolbar button (`src/features/filament-manager/FilamentManagerPage.tsx`): the button, its `pushingAll` state and its click handler are removed, and `pushAllNow` is no longer taken from the bridge hook there. The button pushes printer-linked spool data, which this build does not support yet; `pushAllNow` stays in `useFilamentManagerBridge.ts`.
 
 ## Updating to a newer Bambu Studio tag
 

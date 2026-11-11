@@ -13,3 +13,6 @@
 
 # OCCT BRep fixtures, kept byte for byte as OCCT wrote them.
 *.brep -text
+
+# The built Filament Manager page, kept byte for byte as the build wrote it.
+resources/web/filament_manager/** -text
