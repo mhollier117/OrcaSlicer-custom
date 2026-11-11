@@ -79,14 +79,18 @@ wxBitmap swatch(const std::vector<wxColour>& colours, int size)
 
 wxString utf8(const std::string& s) { return wxString::FromUTF8(s.c_str()); }
 
-wxString display_name(const fil::Spool& s)
-{
-    if (s.vendor.empty())
-        return utf8(s.name);
-    return utf8(s.vendor + " " + s.name);
-}
-
 } // namespace
+
+std::string spool_display_name(const fil::Spool& spool)
+{
+    if (spool.vendor.empty())
+        return spool.name;
+    const std::string prefix = spool.vendor + " ";
+    bool              starts = spool.name.size() >= prefix.size();
+    for (std::size_t i = 0; starts && i < prefix.size(); ++i)
+        starts = std::tolower(static_cast<unsigned char>(spool.name[i])) == std::tolower(static_cast<unsigned char>(prefix[i]));
+    return starts ? spool.name : prefix + spool.name;
+}
 
 std::vector<wxColour> spool_colours(const fil::Spool& spool)
 {
@@ -211,7 +215,7 @@ void SpoolPicker::fill()
         const fil::Spool& s = m_spools[i];
         if (!matches(s))
             continue;
-        const long row = m_list->InsertItem(static_cast<long>(m_rows.size()), display_name(s), static_cast<int>(i));
+        const long row = m_list->InsertItem(static_cast<long>(m_rows.size()), utf8(spool_display_name(s)), static_cast<int>(i));
         // TRN The remaining and the total weight of a spool, in grams.
         m_list->SetItem(row, 1, wxString::Format(_L("%d of %d g"), static_cast<int>(fil::bounded_grams(s.net_weight)),
                                                  static_cast<int>(fil::bounded_grams(s.total_net_weight))));

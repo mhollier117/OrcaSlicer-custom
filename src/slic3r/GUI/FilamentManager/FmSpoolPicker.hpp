@@ -25,6 +25,10 @@ namespace Slic3r::GUI::Fm {
 // The colours of a spool ("#RRGGBB" or "#RRGGBBAA"); colours that cannot be read are left out.
 std::vector<wxColour> spool_colours(const BblFilament::Spool& spool);
 
+// How the picker and the slot dialog name a spool: the brand and the name, or the name alone when it starts with the brand
+// and a space (case ignored).
+std::string spool_display_name(const BblFilament::Spool& spool);
+
 // Whether a slot can show the spool's colours: one colour, or several on a printer that takes several colours per slot
 // and no more than `max_colours` (what the slot dialog's colour picker edits).
 bool slot_shows_colours(const BblFilament::Spool& spool, bool several_per_slot, std::size_t max_colours);

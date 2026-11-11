@@ -23,8 +23,14 @@ using ToBambuId = std::function<std::string(const std::string& preset_filament_i
 // {"vendors":[{"name":V,"types":[{"name":T,"series":[names...],"items":[{"name":N,"series":N,"filament_id":B,("is_user":true)}]}]}]}
 json preset_tree(PresetCollection& filaments, const ToBambuId& to_bambu);
 
+// The series the page stores for a spool made from a preset with this display name (normalizePresetFilamentName of the
+// page): the name without a trailing " @..." part and without the vendor in front ("Generic PETG" of Generic -> "PETG";
+// "Bambu" stands for "Bambu Lab"); the type and the name as the page formats them when nothing is left.
+std::string series_for_preset_name(const std::string& name, const std::string& vendor, const std::string& type);
+
 // The page-shaped spool for a filament preset, or null when Bambu does not know the filament's id. The preset is the
-// first one with that filament id that preset_tree() offers. `colors` counts only with more than one colour.
+// first one with that filament id that preset_tree() offers. Its series is series_for_preset_name() and its colours are
+// "#RRGGBB" in upper case, as the page writes a tray's. `colors` counts only with more than one colour.
 json page_spool_for_filament(PresetCollection& filaments, const std::string& preset_filament_id, const ToBambuId& to_bambu,
                              const std::string& color, const std::vector<std::string>& colors, int color_type);
 

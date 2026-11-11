@@ -3,6 +3,8 @@
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
+#include <cctype>
+#include <cstddef>
 #include <map>
 #include <optional>
 #include <set>
@@ -50,7 +52,79 @@ std::optional<Offered> offered(PresetCollection& filaments, Preset& preset, cons
     return o;
 }
 
+std::string trimmed(const std::string& s)
+{
+    std::size_t b = 0, e = s.size();
+    while (b < e && std::isspace(static_cast<unsigned char>(s[b])))
+        ++b;
+    while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1])))
+        --e;
+    return s.substr(b, e - b);
+}
+
+bool starts_with(const std::string& s, const std::string& prefix) { return s.compare(0, prefix.size(), prefix) == 0; }
+
+// formatTypeSeries of the page.
+std::string format_type_series(const std::string& type, const std::string& series)
+{
+    const std::string t = trimmed(type), s = trimmed(series);
+    if (t.empty())
+        return s;
+    if (s.empty() || s == t)
+        return t;
+    if (starts_with(s, t + " "))
+        return s;
+    return trimmed(t + " " + s);
+}
+
+// The colour as the page writes a tray's (canonicalizeHex): "#RRGGBB" in upper case, or "" when it is not valid.
+std::string page_hex(const std::string& colour)
+{
+    const std::string hex = ColorCodes::normalize_hex(colour);
+    return hex.empty() ? hex : hex.substr(0, 7);
+}
+
 } // namespace
+
+std::string series_for_preset_name(const std::string& name, const std::string& vendor, const std::string& type)
+{
+    std::string value = trimmed(name);
+    // Without a trailing " @..." part: from the first run of spaces followed by '@'.
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        if (!std::isspace(static_cast<unsigned char>(value[i])))
+            continue;
+        std::size_t j = i;
+        while (j < value.size() && std::isspace(static_cast<unsigned char>(value[j])))
+            ++j;
+        if (j < value.size() && value[j] == '@') {
+            value.erase(i);
+            break;
+        }
+        i = j - 1;
+    }
+    const std::string fallback = format_type_series(type, name); // the page's series is the same name
+    if (value.empty())
+        return fallback;
+
+    std::string compact;
+    for (char c : vendor)
+        if (!std::isspace(static_cast<unsigned char>(c)))
+            compact.push_back(c);
+    std::vector<std::string> aliases{vendor, compact};
+    if (vendor == "Bambu Lab")
+        aliases.emplace_back("Bambu");
+    for (const std::string& alias : aliases) {
+        if (alias.empty())
+            continue;
+        if (value == alias)
+            return fallback;
+        if (starts_with(value, alias + " ")) {
+            value = trimmed(value.substr(alias.size() + 1));
+            break;
+        }
+    }
+    return value.empty() ? fallback : value;
+}
 
 json preset_tree(PresetCollection& filaments, const ToBambuId& to_bambu)
 {
@@ -93,13 +167,13 @@ json page_spool_for_filament(PresetCollection& filaments, const std::string& pre
 {
     if (preset_filament_id.empty())
         return nullptr;
-    const std::string color_code = ColorCodes::normalize_hex(color);
+    const std::string color_code = page_hex(color);
     if (color_code.empty())
         return nullptr;
     std::vector<std::string> list;
     if (colors.size() > 1) {
         for (const std::string& c : colors) {
-            const std::string hex = ColorCodes::normalize_hex(c);
+            const std::string hex = page_hex(c);
             if (hex.empty())
                 return nullptr;
             list.push_back(hex);
@@ -113,7 +187,7 @@ json page_spool_for_filament(PresetCollection& filaments, const std::string& pre
             continue;
         json spool = {{"brand", o->vendor},
                       {"material_type", o->type},
-                      {"series", o->name},
+                      {"series", series_for_preset_name(o->name, o->vendor, o->type)},
                       {"setting_id", o->bid},
                       {"color_code", color_code},
                       {"color_type", list.empty() ? 2 : BblFilament::normalize_color_type(color_type, list.size())},

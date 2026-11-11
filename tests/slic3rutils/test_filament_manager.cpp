@@ -484,9 +484,9 @@ TEST_CASE("The page spool of a mapped system preset carries its Bambu id, names 
     REQUIRE(s.is_object());
     CHECK(s["brand"] == "Bambu Lab");
     CHECK(s["material_type"] == "PLA");
-    CHECK(s["series"] == "Bambu PLA Basic");
+    CHECK(s["series"] == "PLA Basic"); // as the page names it: without the brand
     CHECK(s["setting_id"] == "GFA00");
-    CHECK(s["color_code"] == "#FF6A13FF");
+    CHECK(s["color_code"] == "#FF6A13"); // as the page writes a tray's colour
     CHECK_FALSE(s.contains("colors"));
     CHECK(s["color_type"] == 2);
     CHECK(s["initial_weight"] == 1000);
@@ -502,9 +502,9 @@ TEST_CASE("The page spool keeps several colours and their colour type, and one c
     add_filament(*c, {"Bambu PLA Basic", "OFAAA", "Bambu Lab", "PLA"});
     const json multi = fm::page_spool_for_filament(*c, "OFAAA", test_to_bambu(), "FF0000FF", {"FF0000FF", "#00ff00"}, 0);
     REQUIRE(multi.is_object());
-    CHECK(multi["colors"] == json::array({"#FF0000FF", "#00FF00FF"}));
+    CHECK(multi["colors"] == json::array({"#FF0000", "#00FF00"}));
     CHECK(multi["color_type"] == 0);
-    CHECK(multi["color_code"] == "#FF0000FF");
+    CHECK(multi["color_code"] == "#FF0000");
     const json one = fm::page_spool_for_filament(*c, "OFAAA", test_to_bambu(), "FF0000FF", {"FF0000FF"}, 0);
     REQUIRE(one.is_object());
     CHECK_FALSE(one.contains("colors"));
@@ -544,7 +544,48 @@ TEST_CASE("The page spool skips a system child and finds the root preset", "[Fil
     add_filament(*c, {"Bambu PLA Basic", "OFAAA", "Bambu Lab", "PLA"});
     const json s = fm::page_spool_for_filament(*c, "OFAAA", test_to_bambu(), "#FFFFFFFF", {}, 2);
     REQUIRE(s.is_object());
-    CHECK(s["series"] == "Bambu PLA Basic");
+    CHECK(s["series"] == "PLA Basic");
+}
+
+TEST_CASE("The page spool of a generic preset is named and coloured as the page names a tray's", "[FilamentManager]")
+{
+    auto c = make_filament_collection();
+    add_filament(*c, {"Generic PETG", "OFAAA", "Generic", "PETG"});
+    const json s = fm::page_spool_for_filament(*c, "OFAAA", test_to_bambu(), "#898989FF", {}, 2);
+    REQUIRE(s.is_object());
+    CHECK(s["brand"] == "Generic");
+    CHECK(s["material_type"] == "PETG");
+    CHECK(s["series"] == "PETG");
+    CHECK(s["color_code"] == "#898989");
+}
+
+TEST_CASE("The series of a spool made from a preset follows the page's rule", "[FilamentManager]")
+{
+    CHECK(fm::series_for_preset_name("Generic PETG", "Generic", "PETG") == "PETG");
+    CHECK(fm::series_for_preset_name("Bambu PLA Basic", "Bambu Lab", "PLA") == "PLA Basic");
+    CHECK(fm::series_for_preset_name("Overture PETG High Speed Tuned @BBL H2D 0.4 nozzle", "Overture", "PETG") == "PETG High Speed Tuned");
+    CHECK(fm::series_for_preset_name("Generic", "Generic", "PLA") == "PLA Generic"); // formatTypeSeries(type, name)
+    CHECK(fm::series_for_preset_name("PLA", "PLA", "PLA") == "PLA");
+    CHECK(fm::series_for_preset_name("PolyLite PLA", "Polymaker", "PLA") == "PolyLite PLA");
+    CHECK(fm::series_for_preset_name("  eSUN PLA+  ", "eSUN", "PLA") == "PLA+");
+    CHECK(fm::series_for_preset_name("", "Generic", "PLA") == "PLA");
+}
+
+TEST_CASE("A spool's name does not repeat its brand", "[FilamentManager]")
+{
+    fil::Spool s;
+    s.vendor = "Generic";
+    s.name   = "Generic PETG";
+    CHECK(fm::spool_display_name(s) == "Generic PETG");
+    s.name = "PETG";
+    CHECK(fm::spool_display_name(s) == "Generic PETG");
+    s.name = "generic PETG"; // case ignored
+    CHECK(fm::spool_display_name(s) == "generic PETG");
+    s.name = "GenericPETG"; // only the brand followed by a space
+    CHECK(fm::spool_display_name(s) == "Generic GenericPETG");
+    s.vendor = "";
+    s.name   = "PETG";
+    CHECK(fm::spool_display_name(s) == "PETG");
 }
 
 TEST_CASE("The filament lookup answers by Bambu id", "[FilamentManager]")

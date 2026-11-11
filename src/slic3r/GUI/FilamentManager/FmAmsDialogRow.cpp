@@ -49,10 +49,7 @@ std::string to_orca_id(const std::string& bambu_id)
     return agent != nullptr ? agent->to_orca_filament_id(bambu_id) : bambu_id;
 }
 
-wxString spool_label(const fil::Spool& s)
-{
-    return wxString::FromUTF8(s.vendor.empty() ? s.name : s.vendor + " " + s.name);
-}
+wxString spool_label(const fil::Spool& s) { return wxString::FromUTF8(spool_display_name(s)); }
 
 int grams_left(const fil::Spool& s) { return static_cast<int>(fil::bounded_grams(s.net_weight)); }
 
