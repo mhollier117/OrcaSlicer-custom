@@ -953,6 +953,9 @@ set(SLIC3R_GUI_SOURCES
     Utils/BblPresetSync/Types.hpp
     Utils/BblFilament/PluginGate.cpp
     Utils/BblFilament/PluginGate.hpp
+    Utils/BblFilament/PluginLinkStructs.hpp
+    Utils/BblFilament/PrinterTap.cpp
+    Utils/BblFilament/PrinterTap.hpp
     Utils/BblFilament/Spool.cpp
     Utils/BblFilament/Spool.hpp
     Utils/BblFilament/SpoolCloud.cpp
