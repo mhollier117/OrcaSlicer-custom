@@ -127,8 +127,8 @@ public:
         return ok(config_body);
     }
 
-    // The link calls. They record what they got; `apply_mounts` makes sync_slots / sync_ams change the rows, so that a
-    // following list shows the mount.
+    // The link calls. They record what they got; `apply_mounts` makes sync_slots / sync_ams change the rows (an ams sync
+    // also sets the weight it sent), so that a following list shows the mount.
     std::vector<std::vector<fil::AmsItem>>  ams_got;
     std::vector<std::vector<fil::SlotItem>> slots_got;
     std::vector<std::string>                actions_got; // "action spool target"
@@ -146,7 +146,10 @@ public:
             for (json& row : rows) {
                 if (!it.rfid.empty() && row.value("RFID", std::string()) == it.rfid) {
                     r["spoolId"] = row["id"];
-                    if (apply_mounts) mount(row, dev_id, it.ams_sn, it.slot_id, it.ams_id, it.ams_type);
+                    if (apply_mounts) {
+                        mount(row, dev_id, it.ams_sn, it.slot_id, it.ams_id, it.ams_type);
+                        row["netWeight"] = it.net_weight;
+                    }
                 }
             }
             results.push_back(r);

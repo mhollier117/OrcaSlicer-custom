@@ -951,6 +951,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/BblPresetSync/Snapshot.cpp
     Utils/BblPresetSync/Snapshot.hpp
     Utils/BblPresetSync/Types.hpp
+    Utils/BblFilament/LinkDriver.cpp
+    Utils/BblFilament/LinkDriver.hpp
     Utils/BblFilament/Linker.cpp
     Utils/BblFilament/Linker.hpp
     Utils/BblFilament/PluginGate.cpp

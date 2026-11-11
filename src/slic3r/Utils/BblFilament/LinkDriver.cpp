@@ -1,0 +1,449 @@
+#include "LinkDriver.hpp"
+
+#include "PrinterTap.hpp"
+#include "SpoolCloud.hpp"
+
+#include <algorithm>
+#include <cstddef>
+#include <map>
+#include <memory>
+#include <optional>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace Slic3r::BblFilament {
+
+namespace {
+
+using LinkRequest = SpoolService::LinkRequest;
+using LinkOutcome = SpoolService::LinkOutcome;
+
+const Spool* find_row(const std::vector<Spool>& rows, const std::string& id)
+{
+    for (const Spool& r : rows)
+        if (r.id == id) return &r;
+    return nullptr;
+}
+
+bool claims_slot(const Spool& r, const SlotKey& k)
+{
+    return r.in_printer && r.dev_id == k.dev_id && r.ams_id == k.ams_id && r.slot_id == k.slot_id;
+}
+
+const char* mode_text(LinkMode m)
+{
+    switch (m) {
+    case LinkMode::Off: return "off";
+    case LinkMode::DryRun: return "dry_run";
+    default: return "on";
+    }
+}
+
+const char* fail_text(FailKind k)
+{
+    switch (k) {
+    case FailKind::NotSignedIn: return "not_signed_in";
+    case FailKind::Unavailable: return "unavailable";
+    case FailKind::BadRequest: return "bad_request";
+    case FailKind::NotFound: return "not_found";
+    case FailKind::Rejected: return "rejected";
+    default: return "unknown";
+    }
+}
+
+// One item of an ams sync of a round: an RFID mount or a weight.
+struct AmsEntry
+{
+    std::string              spool_id, rfid, ams_sn, slot_id;
+    int                      ams_id{0}, ams_type{0};
+    std::optional<long long> grams;
+};
+
+// One item of a slot sync of a round: a manual bind or an unbind.
+struct SlotEntry
+{
+    bool        bind{false};
+    std::string spool_id, ams_sn;
+    SlotKey     slot;
+    int         ams_type{0};
+};
+
+} // namespace
+
+LinkDriver::LinkDriver(LinkDriverDeps deps) : deps_(std::move(deps)) {}
+
+long long LinkDriver::now() const { return deps_.now ? deps_.now() : 0; }
+
+bool LinkDriver::waiting_for_list() const
+{
+    return have_round_ && deps_.service != nullptr && deps_.service->list_serial() <= round_end_serial_;
+}
+
+void LinkDriver::tick(const std::vector<PrinterView>& printers)
+{
+    if (config.mode == LinkMode::Off) return;
+    SpoolService* svc = deps_.service;
+    if (svc == nullptr || !svc->state().signed_in || round_in_flight_) return;
+    const long long t = now();
+    if (waiting_for_list()) {
+        // The pull the last round asked for has not brought a list (it failed, or was dropped): ask again now and then.
+        if (!svc->state().is_syncing && t - pull_asked_at_ >= k_pull_retry_seconds) {
+            pull_asked_at_ = t;
+            svc->request_pull();
+        }
+        return;
+    }
+    if (have_round_ && !skip_spacing_ && t - round_ended_at_ < k_round_spacing_seconds) return;
+    skip_spacing_ = false;
+
+    last_plan_ = plan_links(printers, svc->confirmed(), svc->busy_ids(), svc->list_serial(), state_, config, t);
+    if (last_plan_.want_pull) {
+        std::weak_ptr<int> weak = alive_;
+        svc->request_pull();
+        if (weak.expired()) return;
+    }
+    if (config.mode != LinkMode::On || !last_plan_.has_actions()) return;
+    start_round(printers);
+}
+
+void LinkDriver::start_round(const std::vector<PrinterView>& printers)
+{
+    SpoolService&             svc  = *deps_.service;
+    const std::vector<Spool>& rows = svc.confirmed();
+
+    std::map<std::string, std::vector<AmsEntry>>        ams;
+    std::map<std::string, std::vector<SlotEntry>>       slots;
+    std::map<std::string, std::vector<PlannedRegister>> regs;
+    std::set<std::string>                               devs;
+    for (const PlannedMount& m : last_plan_.mounts) {
+        const Spool* row = find_row(rows, m.spool_id);
+        if (row == nullptr) continue;
+        devs.insert(m.slot.dev_id);
+        if (m.rfid) ams[m.slot.dev_id].push_back(AmsEntry{m.spool_id, row->rfid, m.ams_sn, m.slot.slot_id, m.slot.ams_id, m.ams_type, m.grams});
+        else slots[m.slot.dev_id].push_back(SlotEntry{true, m.spool_id, m.ams_sn, m.slot, m.ams_type});
+    }
+    for (const PlannedWeight& w : last_plan_.weights) {
+        const Spool* row = find_row(rows, w.spool_id);
+        if (row == nullptr) continue;
+        devs.insert(w.slot.dev_id);
+        ams[w.slot.dev_id].push_back(AmsEntry{w.spool_id, row->rfid, w.ams_sn, w.slot.slot_id, w.slot.ams_id, w.ams_type, w.grams});
+    }
+    for (const PlannedUnbind& u : last_plan_.unbinds) {
+        devs.insert(u.slot.dev_id);
+        slots[u.slot.dev_id].push_back(SlotEntry{false, u.spool_id, u.ams_sn, u.slot, u.ams_type});
+    }
+    for (const PlannedRegister& r : last_plan_.registrations) {
+        devs.insert(r.slot.dev_id);
+        regs[r.slot.dev_id].push_back(r);
+    }
+
+    std::map<std::string, bool> printer_busy;
+    for (const PrinterView& p : printers) printer_busy[p.dev_id] = p.busy;
+
+    ++round_;
+    const unsigned long long round = round_;
+    const unsigned long long gen   = generation_;
+    std::weak_ptr<int>       weak  = alive_;
+
+    std::vector<std::pair<LinkRequest, std::string>> requests;
+    for (const std::string& dev : devs) {
+        if (auto it = ams.find(dev); it != ams.end()) {
+            const std::vector<AmsEntry> entries  = it->second;
+            const bool                  busy     = printer_busy[dev];
+            const auto                  skip     = last_plan_.skipped_cooldown.find(dev);
+            const int                   skipped  = skip == last_plan_.skipped_cooldown.end() ? 0 : skip->second;
+            auto                        measured = std::make_shared<std::map<std::string, long long>>(); // RFID -> grams sent
+            LinkRequest                 req;
+            req.kind      = LinkRequest::Kind::AmsSync;
+            req.dev_id    = dev;
+            req.build_ams = [entries, measured](const std::vector<Spool>& now_rows, const std::set<std::string>& busy_ids) {
+                std::vector<AmsItem> items;
+                measured->clear();
+                for (const AmsEntry& e : entries) {
+                    const Spool* row = find_row(now_rows, e.spool_id);
+                    if (row == nullptr || busy_ids.count(e.spool_id) > 0 || row->rfid != e.rfid) continue;
+                    items.push_back(ams_item_from_row(*row, e.ams_sn, e.ams_id, e.ams_type, e.slot_id, e.grams));
+                    if (e.grams) (*measured)[e.rfid] = *e.grams;
+                }
+                return items;
+            };
+            req.done = [this, weak, gen, round, measured, busy, skipped](const LinkOutcome& out) {
+                if (weak.expired() || gen != generation_) return;
+                int pushed = 0;
+                if (out.ok) {
+                    for (const AmsItem& i : out.ams_sent) {
+                        auto m = measured->find(i.rfid);
+                        if (m == measured->end()) continue;
+                        state_.pushed[i.rfid] = LinkerState::Push{now(), m->second};
+                        ++pushed;
+                    }
+                }
+                op_finished(round, OpRecord{"ams", out.ok, out.kind, static_cast<int>(out.ams_sent.size())});
+                if (weak.expired() || pushed == 0 || !on_auto_push) return;
+                const auto callback = on_auto_push;
+                callback(AutoPushSummary{pushed, skipped, busy});
+            };
+            requests.emplace_back(std::move(req), "ams");
+        }
+        if (auto it = regs.find(dev); it != regs.end()) {
+            for (const PlannedRegister& r : it->second) {
+                const TrayFacts      tray   = r.tray;
+                const std::string    ams_sn = r.ams_sn;
+                const SlotKey        slot   = r.slot;
+                const FilamentLookup lookup = deps_.lookup;
+                LinkRequest          req;
+                req.kind      = LinkRequest::Kind::AmsSync;
+                req.dev_id    = dev;
+                req.build_ams = [tray, ams_sn, lookup](const std::vector<Spool>& now_rows, const std::set<std::string>&) {
+                    for (const Spool& row : now_rows)
+                        if (row.rfid == tray.uuid) return std::vector<AmsItem>(); // the account has it by now
+                    return std::vector<AmsItem>{ams_item_from_tray(tray, ams_sn, lookup)};
+                };
+                const std::string rfid = tray.uuid;
+                req.done = [this, weak, gen, round, slot, rfid](const LinkOutcome& out) {
+                    if (weak.expired() || gen != generation_) return;
+                    // Dropped by the builder because the account has the spool by now: no attempt, the next plan matches it.
+                    const bool dropped = !out.sent && out.kind == FailKind::BadRequest && out.ams_sent.empty();
+                    if (out.ok) {
+                        state_.registrations[rfid].done = true;
+                    } else if (!dropped) {
+                        LinkerState::Registration& reg = state_.registrations[rfid];
+                        ++reg.attempts;
+                        reg.next_at = now() + std::min<long long>(60LL << std::min(reg.attempts, 6), 3600);
+                    }
+                    op_finished(round, OpRecord{"register", out.ok, out.kind, static_cast<int>(out.ams_sent.size())});
+                    if (weak.expired() || !out.ok || !on_registered) return;
+                    const auto callback = on_registered;
+                    callback(slot, rfid);
+                };
+                requests.emplace_back(std::move(req), "register");
+            }
+        }
+        if (auto it = slots.find(dev); it != slots.end()) {
+            const std::vector<SlotEntry> entries = it->second;
+            LinkRequest                  req;
+            req.kind        = LinkRequest::Kind::SlotSync;
+            req.dev_id      = dev;
+            req.build_slots = [entries](const std::vector<Spool>& now_rows, const std::set<std::string>& busy_ids) {
+                std::vector<SlotItem> items;
+                for (const SlotEntry& e : entries) {
+                    const Spool* row = find_row(now_rows, e.spool_id);
+                    if (row == nullptr || busy_ids.count(e.spool_id) > 0) continue;
+                    if (e.bind) {
+                        if (!row->rfid.empty()) continue; // an RFID spool is mounted by an ams sync
+                        items.push_back(slot_bind(e.ams_sn, e.slot.ams_id, e.ams_type, e.slot.slot_id, *row));
+                    } else if (claims_slot(*row, e.slot)) {
+                        items.push_back(slot_unbind(e.ams_sn, e.slot.ams_id, e.ams_type, e.slot.slot_id));
+                    }
+                }
+                return items;
+            };
+            req.done = [this, weak, gen, round, dev](const LinkOutcome& out) {
+                if (weak.expired() || gen != generation_) return;
+                if (out.ok) record_refusals(dev, out);
+                op_finished(round, OpRecord{"slots", out.ok, out.kind, static_cast<int>(out.slots_sent.size())});
+            };
+            requests.emplace_back(std::move(req), "slots");
+        }
+    }
+    if (requests.empty()) return;
+
+    round_in_flight_ = true;
+    round_pending_   = static_cast<int>(requests.size());
+    round_ops_.clear();
+    for (auto& [req, kind] : requests) {
+        const Accept a = svc.link(std::move(req));
+        if (weak.expired() || round != round_) return; // destroyed or reset meanwhile
+        if (!a.ok) op_finished(round, OpRecord{kind, false, a.kind, 0}); // refused: `done` is not called
+    }
+}
+
+void LinkDriver::op_finished(unsigned long long round, const OpRecord& record)
+{
+    if (round != round_ || !round_in_flight_) return;
+    round_ops_.push_back(record);
+    if (--round_pending_ > 0) return;
+    round_in_flight_ = false;
+    have_round_      = true;
+    round_ended_at_  = now();
+    pull_asked_at_   = round_ended_at_;
+    last_round_ops_  = std::move(round_ops_);
+    round_ops_.clear();
+    round_end_serial_ = deps_.service->list_serial();
+    deps_.service->request_pull(); // a no-op when a successful op already wants one
+}
+
+void LinkDriver::record_refusals(const std::string& dev_id, const LinkOutcome& out)
+{
+    for (const SlotResult& r : parse_slot_results(out.body)) {
+        if (r.code == 0) continue;
+        for (const SlotItem& i : out.slots_sent) {
+            if (i.ams_sn != r.ams_sn || i.slot_id != r.slot_id) continue;
+            state_.refused[SlotKey{dev_id, i.ams_id, i.slot_id}.text() + "|" + i.spool_id] = LinkerState::Refusal{now() + k_refusal_seconds, r.code};
+        }
+    }
+}
+
+void LinkDriver::assign(const Assignment& a)
+{
+    Assignment copy = a;
+    if (copy.created_at == 0) copy.created_at = now();
+    state_.assignments[copy.slot] = copy;
+}
+
+Accept LinkDriver::unassign(const SlotKey& slot, const std::vector<PrinterView>& printers)
+{
+    SpoolService* svc = deps_.service;
+    if (svc == nullptr) return {false, FailKind::Unavailable};
+    const Spool* row = nullptr;
+    for (const Spool& r : svc->confirmed())
+        if (claims_slot(r, slot)) {
+            row = &r;
+            break;
+        }
+    if (row == nullptr || !row->rfid.empty()) return {false, FailKind::BadRequest}; // the printer decides where an RFID spool is
+
+    std::string ams_sn   = row->ams_sn;
+    int         ams_type = row->ams_type;
+    for (const PrinterView& p : printers) {
+        if (p.dev_id != slot.dev_id) continue;
+        if (ams_sn.empty())
+            if (auto it = p.ams_sn.find(slot.ams_id); it != p.ams_sn.end()) ams_sn = it->second;
+        if (ams_type < 0)
+            for (const TrayFacts& t : p.trays)
+                if (t.ams_id == slot.ams_id) {
+                    ams_type = t.ams_type;
+                    break;
+                }
+    }
+    if (ams_sn.empty() || ams_type < 0) return {false, FailKind::BadRequest};
+
+    state_.assignments.erase(slot);
+    const std::string spool_id = row->id;
+    LinkRequest       req;
+    req.kind        = LinkRequest::Kind::SlotSync;
+    req.dev_id      = slot.dev_id;
+    req.build_slots = [slot, spool_id, ams_sn, ams_type](const std::vector<Spool>& now_rows, const std::set<std::string>&) {
+        const Spool* r = find_row(now_rows, spool_id);
+        if (r == nullptr || !claims_slot(*r, slot)) return std::vector<SlotItem>();
+        return std::vector<SlotItem>{slot_unbind(ams_sn, slot.ams_id, ams_type, slot.slot_id)};
+    };
+    std::weak_ptr<int>       weak = alive_;
+    const unsigned long long gen  = generation_;
+    const std::string        dev  = slot.dev_id;
+    req.done = [this, weak, gen, dev](const LinkOutcome& out) {
+        if (weak.expired() || gen != generation_) return;
+        if (out.ok) record_refusals(dev, out);
+    };
+    return svc->link(std::move(req));
+}
+
+void LinkDriver::sync_now()
+{
+    skip_spacing_ = true;
+    state_.pushed.clear();
+}
+
+void LinkDriver::reset()
+{
+    ++generation_;
+    ++round_;
+    state_           = LinkerState{};
+    last_plan_       = LinkPlan{};
+    round_in_flight_ = false;
+    round_pending_   = 0;
+    have_round_      = false;
+    round_ended_at_  = 0;
+    round_end_serial_ = 0;
+    pull_asked_at_   = 0;
+    skip_spacing_    = false;
+    round_ops_.clear();
+    last_round_ops_.clear();
+}
+
+json LinkDriver::status_json(const std::vector<PrinterView>& printers) const
+{
+    // A dev id is the printer's serial number: printers are named, never identified by it.
+    std::map<std::string, std::string> names;
+    for (const PrinterView& p : printers) names[p.dev_id] = p.name;
+    const auto label = [&](const std::string& dev) {
+        auto it = names.find(dev);
+        return it == names.end() ? std::string("?") : it->second;
+    };
+    const auto where = [&](const SlotKey& k) { return label(k.dev_id) + " AMS " + std::to_string(k.ams_id) + " slot " + k.slot_id; };
+
+    json j                = json::object();
+    j["mode"]             = mode_text(config.mode);
+    json only             = json::array();
+    for (const std::string& text : config.only_slots) {
+        const auto b = text.rfind(':');
+        const auto a = b == std::string::npos || b == 0 ? std::string::npos : text.rfind(':', b - 1);
+        if (a == std::string::npos) continue;
+        only.push_back(label(text.substr(0, a)) + text.substr(a));
+    }
+    j["only_slots"]       = only;
+    j["round_in_flight"]  = round_in_flight_;
+    j["waiting_for_list"] = waiting_for_list();
+
+    json ps = json::array();
+    for (const PrinterView& p : printers) {
+        json trays = json::array();
+        for (const TrayReport& t : last_plan_.trays) {
+            if (t.slot.dev_id != p.dev_id) continue;
+            auto sn = p.ams_sn.find(t.slot.ams_id);
+            trays.push_back(json{{"ams_id", t.slot.ams_id},
+                                 {"slot_id", t.slot.slot_id},
+                                 {"occupied", t.occupied},
+                                 {"rule", t.rule},
+                                 {"spool_id", t.spool_id},
+                                 {"note", t.note},
+                                 {"has_serial", sn != p.ams_sn.end() && !sn->second.empty()}});
+        }
+        ps.push_back(json{{"name", p.name},
+                          {"takes_part", takes_part(p)},
+                          {"fresh", p.fresh},
+                          {"busy", p.busy},
+                          {"selected", p.selected},
+                          {"lan_only", p.lan_only},
+                          {"observations", p.observations},
+                          {"trays", trays}});
+    }
+    j["printers"] = ps;
+    j["planned"]  = json{{"mounts", last_plan_.mounts.size()},
+                        {"weights", last_plan_.weights.size()},
+                        {"unbinds", last_plan_.unbinds.size()},
+                        {"registrations", last_plan_.registrations.size()}};
+
+    json lines = json::array();
+    for (const PlannedMount& m : last_plan_.mounts)
+        lines.push_back("mount " + where(m.slot) + " spool " + m.spool_id + (m.grams ? " " + std::to_string(*m.grams) + " g" : std::string()));
+    for (const PlannedWeight& w : last_plan_.weights)
+        lines.push_back("weight " + where(w.slot) + " spool " + w.spool_id + " " + std::to_string(w.grams) + " g");
+    for (const PlannedUnbind& u : last_plan_.unbinds) lines.push_back("unbind " + where(u.slot) + " spool " + u.spool_id);
+    for (const PlannedRegister& r : last_plan_.registrations) {
+        const auto g = measured_grams(r.tray, Spool{});
+        lines.push_back("register " + where(r.slot) + " new spool" + (g ? " " + std::to_string(*g) + " g" : std::string()));
+    }
+    j["plan"]  = lines;
+    j["notes"] = last_plan_.notes;
+
+    const long long t       = now();
+    json            assigns = json::array();
+    for (const auto& [key, a] : state_.assignments)
+        assigns.push_back(json{{"ams_id", key.ams_id}, {"slot_id", key.slot_id}, {"spool_id", a.spool_id}, {"age_s", t - a.created_at}});
+    j["assignments"] = assigns;
+
+    if (have_round_) {
+        json ops = json::array();
+        for (const OpRecord& o : last_round_ops_)
+            ops.push_back(json{{"kind", o.kind}, {"ok", o.ok}, {"fail_kind", o.ok ? "" : fail_text(o.fail_kind)}, {"items", o.items}});
+        j["last_round"] = json{{"at", round_ended_at_}, {"ops", ops}};
+    } else {
+        j["last_round"] = nullptr;
+    }
+    return j;
+}
+
+} // namespace Slic3r::BblFilament

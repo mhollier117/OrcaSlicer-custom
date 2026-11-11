@@ -1,14 +1,20 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
+#include "slic3r/Utils/BblFilament/LinkDriver.hpp"
 #include "slic3r/Utils/BblFilament/Linker.hpp"
 #include "slic3r/Utils/BblFilament/Spool.hpp"
+#include "slic3r/Utils/BblFilament/SpoolCloud.hpp"
+#include "slic3r/Utils/BblFilament/SpoolService.hpp"
 
 #include "bbl_filament_test_utils.hpp"
 
-#include <set>
+#include <nlohmann/json.hpp>
+
 #include <functional>
+#include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -948,4 +954,366 @@ TEST_CASE("Slot keys compare device then AMS then slot", "[BblFilament]")
     CHECK(k < (fil::SlotKey{"dev2", 0, "0"}));
     CHECK(k < (fil::SlotKey{"dev1", 2, "0"}));
     CHECK(k < (fil::SlotKey{"dev1", 1, "3"}));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// the driver: rounds through a real spool service, the fake cloud and the manual runner
+
+namespace {
+
+json rfid_row(long long id, const std::string& rfid)
+{
+    json r    = row_with(id);
+    r["RFID"] = rfid;
+    return r;
+}
+
+json mounted_json(json r, const std::string& dev, const std::string& sn, int ams_id, const std::string& slot, int ams_type = 1)
+{
+    FakeCloud::mount(r, dev, sn, slot, ams_id, ams_type);
+    return r;
+}
+
+struct DriverRig
+{
+    Rig                              rig;
+    long long                        t{5000};
+    std::unique_ptr<fil::LinkDriver> driver;
+    std::vector<fil::AutoPushSummary> pushes;
+    std::vector<std::string>          registered;
+
+    DriverRig()
+    {
+        fil::LinkDriverDeps deps;
+        deps.service = rig.svc.get();
+        deps.now     = [this] { return t; };
+        driver       = std::make_unique<fil::LinkDriver>(std::move(deps));
+        driver->on_auto_push  = [this](const fil::AutoPushSummary& s) { pushes.push_back(s); };
+        driver->on_registered = [this](const fil::SlotKey& k, const std::string& rfid) { registered.push_back(k.text() + " " + rfid); };
+    }
+    void load() // the first list, then a clean log
+    {
+        rig.svc->request_pull();
+        rig.settle();
+        rig.cloud->log.clear();
+    }
+    void run(const std::vector<fil::PrinterView>& printers)
+    {
+        driver->tick(printers);
+        rig.settle();
+    }
+    int count(const std::string& prefix) const { return rig.cloud->count(prefix); }
+};
+
+} // namespace
+
+TEST_CASE("A dry run plans and sends nothing", "[BblFilament]")
+{
+    DriverRig d;
+    d.rig.cloud->rows.push_back(rfid_row(1000001, "UUID1"));
+    d.load();
+    d.driver->config.mode = fil::LinkMode::DryRun;
+    d.run({with_tray(make_printer(), make_rfid_tray("0", "UUID1"))});
+    CHECK(d.driver->last_plan().mounts.size() == 1);
+    CHECK(d.rig.cloud->log.empty());
+}
+
+TEST_CASE("A round sends the RFID mount and the manual bind, then one pull, and nothing once the list shows them", "[BblFilament]")
+{
+    DriverRig d;
+    d.rig.cloud->rows.push_back(rfid_row(1000001, "UUID1"));
+    d.rig.cloud->rows.push_back(row_with(1000002));
+    d.rig.cloud->apply_mounts = true;
+    d.load();
+    auto p = make_printer();
+    p.trays.push_back(make_rfid_tray("0", "UUID1")); // 50 % of 1000 g
+    p.trays.push_back(make_tray("1"));
+    d.driver->assign(make_assignment("dev1", "1", "1000002", 0));
+
+    d.driver->tick({p});
+    CHECK(d.driver->status_json({p})["round_in_flight"] == true);
+    d.rig.settle();
+    REQUIRE(d.rig.cloud->log.size() == 3);
+    CHECK(d.rig.cloud->log[0] == "sync_ams dev1");
+    CHECK(d.rig.cloud->log[1] == "sync_slots dev1");
+    CHECK(d.count("list") == 1);
+    REQUIRE(d.rig.cloud->ams_got.size() == 1);
+    REQUIRE(d.rig.cloud->ams_got[0].size() == 1);
+    CHECK(d.rig.cloud->ams_got[0][0].rfid == "UUID1");
+    CHECK(d.rig.cloud->ams_got[0][0].net_weight == 500);
+    CHECK(d.rig.cloud->ams_got[0][0].ams_sn == "sn0");
+    CHECK(d.rig.cloud->ams_got[0][0].slot_id == "0");
+    REQUIRE(d.rig.cloud->slots_got.size() == 1);
+    REQUIRE(d.rig.cloud->slots_got[0].size() == 1);
+    CHECK(d.rig.cloud->slots_got[0][0].spool_id == "1000002");
+    CHECK(d.rig.cloud->slots_got[0][0].slot_id == "1");
+
+    d.t += fil::LinkDriver::k_round_spacing_seconds;
+    d.run({p});
+    CHECK_FALSE(d.driver->last_plan().has_actions());
+    CHECK(d.rig.cloud->log.size() == 3);
+    CHECK(d.driver->status_json({p})["assignments"].empty());
+}
+
+TEST_CASE("No round starts while one is in flight, before its list arrives, or within five seconds", "[BblFilament]")
+{
+    DriverRig d;
+    d.rig.cloud->rows.push_back(rfid_row(1000001, "UUID1")); // the fake does not apply the mount: it is planned again
+    d.load();
+    const std::vector<fil::PrinterView> printers{with_tray(make_printer(), make_rfid_tray("0", "UUID1"))};
+
+    d.driver->tick(printers);
+    CHECK(d.rig.worker.size() == 1);
+    d.t += 10;
+    d.driver->tick(printers); // in flight
+    d.rig.step_worker();
+    d.rig.run_ui(); // the op is done, the round ends at t, its pull is waiting in the worker
+    CHECK(d.count("sync_ams") == 1);
+    CHECK(d.driver->status_json(printers)["waiting_for_list"] == true);
+    d.driver->tick(printers); // the list has not arrived
+    CHECK(d.rig.worker.size() == 1);
+    d.rig.settle();
+    CHECK(d.count("list") == 1);
+    CHECK(d.count("sync_ams") == 1);
+
+    const long long ended = d.t;
+    d.t                   = ended + fil::LinkDriver::k_round_spacing_seconds - 1;
+    d.run(printers);
+    CHECK(d.count("sync_ams") == 1);
+    d.t = ended + fil::LinkDriver::k_round_spacing_seconds;
+    d.run(printers);
+    CHECK(d.count("sync_ams") == 2);
+}
+
+TEST_CASE("A weight push is recorded only when the cloud took it", "[BblFilament]")
+{
+    DriverRig d;
+    d.rig.cloud->rows.push_back(mounted_json(rfid_row(1000001, "UUID1"), "dev1", "sn0", 0, "0")); // 750 g
+    d.load();
+    auto p = with_tray(make_printer(), make_rfid_tray("0", "UUID1")); // measures 500 g
+    p.busy = true;
+
+    d.rig.cloud->forced["sync_ams"].push_back(forced_error(fil::CloudError::Rejected));
+    d.run({p});
+    CHECK(d.count("sync_ams") == 1);
+    CHECK(d.pushes.empty());
+
+    d.t += fil::LinkDriver::k_round_spacing_seconds;
+    d.run({p}); // the failed push is sent again
+    CHECK(d.count("sync_ams") == 2);
+    REQUIRE(d.pushes.size() == 1);
+    CHECK(d.pushes[0].pushed == 1);
+    CHECK(d.pushes[0].busy);
+    REQUIRE(d.rig.cloud->ams_got.size() == 2);
+    CHECK(d.rig.cloud->ams_got[1][0].net_weight == 500);
+
+    d.t += fil::LinkDriver::k_round_spacing_seconds;
+    d.run({p}); // the busy printer is in its ten-minute cooldown
+    CHECK(d.count("sync_ams") == 2);
+    const auto& skipped = d.driver->last_plan().skipped_cooldown;
+    REQUIRE(skipped.count("dev1") == 1);
+    CHECK(skipped.at("dev1") == 1);
+
+    d.driver->sync_now();
+    d.run({p});
+    CHECK(d.count("sync_ams") == 3);
+}
+
+TEST_CASE("The ams sync builder leaves out a row that became busy after planning", "[BblFilament]")
+{
+    DriverRig d;
+    d.rig.cloud->rows.push_back(rfid_row(1000001, "UUID1"));
+    d.rig.cloud->rows.push_back(rfid_row(1000002, "UUID2"));
+    d.rig.cloud->rows.push_back(row_with(1000003));
+    d.load();
+    auto p = make_printer();
+    p.trays.push_back(make_rfid_tray("0", "UUID1"));
+    p.trays.push_back(make_rfid_tray("1", "UUID2"));
+
+    d.rig.svc->update(json{{"spool_id", "1000003"}, {"note", "x"}}); // runs first: the link op waits behind it
+    d.driver->tick({p});
+    REQUIRE(d.driver->last_plan().mounts.size() == 2);
+    d.rig.svc->update(json{{"spool_id", "1000001"}, {"note", "y"}}); // queued: row 1 is busy when the op starts
+    d.rig.settle();
+    REQUIRE(d.rig.cloud->ams_got.size() == 1);
+    REQUIRE(d.rig.cloud->ams_got[0].size() == 1);
+    CHECK(d.rig.cloud->ams_got[0][0].rfid == "UUID2");
+}
+
+TEST_CASE("Each registration is its own op, is done on success and backs off on failure", "[BblFilament]")
+{
+    DriverRig d;
+    d.load(); // an empty account
+    auto p = make_printer();
+    p.trays.push_back(make_rfid_tray("0", "UUIDN1"));
+    p.trays.push_back(make_rfid_tray("1", "UUIDN2"));
+
+    d.rig.cloud->forced["sync_ams"].push_back(forced_error(fil::CloudError::Rejected)); // the first one fails
+    const long long start = d.t;
+    d.run({p});
+    REQUIRE(d.rig.cloud->ams_got.size() == 2);
+    REQUIRE(d.rig.cloud->ams_got[0].size() == 1);
+    REQUIRE(d.rig.cloud->ams_got[1].size() == 1);
+    CHECK(d.rig.cloud->ams_got[0][0].rfid == "UUIDN1");
+    CHECK(d.rig.cloud->ams_got[1][0].rfid == "UUIDN2");
+    REQUIRE(d.registered.size() == 1);
+    CHECK(d.registered[0] == "dev1:0:1 UUIDN2");
+
+    d.t += fil::LinkDriver::k_round_spacing_seconds;
+    d.run({p});
+    CHECK(d.driver->last_plan().registrations.empty()); // one is done, the other waits
+    d.t = start + 119;
+    d.run({p});
+    CHECK(d.driver->last_plan().registrations.empty());
+    d.t = start + 120; // 60 << 1 after the first failure
+    d.run({p});
+    CHECK(d.count("sync_ams") == 3);
+    CHECK(d.rig.cloud->ams_got.back()[0].rfid == "UUIDN1");
+}
+
+TEST_CASE("A slot result with a non-zero code is not tried again for ten minutes", "[BblFilament]")
+{
+    DriverRig d;
+    d.rig.cloud->rows.push_back(row_with(1000002));
+    d.load();
+    const std::vector<fil::PrinterView> printers{with_tray(make_printer(), make_tray("1"))};
+    d.rig.cloud->forced["sync_slots"].push_back(FakeCloud::ok(json::parse(R"({"results":[{"amsSn":"sn0","slotId":"1","code":5}]})")));
+
+    const long long start = d.t;
+    d.driver->assign(make_assignment("dev1", "1", "1000002", 0));
+    d.run(printers);
+    CHECK(d.count("sync_slots") == 1);
+    d.t += fil::LinkDriver::k_round_spacing_seconds;
+    d.run(printers);
+    CHECK(d.count("sync_slots") == 1);
+    CHECK_FALSE(d.driver->last_plan().notes.empty());
+
+    d.t = start + 300;
+    d.driver->assign(make_assignment("dev1", "1", "1000002", 0));
+    d.run(printers);
+    CHECK(d.count("sync_slots") == 1);
+
+    d.t = start + fil::LinkDriver::k_refusal_seconds;
+    d.driver->assign(make_assignment("dev1", "1", "1000002", 0));
+    d.run(printers);
+    CHECK(d.count("sync_slots") == 2);
+}
+
+TEST_CASE("Unassign sends one unbind and later ticks do not bind the spool again", "[BblFilament]")
+{
+    DriverRig d;
+    d.rig.cloud->rows.push_back(mounted_json(row_with(1000002), "dev1", "sn0", 0, "1"));
+    d.rig.cloud->apply_mounts = true;
+    d.load();
+    auto p = with_tray(make_printer(), make_tray("1"));
+
+    const fil::Accept a = d.driver->unassign(fil::SlotKey{"dev1", 0, "1"}, {p});
+    CHECK(a.ok);
+    d.rig.settle();
+    REQUIRE(d.rig.cloud->slots_got.size() == 1);
+    REQUIRE(d.rig.cloud->slots_got[0].size() == 1);
+    CHECK(d.rig.cloud->slots_got[0][0].spool_id.empty());
+    CHECK(d.rig.cloud->slots_got[0][0].slot_id == "1");
+    CHECK(d.rig.cloud->slots_got[0][0].ams_sn == "sn0");
+
+    for (int i = 0; i < 5; ++i) {
+        d.t += 40;
+        p.observations = static_cast<unsigned long long>(i + 2);
+        d.run({p});
+    }
+    CHECK(d.count("sync_") == 1);
+}
+
+TEST_CASE("Unassign refuses an RFID spool and an empty slot", "[BblFilament]")
+{
+    DriverRig d;
+    d.rig.cloud->rows.push_back(mounted_json(rfid_row(1000001, "UUID1"), "dev1", "sn0", 0, "0"));
+    d.load();
+    const auto p = with_tray(make_printer(), make_rfid_tray("0", "UUID1"));
+    const fil::Accept rfid = d.driver->unassign(fil::SlotKey{"dev1", 0, "0"}, {p});
+    CHECK_FALSE(rfid.ok);
+    CHECK(rfid.kind == fil::FailKind::BadRequest);
+    const fil::Accept empty = d.driver->unassign(fil::SlotKey{"dev1", 0, "2"}, {p});
+    CHECK_FALSE(empty.ok);
+    CHECK(empty.kind == fil::FailKind::BadRequest);
+    d.rig.settle();
+    CHECK(d.rig.cloud->log.empty());
+}
+
+TEST_CASE("An assignment the tray agrees with binds the spool once", "[BblFilament]")
+{
+    DriverRig d;
+    d.rig.cloud->rows.push_back(row_with(1000002));
+    d.rig.cloud->apply_mounts = true;
+    d.load();
+    const std::vector<fil::PrinterView> printers{with_tray(make_printer(), make_tray("2"))};
+    d.driver->assign(make_assignment("dev1", "2", "1000002", 0));
+    for (int i = 0; i < 4; ++i) {
+        d.run(printers);
+        d.t += fil::LinkDriver::k_round_spacing_seconds;
+    }
+    CHECK(d.count("sync_slots") == 1);
+    REQUIRE(d.rig.cloud->slots_got.size() == 1);
+    CHECK(d.rig.cloud->slots_got[0][0].spool_id == "1000002");
+    CHECK(d.driver->last_plan().trays[0].rule == "cloud"); // the cloud's own row holds it now
+}
+
+TEST_CASE("Reset forgets assignments, back-offs and the last plan", "[BblFilament]")
+{
+    DriverRig d;
+    d.load();
+    auto p = with_tray(make_printer(), make_rfid_tray("0", "UUIDN1"));
+    p.trays.push_back(make_tray("1"));
+    d.rig.cloud->forced["sync_ams"].push_back(forced_error(fil::CloudError::Rejected));
+    d.run({p}); // the registration fails and backs off
+    d.driver->assign(make_assignment("dev1", "1", "1000002", 0));
+    d.t += fil::LinkDriver::k_round_spacing_seconds;
+    d.run({p});
+    CHECK(d.driver->last_plan().registrations.empty());
+
+    d.driver->reset();
+    CHECK(d.driver->status_json({p})["assignments"].empty());
+    CHECK(d.driver->status_json({p})["last_round"].is_null());
+    CHECK(d.driver->last_plan().notes.empty());
+    d.driver->config.mode = fil::LinkMode::DryRun;
+    d.run({p});
+    CHECK(d.driver->last_plan().registrations.size() == 1);
+}
+
+TEST_CASE("The link status names printers and never shows a serial or an RFID", "[BblFilament]")
+{
+    const std::string dev  = "01P00A391800123";
+    const std::string sn   = "19C06A4A2900456";
+    const std::string rfid = "8A1F2E3D4C5B6A79";
+    DriverRig         d;
+    d.rig.cloud->rows.push_back(rfid_row(1000001, rfid));
+    d.rig.cloud->rows.push_back(row_with(1000002));
+    d.load();
+    auto p      = make_printer(dev);
+    p.name      = "Workshop";
+    p.ams_sn[0] = sn;
+    p.trays.push_back(make_rfid_tray("0", rfid));
+    p.trays.push_back(make_tray("1"));
+    d.driver->config.only_slots = {fil::SlotKey{dev, 0, "0"}.text(), fil::SlotKey{dev, 0, "1"}.text()};
+    d.driver->assign(make_assignment(dev, "1", "1000002", 0));
+    d.run({p});
+    REQUIRE(d.count("sync_ams") == 1);
+
+    const json        j    = d.driver->status_json({p});
+    const std::string dump = j.dump();
+    CHECK(dump.find(dev) == std::string::npos);
+    CHECK(dump.find(sn) == std::string::npos);
+    CHECK(dump.find(rfid) == std::string::npos);
+    CHECK(j["mode"] == "on");
+    REQUIRE(j["printers"].size() == 1);
+    CHECK(j["printers"][0]["name"] == "Workshop");
+    CHECK(j["printers"][0]["takes_part"] == true);
+    REQUIRE(j["printers"][0]["trays"].size() == 2);
+    CHECK(j["printers"][0]["trays"][0]["has_serial"] == true);
+    CHECK(j["only_slots"][0] == "Workshop:0:0");
+    CHECK(j["planned"]["mounts"] == 2);
+    CHECK(j["plan"].size() == 2);
+    REQUIRE(j["last_round"]["ops"].size() == 2);
+    CHECK(j["last_round"]["ops"][0]["kind"] == "ams");
+    CHECK(j["last_round"]["ops"][0]["ok"] == true);
 }
