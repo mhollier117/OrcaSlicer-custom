@@ -25,6 +25,7 @@
 #include "slic3r/GUI/PrinterWebView.hpp"
 #include "slic3r/GUI/MultiMachinePage.hpp"
 #include "slic3r/GUI/CalibrationPanel.hpp"
+#include "slic3r/GUI/FilamentManager/FilamentManagerPanel.hpp"
 #include "slic3r/GUI/ReleaseNote.hpp"
 #include "slic3r/GUI/GUI.hpp"
 #include <vector>
@@ -1659,6 +1660,13 @@ void MainFrame::init_tabpanel() {
     m_calibration_page = new LazyPage<CalibrationPanel>(m_tabpanel, TAB_ID_CALIBRATION, 30);
     m_lazy_pages.push_back(m_calibration_page);
     m_tabpanel->AddPage(TAB_ID_CALIBRATION, m_calibration_page, _L("Calibration"), "tab_calibration_active");
+
+    // The spool list of the Bambu account; an account feature, so it stays whatever printer is selected.
+    if (wxGetApp().is_editor() && wxGetApp().app_config->get_bool("filament_manager_enabled")) {
+        m_filament_manager_page = new LazyPage<FilamentManagerPanel>(m_tabpanel, TAB_ID_FILAMENT_MANAGER, -1);
+        m_lazy_pages.push_back(m_filament_manager_page);
+        m_tabpanel->AddPage(TAB_ID_FILAMENT_MANAGER, m_filament_manager_page, _L("Filament Manager"), "tab_filament_active");
+    }
 
     // Plugin pages are appended after the built-in tabs; their ids are namespaced
     // (plugin.<plugin_key>.<name>) so they can't collide with the built-in TAB_ID_* constants.

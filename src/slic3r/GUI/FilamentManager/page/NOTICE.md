@@ -6,6 +6,7 @@ This folder is a trimmed copy of the Bambu Studio web page that implements the F
 - Tag `v02.09.01.70`, commit `e460a9382`
 - License: GNU Affero General Public License v3 (GNU AGPL v3)
 - Copyright: Bambu Lab
+- The tab icon `resources/images/tab_filament_active.svg` is from the same Bambu Studio tag, same licence.
 
 The rest of this repository is AGPL v3 as well. The built bundle in `resources/web/filament_manager/` is generated from this folder by `scripts/build_filament_manager_page.sh`.
 

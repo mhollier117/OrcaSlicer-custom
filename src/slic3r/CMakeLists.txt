@@ -265,6 +265,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/ExtrusionCalibration.hpp
     GUI/Field.cpp
     GUI/Field.hpp
+    GUI/FilamentManager/FilamentManagerPanel.cpp
+    GUI/FilamentManager/FilamentManagerPanel.hpp
     GUI/FilamentManager/FmColorCodes.cpp
     GUI/FilamentManager/FmColorCodes.hpp
     GUI/FilamentManager/FmDevices.cpp

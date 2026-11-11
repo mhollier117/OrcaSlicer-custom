@@ -598,6 +598,13 @@ void AppConfig::set_defaults()
     if (get("sync_bbl_user_preset").empty()) {
         set_bool("sync_bbl_user_preset", true);
     }
+    if (get("filament_manager_enabled").empty()) {
+#ifdef __APPLE__
+        set_bool("filament_manager_enabled", false);
+#else
+        set_bool("filament_manager_enabled", true);
+#endif
+    }
 
     if (get("keyboard_supported").empty()) {
         set("keyboard_supported", std::string("none/alt/control/shift"));

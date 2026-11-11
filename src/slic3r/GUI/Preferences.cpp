@@ -2626,6 +2626,7 @@ void PreferencesDialog::create_items()
                                               _L("Also keeps Bambu-based user presets in your Bambu account, so custom filaments can be chosen on the printer. Needs the option above and both sign-ins."),
                                               "sync_bbl_user_preset");
     g_sizer->Add(item_bbl_sync);
+    g_sizer->Add(create_item_checkbox(_L("Show the Filament Manager tab"), _L("The list of filament spools kept in your Bambu account. Takes effect after a restart."), "filament_manager_enabled"));
 
     if (app_config->get_stealth_mode()) {
         if (m_bambu_cloud_checkbox)      m_bambu_cloud_checkbox->Enable(false);
