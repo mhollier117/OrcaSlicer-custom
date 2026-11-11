@@ -20,7 +20,9 @@ bool read_number(const json& j, const char* key, double& out)
 {
     auto it = j.find(key);
     if (it == j.end() || !it->is_number()) return false;
-    out = it->get<double>();
+    const double v = it->get<double>();
+    if (!std::isfinite(v)) return false; // a non-finite number counts as absent
+    out = v;
     return true;
 }
 
@@ -75,7 +77,10 @@ void apply_color_rule(Spool& s)
     if (!s.colors.empty() && s.color != s.colors.front()) s.color = s.colors.front();
 }
 
-long long round_g(double v) { return std::llround(v); }
+constexpr double k_max_weight_g = 999999999.0;
+
+// A weight in grams, bounded before it is rounded (llround of a huge or non-finite double is undefined).
+long long round_g(double v) { return std::llround(std::clamp(v, 0.0, k_max_weight_g)); }
 
 } // namespace
 
@@ -154,8 +159,10 @@ std::optional<Spool> spool_from_cloud(const json& row)
 json spool_to_page(const Spool& s)
 {
     int remain = 100;
-    if (s.total_net_weight > 0 && s.net_weight >= 0)
-        remain = static_cast<int>(std::clamp<long long>(round_g(s.net_weight / s.total_net_weight * 100.0), 0, 100));
+    if (s.total_net_weight > 0 && s.net_weight >= 0) {
+        const double percent = std::clamp(s.net_weight / s.total_net_weight * 100.0, 0.0, 100.0);
+        remain               = static_cast<int>(std::llround(percent));
+    }
 
     json j = json::object();
     j["spool_id"]       = s.id;
@@ -201,13 +208,28 @@ void apply_page_patch(Spool& s, const json& patch)
     read_string(patch, "brand", s.vendor);
     read_string(patch, "material_type", s.type);
     read_string(patch, "series", s.name);
-    read_string(patch, "color_code", s.color);
-    read_string_array(patch, "colors", s.colors);
-    read_int(patch, "color_type", s.color_type);
     read_number(patch, "initial_weight", s.total_net_weight);
     read_number(patch, "net_weight", s.net_weight);
     read_string(patch, "note", s.note);
+
+    // The colours the cloud will have after update_body's rules (a colour edit makes `colors` follow the colour).
+    std::vector<std::string> pc;
+    bool                     has_pc = read_string_array(patch, "colors", pc);
+    std::string              code;
+    const bool               has_code = read_string(patch, "color_code", code);
+    if (has_code) {
+        if (!has_pc || pc.empty()) {
+            pc     = {code};
+            has_pc = true;
+        } else if (pc.size() == 1 && pc.front() != code) {
+            pc = {code};
+        }
+    }
+    if (has_pc) s.colors = std::move(pc);
+    if (has_code) s.color = code;
     apply_color_rule(s);
+    int color_type = 0;
+    if (read_int(patch, "color_type", color_type)) s.color_type = normalize_color_type(color_type, s.colors.size());
 }
 
 json create_body(const json& page_spool, const FilamentLookup& lookup)
@@ -262,10 +284,11 @@ json create_body(const json& page_spool, const FilamentLookup& lookup)
     b["trayIdName"] = tray;
     b["rolls"]      = 1;
 
-    const long long total = round_g(initial_weight);
-    if (initial_weight > 0) b["totalNetWeight"] = total;
+    const bool      has_total = initial_weight > 0;
+    const long long total     = round_g(initial_weight);
+    if (has_total) b["totalNetWeight"] = total;
     if (has_net && net_weight >= 0) b["netWeight"] = round_g(net_weight);
-    else if (initial_weight > 0) b["netWeight"] = total;
+    else if (has_total) b["netWeight"] = total;
     if (!note.empty()) b["note"] = note;
     return b;
 }

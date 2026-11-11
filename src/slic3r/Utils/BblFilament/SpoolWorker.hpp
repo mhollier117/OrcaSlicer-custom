@@ -22,8 +22,10 @@ public:
     SpoolWorker& operator=(const SpoolWorker&) = delete;
 
     bool post(Job job);         // false (job not taken) while draining or drained
-    void drain();               // stop taking jobs, forget the queued ones, wait for the running one. Idempotent.
-    void resume();              // take jobs again
+    // Stops taking jobs, forgets the queued ones (destroying them outside the lock) and waits for the running one.
+    // Idempotent. It returns with the worker closed; only a later resume() reopens it.
+    void drain();
+    void resume();              // take jobs again; waits for a drain in progress to finish first
     bool accepting() const;
     bool busy() const;          // a job is running or queued
 
@@ -37,6 +39,7 @@ private:
     std::thread             m_thread;
     bool                    m_accepting{true};
     bool                    m_running{false};
+    int                     m_draining{0};   // drain() calls in progress
     bool                    m_stop{false};
 };
 

@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include "slic3r/Utils/BblFilament/Spool.hpp"
 #include "slic3r/Utils/BblFilament/SpoolCloud.hpp"
@@ -12,6 +13,7 @@
 #include <chrono>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <future>
 #include <map>
 #include <memory>
@@ -642,9 +644,19 @@ TEST_CASE("A filament id change without lookups sends none of the derived keys",
 
 TEST_CASE("A colour change recomputes the tray name from the colours after the patch", "[BblFilament]")
 {
-    const auto b = fil::update_body(current_spool(), json{{"color_code", "#00FF00FF"}}, full_lookup());
+    std::vector<std::string> seen_colors;
+    int                      seen_type = -1;
+    fil::FilamentLookup      lookup    = full_lookup();
+    lookup.tray_id_name                = [&](const std::string&, const std::vector<std::string>& colors, int color_type) {
+        seen_colors = colors;
+        seen_type   = color_type;
+        return std::string("tray");
+    };
+    const auto b = fil::update_body(current_spool(), json{{"color_code", "#00FF00FF"}}, lookup);
     REQUIRE(b.has_value());
-    CHECK((*b)["trayIdName"] == "T:GFA00:1:2");
+    CHECK(seen_colors == std::vector<std::string>{"#00FF00FF"});
+    CHECK(seen_type == 2);
+    CHECK((*b)["trayIdName"] == "tray");
     CHECK_FALSE(b->contains("isSupport"));
     CHECK((*b)["filamentType"] == "PETG");
 }
@@ -675,14 +687,18 @@ TEST_CASE("A zero return code is a success with the parsed body", "[BblFilament]
     const auto r = fil::classify_reply(0, "{}");
     CHECK(r.ok());
     CHECK(r.body.is_object());
-    const auto e = fil::classify_reply(0, "");
-    CHECK(e.ok());
-    CHECK(e.body.is_object());
     const auto h = fil::classify_reply(0, R"({"hits":[]})");
     CHECK(h.body["hits"].is_array());
+}
+
+TEST_CASE("A zero return code with an empty or unparsable body leaves the body null", "[BblFilament]")
+{
+    const auto e = fil::classify_reply(0, "");
+    CHECK(e.ok());
+    CHECK(e.body.is_null());
     const auto bad = fil::classify_reply(0, "<html>");
     CHECK(bad.ok());
-    CHECK(bad.body.is_object());
+    CHECK(bad.body.is_null());
 }
 
 TEST_CASE("A failed call with a 404 body is NotFound", "[BblFilament]")
@@ -1551,4 +1567,411 @@ TEST_CASE("A spool worker that was never used drains and is destroyed cleanly", 
     CHECK(worker.accepting());
     CHECK_FALSE(worker.busy());
     worker.drain();
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Review fixes
+
+TEST_CASE("A page patch of only a colour code makes the copy show that colour", "[BblFilament]")
+{
+    fil::Spool s = current_spool();
+    s.color      = "#111111FF";
+    s.colors     = {"#111111FF"};
+    fil::apply_page_patch(s, json{{"color_code", "#222222FF"}});
+    CHECK(s.color == "#222222FF");
+    CHECK(s.colors == std::vector<std::string>{"#222222FF"});
+}
+
+TEST_CASE("A page patch with a colour code and empty colors makes the copy show that colour", "[BblFilament]")
+{
+    fil::Spool s = current_spool();
+    s.color      = "#111111FF";
+    s.colors     = {"#111111FF"};
+    fil::apply_page_patch(s, json{{"color_code", "#222222FF"}, {"colors", json::array()}});
+    CHECK(s.color == "#222222FF");
+    CHECK(s.colors == std::vector<std::string>{"#222222FF"});
+}
+
+TEST_CASE("A page patch of only a colour code collapses a multicolour spool to that colour", "[BblFilament]")
+{
+    fil::Spool s = current_spool();
+    s.color      = "#111111FF";
+    s.colors     = {"#111111FF", "#333333FF"};
+    s.color_type = 1;
+    fil::apply_page_patch(s, json{{"color_code", "#222222FF"}});
+    CHECK(s.colors == std::vector<std::string>{"#222222FF"});
+    CHECK(s.color == "#222222FF");
+}
+
+TEST_CASE("A page patch with two colors and a colour code keeps both colors", "[BblFilament]")
+{
+    fil::Spool s = current_spool();
+    fil::apply_page_patch(s, json{{"colors", json::array({"#AA", "#BB"})}, {"color_code", "#AA"}});
+    CHECK(s.colors == std::vector<std::string>{"#AA", "#BB"});
+    CHECK(s.color == "#AA");
+}
+
+TEST_CASE("A page patch normalises the colour type against the colour count", "[BblFilament]")
+{
+    fil::Spool s = current_spool();
+    fil::apply_page_patch(s, json{{"colors", json::array({"#AA", "#BB"})}, {"color_type", 7}});
+    CHECK(s.color_type == 1);
+    fil::Spool one = current_spool();
+    fil::apply_page_patch(one, json{{"color_code", "#AA"}, {"color_type", 7}});
+    CHECK(one.color_type == 2);
+}
+
+TEST_CASE("The view after a colour edit equals the view after the cloud applied it and a pull replaced the list", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(2);
+    rig.cloud->rows[0]["color"]     = "#111111FF";
+    rig.cloud->rows[0]["colors"]    = json::array({"#111111FF"});
+    rig.cloud->rows[0]["colorType"] = 2;
+    rig.svc->request_pull();
+    rig.settle();
+
+    REQUIRE(rig.svc->update(json{{"spool_id", "1000001"}, {"color_code", "#222222FF"}, {"color_type", 7}}).ok);
+    const std::vector<fil::Spool> optimistic = rig.svc->view();
+    rig.settle();
+    const std::vector<fil::Spool> confirmed = rig.svc->view();
+    REQUIRE(optimistic.size() == 2);
+    REQUIRE(confirmed.size() == 2);
+    for (std::size_t i = 0; i < optimistic.size(); ++i) CHECK(fil::spool_to_page(optimistic[i]) == fil::spool_to_page(confirmed[i]));
+    CHECK(confirmed.front().color == "#222222FF");
+}
+
+TEST_CASE("A huge weight is bounded in create and update bodies", "[BblFilament]")
+{
+    const json created = fil::create_body(json{{"initial_weight", 1e30}, {"net_weight", 1e30}}, {});
+    CHECK(created["totalNetWeight"] == 999999999);
+    CHECK(created["netWeight"] == 999999999);
+    const auto edited = fil::update_body(current_spool(), json{{"initial_weight", 1e30}, {"net_weight", 1e30}}, {});
+    REQUIRE(edited.has_value());
+    CHECK((*edited)["totalNetWeight"] == 999999999);
+    CHECK((*edited)["netWeight"] == 999999999);
+}
+
+TEST_CASE("A negative weight in an edit is sent as zero", "[BblFilament]")
+{
+    const auto edited = fil::update_body(current_spool(), json{{"initial_weight", -50}, {"net_weight", -1e30}}, {});
+    REQUIRE(edited.has_value());
+    CHECK((*edited)["totalNetWeight"] == 0);
+    CHECK((*edited)["netWeight"] == 0);
+}
+
+TEST_CASE("A non-finite weight counts as absent", "[BblFilament]")
+{
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    const json   created = fil::create_body(json{{"initial_weight", nan}, {"net_weight", inf}}, {});
+    CHECK_FALSE(created.contains("totalNetWeight"));
+    CHECK_FALSE(created.contains("netWeight"));
+    const auto edited = fil::update_body(current_spool(), json{{"net_weight", nan}, {"note", "x"}}, {});
+    REQUIRE(edited.has_value());
+    CHECK_FALSE(edited->contains("netWeight"));
+    json row           = example_row();
+    row["netWeight"]   = nan;
+    CHECK(parsed(row).net_weight == 0.0);
+}
+
+TEST_CASE("A cloud row with a huge remaining weight shows a full spool", "[BblFilament]")
+{
+    json row             = example_row();
+    row["netWeight"]     = 1e30;
+    row["totalNetWeight"] = 1;
+    CHECK(fil::spool_to_page(parsed(row))["remain_percent"] == 100);
+}
+
+TEST_CASE("A config fetch queued behind a pull does not leave the page syncing", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(2);
+    std::vector<bool> syncing_at_state_changed;
+    rig.svc->events.state_changed = [&] { syncing_at_state_changed.push_back(rig.svc->state().is_syncing); };
+    rig.svc->request_pull();
+    rig.svc->request_config(true);
+    rig.step_worker();
+    rig.run_ui(); // the pull is done; only the config job is pending now
+    CHECK(rig.worker.size() == 1);
+    CHECK_FALSE(rig.svc->state().is_syncing);
+    rig.settle();
+    REQUIRE_FALSE(syncing_at_state_changed.empty());
+    CHECK_FALSE(syncing_at_state_changed.back());
+    CHECK(rig.cloud->count("config") == 1);
+}
+
+TEST_CASE("A reset forgets the sync time and the paging flags of the previous account", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(45);
+    rig.cloud->ignore_offset = true;
+    rig.svc->request_pull();
+    rig.settle();
+    REQUIRE(rig.svc->state().last_synced_at > 0);
+    REQUIRE(rig.svc->status().paging_suspect);
+    rig.svc->reset();
+    CHECK(rig.svc->state().last_synced_at == 0);
+    CHECK_FALSE(rig.svc->status().paging_suspect);
+    CHECK(rig.svc->status().skipped_rows == 0);
+}
+
+TEST_CASE("A skipped-row count is cleared by a reset", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(2);
+    rig.cloud->rows.push_back(json(5));
+    rig.svc->request_pull();
+    rig.settle();
+    REQUIRE(rig.svc->status().skipped_rows == 1);
+    rig.svc->reset();
+    CHECK(rig.svc->status().skipped_rows == 0);
+}
+
+TEST_CASE("A write waiting in the worker when the account changes never reaches the cloud", "[BblFilament]")
+{
+    Rig rig;
+    rig.svc->add(page_spool());
+    REQUIRE(rig.worker.size() == 1);
+    rig.session.uid = "u2";
+    rig.svc->reset();
+    rig.events.clear();
+    rig.settle();
+    CHECK(rig.cloud->log.empty());
+    CHECK(rig.events.empty());
+}
+
+TEST_CASE("A write waiting in the worker when the service is destroyed never reaches the cloud", "[BblFilament]")
+{
+    Rig rig;
+    rig.svc->add(page_spool());
+    REQUIRE(rig.worker.size() == 1);
+    rig.events.clear();
+    rig.svc.reset();
+    rig.settle();
+    CHECK(rig.cloud->log.empty());
+    CHECK(rig.events.empty());
+}
+
+TEST_CASE("A write the worker threw away fails as unavailable and the service goes on", "[BblFilament]")
+{
+    Rig rig;
+    rig.svc->add(page_spool());
+    rig.worker.clear(); // the worker forgot the job
+    rig.run_ui();
+    CHECK(rig.has_event("push_failed create  Unavailable"));
+    CHECK(rig.cloud->log.empty());
+    CHECK(rig.svc->status().pending_writes == 0);
+    rig.events.clear();
+    CHECK(rig.svc->add(page_spool()).ok);
+    rig.settle();
+    CHECK(rig.cloud->count("create") == 1);
+    CHECK(rig.has_event("push_done create "));
+}
+
+TEST_CASE("A pull the worker threw away sets the unavailable error", "[BblFilament]")
+{
+    Rig rig;
+    rig.svc->request_pull();
+    rig.worker.clear();
+    rig.run_ui();
+    CHECK(rig.svc->state().has_error);
+    CHECK(rig.svc->state().error_kind == fil::FailKind::Unavailable);
+    CHECK_FALSE(rig.svc->state().is_syncing);
+}
+
+TEST_CASE("A completion delivered twice is applied once", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(2);
+    rig.svc->request_pull();
+    rig.step_worker();
+    REQUIRE(rig.ui.size() == 1);
+    auto copy = rig.ui.front();
+    rig.run_ui();
+    copy();
+    CHECK(rig.count_events("pull_done 2 0") == 1);
+    CHECK(rig.cloud->count("list") == 1);
+}
+
+TEST_CASE("A service on a real worker is not stuck after the worker drops its queued job", "[BblFilament]")
+{
+    fil::SpoolWorker worker;
+    auto             cloud = std::make_shared<FakeCloud>();
+    std::mutex       ui_mutex;
+    std::deque<std::function<void()>> ui;
+
+    fil::ServiceDeps deps;
+    deps.cloud      = cloud;
+    deps.run_async  = [&](std::function<void()> job) { return worker.post(std::move(job)); };
+    deps.post_to_ui = [&](std::function<void()> f) {
+        std::lock_guard<std::mutex> lock(ui_mutex);
+        ui.push_back(std::move(f));
+    };
+    deps.session = [] { return fil::Session{true, "u1", 1, false}; };
+    deps.now     = [] { return 1000LL; };
+    fil::SpoolService svc(std::move(deps));
+
+    std::promise<void> started, release;
+    auto               started_f = started.get_future();
+    auto               release_f = release.get_future().share();
+    worker.post([&] {
+        started.set_value();
+        release_f.wait();
+    });
+    REQUIRE(ready(started_f));
+    CHECK(svc.add(page_spool()).ok); // queued behind the blocked job
+    CHECK(svc.status().pending_writes == 1);
+
+    std::thread helper([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        release.set_value();
+    });
+    worker.drain();
+    helper.join();
+
+    std::deque<std::function<void()>> closures;
+    {
+        std::lock_guard<std::mutex> lock(ui_mutex);
+        closures.swap(ui);
+    }
+    for (auto& f : closures) f();
+    CHECK(svc.status().pending_writes == 0);
+    CHECK_FALSE(svc.state().is_syncing);
+    CHECK(cloud->log.empty());
+}
+
+TEST_CASE("A resume during a drain waits for the drain and takes effect after it", "[BblFilament]")
+{
+    fil::SpoolWorker   worker;
+    std::promise<void> started, release, ran;
+    auto               started_f = started.get_future();
+    auto               release_f = release.get_future().share();
+    auto               ran_f     = ran.get_future();
+    worker.post([&] {
+        started.set_value();
+        release_f.wait();
+    });
+    REQUIRE(ready(started_f));
+
+    std::thread drainer([&] { worker.drain(); });
+    for (int i = 0; i < 400 && worker.accepting(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    std::thread resumer([&] { worker.resume(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    const bool accepting_during = worker.accepting();
+    const bool posted_during    = worker.post([] {});
+    release.set_value();
+    drainer.join();
+    resumer.join();
+
+    CHECK_FALSE(accepting_during);
+    CHECK_FALSE(posted_during);
+    CHECK(worker.accepting());
+    CHECK(worker.post([&] { ran.set_value(); }));
+    CHECK(ready(ran_f));
+}
+
+TEST_CASE("After an edit ends unknown the later queued edits of that spool are dropped", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(2);
+    rig.svc->request_pull();
+    rig.settle();
+    rig.cloud->log.clear();
+    rig.events.clear();
+    rig.cloud->forced["update"] = {forced_error(fil::CloudError::Unknown)};
+    rig.svc->update(json{{"spool_id", "1000001"}, {"note", "a"}});
+    rig.svc->update(json{{"spool_id", "1000001"}, {"note", "b"}});
+    rig.svc->update(json{{"spool_id", "1000002"}, {"note", "c"}});
+    rig.settle();
+    CHECK(rig.cloud->log == std::vector<std::string>{"update 1000001", "update 1000002", "list 0"});
+    CHECK(rig.count_events("push_failed update 1000001 Unknown") == 2);
+    CHECK(rig.has_event("push_done update 1000002"));
+}
+
+TEST_CASE("A list reply that is not JSON fails the list and the service keeps its spools", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(3);
+    rig.svc->request_pull();
+    rig.settle();
+    const std::string raw = GENERATE(std::string(""), std::string("<html>"));
+    rig.cloud->forced["list"] = {fil::classify_reply(0, raw)};
+    rig.svc->request_pull();
+    rig.settle();
+    CHECK(rig.svc->view().size() == 3);
+    CHECK(rig.svc->state().has_error);
+    CHECK(rig.svc->state().error_message == "unexpected response");
+
+    FakeCloud cloud;
+    cloud.forced["list"] = {fil::classify_reply(0, raw)};
+    const auto r         = fil::list_all(cloud, {});
+    CHECK_FALSE(r.ok);
+    CHECK(r.failure.error == fil::CloudError::Unknown);
+}
+
+TEST_CASE("A config reply that is not JSON keeps the cache and fires nothing", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->forced["config"] = {fil::classify_reply(0, "")};
+    rig.svc->request_config(false);
+    rig.settle();
+    CHECK(rig.svc->cached_config() == nullptr);
+    CHECK_FALSE(rig.has_event("config_fetched"));
+
+    rig.svc->request_config(true);
+    rig.settle();
+    REQUIRE(rig.svc->cached_config() != nullptr);
+    rig.cloud->forced["config"] = {fil::classify_reply(0, "<html>")};
+    rig.svc->request_config(true);
+    rig.settle();
+    REQUIRE(rig.svc->cached_config() != nullptr);
+    CHECK(rig.svc->cached_config()->contains("filamentColors"));
+    CHECK(rig.count_events("config_fetched") == 1);
+}
+
+TEST_CASE("An event handler that destroys the service does not crash and no later event fires", "[BblFilament]")
+{
+    Rig rig;
+    rig.svc->events.push_done = [&](const std::string&, const std::string&) {
+        rig.events.push_back("destroying");
+        rig.svc.reset();
+    };
+    rig.svc->add(page_spool());
+    rig.step_worker();
+    rig.run_ui();
+    CHECK(rig.svc.get() == nullptr);
+    CHECK(rig.events.back() == "destroying");
+    rig.settle();
+    CHECK(rig.events.back() == "destroying");
+    CHECK(rig.cloud->count("list") == 0);
+}
+
+TEST_CASE("An event handler that replaces the events does not crash", "[BblFilament]")
+{
+    Rig rig;
+    rig.svc->events.push_done = [&](const std::string&, const std::string&) {
+        rig.events.push_back("replacing");
+        rig.svc->events = {};
+    };
+    rig.svc->add(page_spool());
+    rig.settle();
+    CHECK(rig.has_event("replacing"));
+    CHECK(rig.events.back() == "replacing");
+    CHECK(rig.cloud->count("list") == 1);
+}
+
+TEST_CASE("A pull_done handler may request another pull", "[BblFilament]")
+{
+    Rig rig;
+    rig.cloud->fill(3);
+    int calls                  = 0;
+    rig.svc->events.pull_done = [&](int, int) {
+        if (++calls == 1) rig.svc->request_pull();
+    };
+    rig.svc->request_pull();
+    rig.settle();
+    CHECK(calls == 2);
+    CHECK(rig.cloud->count("list") == 2);
+    CHECK(rig.svc->view().size() == 3);
 }

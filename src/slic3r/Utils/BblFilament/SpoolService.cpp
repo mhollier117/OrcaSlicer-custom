@@ -89,9 +89,10 @@ SyncState SpoolService::state() const
     SyncState st;
     const Session s = deps_.session ? deps_.session() : Session{};
     st.signed_in    = is_signed_in(s);
-    st.is_pulling   = job_running_ && running_is_pull_;
-    const bool queued = std::any_of(ops_.begin(), ops_.end(), [](const Op& o) { return o.state == Op::State::Queued; });
-    st.is_syncing     = job_running_ || queued || pull_wanted_;
+    st.is_pulling   = job_running_ && running_kind_ == JobKind::Pull;
+    // A config fetch fires no state_changed when it ends, so it must not count as "syncing".
+    const bool write_queued = std::any_of(ops_.begin(), ops_.end(), [](const Op& o) { return o.kind != Op::Kind::Config && o.state == Op::State::Queued; });
+    st.is_syncing           = (job_running_ && running_kind_ != JobKind::Config) || write_queued || pull_wanted_;
     st.last_synced_at = last_synced_at_;
     st.has_error      = has_error_;
     st.error_kind     = error_kind_;
@@ -116,15 +117,9 @@ ServiceStatus SpoolService::status() const
 
 const json* SpoolService::cached_config() const { return have_config_ ? &config_ : nullptr; }
 
-void SpoolService::fire_state_changed()
-{
-    if (events.state_changed) events.state_changed();
-}
+bool SpoolService::fire_state_changed() { return call_event(events.state_changed); }
 
-void SpoolService::fire_spools_changed()
-{
-    if (events.spools_changed) events.spools_changed();
-}
+bool SpoolService::fire_spools_changed() { return call_event(events.spools_changed); }
 
 void SpoolService::set_error(FailKind kind, const std::string& message)
 {
@@ -147,7 +142,7 @@ bool SpoolService::pristine() const
     return !have_list_ && truth_.empty() && ops_.empty() && !pull_wanted_ && !job_running_ && !have_config_ && !has_error_;
 }
 
-void SpoolService::do_reset(bool fire, const Session& s)
+bool SpoolService::do_reset(bool fire, const Session& s)
 {
     ++epoch_;
     if (cancel_) cancel_->store(true);
@@ -158,17 +153,22 @@ void SpoolService::do_reset(bool fire, const Session& s)
     config_      = json();
     have_config_ = false;
     clear_error();
-    have_list_       = false;
-    job_running_     = false;
-    running_is_pull_ = false;
-    running_serial_  = 0;
+    have_list_      = false;
+    last_synced_at_ = 0;
+    paging_suspect_ = false;
+    skipped_rows_   = 0;
+    job_running_    = false;
+    running_kind_   = JobKind::None;
+    running_serial_ = 0;
+    running_ticket_ = 0;
     session_signed_     = is_signed_in(s);
     session_uid_        = s.uid;
     session_generation_ = s.generation;
     if (fire) {
-        fire_spools_changed();
-        fire_state_changed();
+        if (!fire_spools_changed()) return false;
+        if (!fire_state_changed()) return false;
     }
+    return true;
 }
 
 void SpoolService::reset() { do_reset(true, deps_.session ? deps_.session() : Session{}); }
@@ -193,9 +193,9 @@ void SpoolService::request_pull()
 {
     sync_session();
     if (!is_signed_in(deps_.session ? deps_.session() : Session{})) return;
-    if (pull_wanted_ || (job_running_ && running_is_pull_)) return;
+    if (pull_wanted_ || (job_running_ && running_kind_ == JobKind::Pull)) return;
     pull_wanted_ = true;
-    fire_state_changed();
+    if (!fire_state_changed()) return;
     pump();
 }
 
@@ -212,7 +212,7 @@ Accept SpoolService::add(const json& page_spool, int quantity)
         op.body = body;
         queue_op(std::move(op));
     }
-    fire_state_changed();
+    if (!fire_state_changed()) return {};
     pump();
     return {};
 }
@@ -245,8 +245,8 @@ Accept SpoolService::update(const json& page_patch)
     bool         queued = false;
     const Accept a      = enqueue_update(page_patch, queued);
     if (!a.ok || !queued) return a;
-    fire_spools_changed();
-    fire_state_changed();
+    if (!fire_spools_changed()) return a;
+    if (!fire_state_changed()) return a;
     pump();
     return a;
 }
@@ -269,13 +269,15 @@ Accept SpoolService::batch(const json& creates, const json& updates)
         bool         queued = false;
         const Accept a      = enqueue_update(u, queued);
         if (!a.ok) {
-            if (events.push_failed) events.push_failed("update", u.is_object() ? string_field(u, "spool_id") : std::string(), FailKind::BadRequest, "");
+            if (!call_event(events.push_failed, std::string("update"), u.is_object() ? string_field(u, "spool_id") : std::string(), FailKind::BadRequest,
+                            std::string()))
+                return {};
             continue;
         }
         any_update = any_update || queued;
     }
-    if (any_update) fire_spools_changed();
-    fire_state_changed();
+    if (any_update && !fire_spools_changed()) return {};
+    if (!fire_state_changed()) return {};
     pump();
     return {};
 }
@@ -295,8 +297,8 @@ Accept SpoolService::remove(const std::vector<std::string>& ids)
     }
     if (op.ids.empty()) return {false, FailKind::BadRequest};
     queue_op(std::move(op));
-    fire_spools_changed();
-    fire_state_changed();
+    if (!fire_spools_changed()) return {};
+    if (!fire_state_changed()) return {};
     pump();
     return {};
 }
@@ -317,36 +319,30 @@ void SpoolService::request_config(bool force)
 // ---------------------------------------------------------------------------------------------------------------------
 // the pump and jobs
 
-void SpoolService::pump()
+bool SpoolService::pump()
 {
     for (;;) {
-        if (job_running_) return;
+        if (job_running_) return true;
         auto it = std::find_if(ops_.begin(), ops_.end(), [](const Op& o) { return o.state == Op::State::Queued; });
         if (it != ops_.end()) {
-            start_op(static_cast<std::size_t>(it - ops_.begin()));
+            if (!start_op(static_cast<std::size_t>(it - ops_.begin()))) return false;
             continue;
         }
         if (pull_wanted_) {
             pull_wanted_ = false;
-            start_pull();
+            if (!start_pull()) return false;
             continue;
         }
-        return;
+        return true;
     }
 }
 
-void SpoolService::start_pull()
+bool SpoolService::start_pull()
 {
     const Session s = deps_.session ? deps_.session() : Session{};
-    if (!is_signed_in(s)) {
-        finish(true, 0, JobResult{false, FailKind::NotSignedIn, {}, {}, {}});
-        return;
-    }
-    if (!session_matches(s)) {
-        reset();
-        return;
-    }
-    launch(
+    if (!is_signed_in(s)) return finish(true, 0, JobResult{false, FailKind::NotSignedIn, {}, {}, {}});
+    if (!session_matches(s)) return do_reset(true, s);
+    return launch(
         [](ISpoolCloud& cloud, const std::function<bool()>& cancelled) {
             JobResult r;
             r.list = list_all(cloud, cancelled);
@@ -357,7 +353,7 @@ void SpoolService::start_pull()
             }
             return r;
         },
-        true, 0, s);
+        JobKind::Pull, 0, s);
 }
 
 SpoolService::JobResult SpoolService::from_reply(const CloudReply& reply)
@@ -370,77 +366,101 @@ SpoolService::JobResult SpoolService::from_reply(const CloudReply& reply)
     return r;
 }
 
-void SpoolService::start_op(std::size_t index)
+bool SpoolService::start_op(std::size_t index)
 {
     const Session s = deps_.session ? deps_.session() : Session{};
     Op&           op = ops_[index];
     const auto    serial = op.serial;
 
-    if (!is_signed_in(s)) {
-        finish(false, serial, JobResult{false, FailKind::NotSignedIn, {}, {}, {}});
-        return;
-    }
-    if (!session_matches(s)) {
-        reset();
-        return;
-    }
+    if (!is_signed_in(s)) return finish(false, serial, JobResult{false, FailKind::NotSignedIn, {}, {}, {}});
+    if (!session_matches(s)) return do_reset(true, s);
 
     switch (op.kind) {
     case Op::Kind::Create: {
         op.state = Op::State::Running;
         json body = op.body;
-        launch([body](ISpoolCloud& cloud, const std::function<bool()>&) { return from_reply(cloud.create(body)); }, false, serial, s);
-        return;
+        return launch([body](ISpoolCloud& cloud, const std::function<bool()>&) { return from_reply(cloud.create(body)); }, JobKind::Write, serial, s);
     }
     case Op::Kind::Update: {
         // The body is built now, so that an earlier edit the cloud refused cannot leak into this one.
         const std::vector<Spool> before = compute_view(index);
         const Spool*             spool  = find_spool(before, op.id);
-        if (!spool) {
-            finish(false, serial, JobResult{false, FailKind::NotFound, {}, {}, {}});
-            return;
-        }
+        if (!spool) return finish(false, serial, JobResult{false, FailKind::NotFound, {}, {}, {}});
         const auto body = update_body(*spool, op.patch, deps_.lookup);
         if (!body || body->empty()) {
             const std::vector<Spool> shown = compute_view(ops_.size());
             ops_.erase(ops_.begin() + index);
-            if (!views_equal(shown, compute_view(ops_.size()))) fire_spools_changed();
-            return;
+            if (!views_equal(shown, compute_view(ops_.size()))) return fire_spools_changed();
+            return true;
         }
         op.state       = Op::State::Running;
         std::string id = op.id;
         json        b  = *body;
-        launch([id, b](ISpoolCloud& cloud, const std::function<bool()>&) { return from_reply(cloud.update(id, b)); }, false, serial, s);
-        return;
+        return launch([id, b](ISpoolCloud& cloud, const std::function<bool()>&) { return from_reply(cloud.update(id, b)); }, JobKind::Write, serial, s);
     }
     case Op::Kind::Delete: {
         op.state = Op::State::Running;
         std::vector<std::string> ids = op.ids;
-        launch([ids](ISpoolCloud& cloud, const std::function<bool()>&) { return from_reply(cloud.remove(ids)); }, false, serial, s);
-        return;
+        return launch([ids](ISpoolCloud& cloud, const std::function<bool()>&) { return from_reply(cloud.remove(ids)); }, JobKind::Write, serial, s);
     }
     case Op::Kind::Config:
         op.state = Op::State::Running;
-        launch([](ISpoolCloud& cloud, const std::function<bool()>&) { return from_reply(cloud.config()); }, false, serial, s);
-        return;
+        return launch([](ISpoolCloud& cloud, const std::function<bool()>&) { return from_reply(cloud.config()); }, JobKind::Config, serial, s);
     }
+    return true;
 }
 
-void SpoolService::launch(Work work, bool is_pull, unsigned long long serial, const Session& s)
+bool SpoolService::launch(Work work, JobKind kind, unsigned long long serial, const Session& s)
 {
     cancel_ = std::make_shared<std::atomic<bool>>(false);
-    auto                flag  = cancel_;
-    auto                cloud = deps_.cloud;
-    auto                post  = deps_.post_to_ui;
-    std::weak_ptr<int>  weak  = alive_;
-    const auto          epoch = epoch_;
-    SpoolService*       self  = this;
+    auto                flag    = cancel_;
+    auto                cloud   = deps_.cloud;
+    auto                post    = deps_.post_to_ui;
+    std::weak_ptr<int>  weak    = alive_;
+    const auto          epoch   = epoch_;
+    SpoolService*       self    = this;
+    const bool          is_pull = kind == JobKind::Pull;
+    const auto          ticket  = next_ticket_++;
 
-    job_running_     = true;
-    running_is_pull_ = is_pull;
-    running_serial_  = serial;
+    job_running_    = true;
+    running_kind_   = kind;
+    running_serial_ = serial;
+    running_ticket_ = ticket;
 
-    auto job = [work, flag, cloud, post, weak, epoch, self, s, is_pull, serial]() {
+    // Hands a job's result back to the service's thread; used by the job itself and by the guard.
+    std::function<void(JobResult)> deliver = [post, weak, epoch, self, s, is_pull, serial, ticket](JobResult r) {
+        if (!post) return;
+        post([weak, epoch, self, s, is_pull, serial, ticket, r = std::move(r)]() mutable {
+            if (weak.lock() == nullptr) return;
+            self->on_completion(epoch, s, is_pull, serial, ticket, std::move(r));
+        });
+    };
+
+    // When the worker throws the job away unrun (drain), destroying the closure completes the job as Unavailable,
+    // unless the job was cancelled by a reset or the service's destruction (then nobody waits for it).
+    struct Guard
+    {
+        std::function<void(JobResult)>      deliver;
+        std::shared_ptr<std::atomic<bool>>  cancel;
+        std::atomic<bool>                   finished{false};
+        ~Guard()
+        {
+            if (finished.load() || cancel->load() || !deliver) return;
+            JobResult r;
+            r.kind = FailKind::Unavailable;
+            try {
+                deliver(std::move(r));
+            } catch (...) {
+            }
+        }
+    };
+    auto guard     = std::make_shared<Guard>();
+    guard->deliver = deliver;
+    guard->cancel  = flag;
+
+    auto job = [work, flag, cloud, guard]() {
+        guard->finished = true;
+        if (flag->load()) return; // the account changed: no cloud call, no completion
         JobResult r;
         try {
             if (cloud) r = work(*cloud, [flag] { return flag->load(); });
@@ -449,47 +469,46 @@ void SpoolService::launch(Work work, bool is_pull, unsigned long long serial, co
             r      = JobResult{};
             r.kind = FailKind::Unknown;
         }
-        if (!post) return;
-        post([weak, epoch, self, s, is_pull, serial, r]() mutable {
-            if (weak.lock() == nullptr) return;
-            self->on_completion(epoch, s, is_pull, serial, std::move(r));
-        });
+        guard->deliver(std::move(r));
     };
 
     if (!deps_.run_async || !deps_.run_async(std::move(job))) {
+        guard->finished = true; // completed synchronously below; this local `guard` outlives the refused closure
         JobResult r;
         r.kind = FailKind::Unavailable;
-        finish(is_pull, serial, std::move(r));
+        return finish(is_pull, serial, std::move(r));
     }
+    return true;
 }
 
-void SpoolService::on_completion(unsigned long long epoch, const Session& started, bool is_pull, unsigned long long serial, JobResult result)
+void SpoolService::on_completion(unsigned long long epoch, const Session& started, bool is_pull, unsigned long long serial, unsigned long long ticket,
+                                 JobResult result)
 {
     if (epoch != epoch_) return;
+    if (!job_running_ || ticket != running_ticket_) return;
     const Session cur = deps_.session ? deps_.session() : Session{};
     if (!is_signed_in(cur) || cur.uid != started.uid || cur.generation != started.generation) {
         reset();
         return;
     }
-    finish(is_pull, serial, std::move(result));
+    if (!finish(is_pull, serial, std::move(result))) return;
     pump();
 }
 
-void SpoolService::finish(bool is_pull, unsigned long long serial, JobResult result)
+bool SpoolService::finish(bool is_pull, unsigned long long serial, JobResult result)
 {
-    job_running_     = false;
-    running_is_pull_ = false;
-    running_serial_  = 0;
-    if (is_pull) finish_pull(result);
-    else finish_op(serial, result);
+    job_running_    = false;
+    running_kind_   = JobKind::None;
+    running_serial_ = 0;
+    running_ticket_ = 0;
+    return is_pull ? finish_pull(result) : finish_op(serial, result);
 }
 
-void SpoolService::finish_pull(const JobResult& r)
+bool SpoolService::finish_pull(const JobResult& r)
 {
     if (!r.ok) {
         set_error(r.kind, r.message);
-        fire_state_changed();
-        return;
+        return fire_state_changed();
     }
     std::set<std::string> old_ids;
     for (const Spool& s : truth_) old_ids.insert(s.id);
@@ -505,30 +524,31 @@ void SpoolService::finish_pull(const JobResult& r)
     paging_suspect_ = r.list.paging_suspect;
     skipped_rows_   = r.list.skipped_rows;
 
-    if (events.pull_done) events.pull_done(added, kept);
-    fire_spools_changed();
-    fire_state_changed();
+    if (!call_event(events.pull_done, added, kept)) return false;
+    if (!fire_spools_changed()) return false;
+    return fire_state_changed();
 }
 
-void SpoolService::finish_op(unsigned long long serial, const JobResult& r)
+bool SpoolService::finish_op(unsigned long long serial, const JobResult& r)
 {
     auto it = std::find_if(ops_.begin(), ops_.end(), [&](const Op& o) { return o.serial == serial; });
-    if (it == ops_.end()) return;
+    if (it == ops_.end()) return true;
     const Op op = *it;
 
     if (op.kind == Op::Kind::Config) {
         ops_.erase(it);
-        if (r.ok) {
-            config_      = r.body;
-            have_config_ = true;
-            if (events.config_fetched) events.config_fetched(config_);
+        if (r.ok && r.body.is_object()) {
+            config_         = r.body;
+            have_config_    = true;
+            const json copy = config_;
+            return call_event(events.config_fetched, copy);
         }
-        return;
+        return true;
     }
 
-    const std::vector<Spool> before = compute_view(ops_.size());
+    const std::vector<Spool> before   = compute_view(ops_.size());
     const std::string        first_id = op.kind == Op::Kind::Delete && !op.ids.empty() ? op.ids.front() : op.id;
-    const char*              name     = op.kind == Op::Kind::Create ? "create" : op.kind == Op::Kind::Update ? "update" : "delete";
+    const std::string        name     = op.kind == Op::Kind::Create ? "create" : op.kind == Op::Kind::Update ? "update" : "delete";
     const std::string        spool_id = op.kind == Op::Kind::Create ? std::string() : first_id;
 
     if (r.ok) {
@@ -537,18 +557,34 @@ void SpoolService::finish_op(unsigned long long serial, const JobResult& r)
         last_synced_at_ = now();
         clear_error();
         pull_wanted_ = true;
-        if (events.push_done) events.push_done(name, spool_id);
+        if (!call_event(events.push_done, name, spool_id)) return false;
     } else {
         ops_.erase(it);
         set_error(r.kind, r.message);
         const bool refetch = op.kind == Op::Kind::Create ? r.kind == FailKind::Unknown
                                                          : (r.kind == FailKind::Unknown || r.kind == FailKind::NotFound);
         if (refetch) pull_wanted_ = true;
-        if (events.push_failed) events.push_failed(name, spool_id, r.kind, r.message);
+
+        // An edit whose reply was lost may have reached the server. Every update carries the filament name, so a later
+        // queued edit of the same spool, built from the old row, could undo it: drop those edits too.
+        int dropped = 0;
+        if (op.kind == Op::Kind::Update && r.kind == FailKind::Unknown) {
+            for (auto i = ops_.begin(); i != ops_.end();) {
+                if (i->kind == Op::Kind::Update && i->state == Op::State::Queued && i->id == op.id) {
+                    i = ops_.erase(i);
+                    ++dropped;
+                } else {
+                    ++i;
+                }
+            }
+        }
+        if (!call_event(events.push_failed, name, spool_id, r.kind, r.message)) return false;
+        for (int i = 0; i < dropped; ++i)
+            if (!call_event(events.push_failed, name, spool_id, FailKind::Unknown, std::string())) return false;
     }
 
-    if (!views_equal(before, compute_view(ops_.size()))) fire_spools_changed();
-    fire_state_changed();
+    if (!views_equal(before, compute_view(ops_.size())) && !fire_spools_changed()) return false;
+    return fire_state_changed();
 }
 
 } // namespace Slic3r::BblFilament

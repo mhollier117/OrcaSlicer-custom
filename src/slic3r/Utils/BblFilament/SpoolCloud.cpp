@@ -78,8 +78,8 @@ CloudReply classify_reply(int rc, const std::string& raw_body)
     CloudReply r;
     r.rc = rc;
     if (rc == 0) {
-        r.body = parsed.is_discarded() ? json::object() : std::move(parsed);
-        if (r.body.is_null() && raw_body.empty()) r.body = json::object();
+        // An empty or unparsable body leaves `body` null: a list or config reply like that is a failure for its reader.
+        if (!parsed.is_discarded()) r.body = std::move(parsed);
         return r;
     }
     r.error = CloudError::Unknown;

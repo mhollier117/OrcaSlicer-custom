@@ -35,15 +35,27 @@ bool SpoolWorker::post(Job job)
 
 void SpoolWorker::drain()
 {
-    std::unique_lock<std::mutex> lock(m_mutex);
-    m_accepting = false;
-    m_queue.clear();
-    m_idle.wait(lock, [this] { return !m_running; });
+    // The forgotten jobs are destroyed outside the lock: a job's captures may run code (and take other locks) when they die.
+    std::deque<Job> dropped;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_accepting = false;
+        ++m_draining;
+        dropped.swap(m_queue);
+    }
+    dropped.clear();
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        m_idle.wait(lock, [this] { return !m_running; });
+        --m_draining;
+    }
+    m_idle.notify_all();
 }
 
 void SpoolWorker::resume()
 {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::unique_lock<std::mutex> lock(m_mutex);
+    m_idle.wait(lock, [this] { return m_draining == 0; }); // a drain in progress finishes first and stays closed until now
     if (!m_stop) m_accepting = true;
 }
 

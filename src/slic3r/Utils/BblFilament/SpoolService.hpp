@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Slic3r::BblFilament {
@@ -31,7 +32,7 @@ struct Accept // the immediate answer to a request
 struct SyncState
 {
     bool        signed_in{false};
-    bool        is_syncing{false}; // anything queued or running
+    bool        is_syncing{false}; // a pull or a write is queued, running or wanted (config fetches do not count)
     bool        is_pulling{false};
     long long   last_synced_at{0}; // unix seconds of the last complete pull or successful write; 0 = never
     bool        has_error{false};
@@ -126,28 +127,41 @@ private:
 
     using Work = std::function<JobResult(ISpoolCloud&, const std::function<bool()>&)>;
 
+    enum class JobKind { None, Pull, Write, Config };
+
     std::vector<Spool> compute_view(std::size_t op_count) const;
     bool               session_matches(const Session& s) const;
     void               sync_session();
-    void               do_reset(bool fire, const Session& s);
+    bool               do_reset(bool fire, const Session& s); // false when an event handler destroyed the service
     bool               pristine() const;
 
     Accept enqueue_update(const json& patch, bool& queued);
     void   queue_op(Op op);
 
-    void pump();
-    void start_op(std::size_t index);
-    void start_pull();
-    void launch(Work work, bool is_pull, unsigned long long serial, const Session& s);
-    void on_completion(unsigned long long epoch, const Session& started, bool is_pull, unsigned long long serial, JobResult result);
-    void finish(bool is_pull, unsigned long long serial, JobResult result);
-    void finish_pull(const JobResult& r);
-    void finish_op(unsigned long long serial, const JobResult& r);
+    // The functions below return false when an event handler destroyed the service: touch no member then.
+    bool pump();
+    bool start_op(std::size_t index);
+    bool start_pull();
+    bool launch(Work work, JobKind kind, unsigned long long serial, const Session& s);
+    void on_completion(unsigned long long epoch, const Session& started, bool is_pull, unsigned long long serial, unsigned long long ticket, JobResult result);
+    bool finish(bool is_pull, unsigned long long serial, JobResult result);
+    bool finish_pull(const JobResult& r);
+    bool finish_op(unsigned long long serial, const JobResult& r);
 
     void set_error(FailKind kind, const std::string& message);
     void clear_error();
-    void fire_state_changed();
-    void fire_spools_changed();
+    bool fire_state_changed();
+    bool fire_spools_changed();
+
+    // Calls a copy of an event handler (it may replace `events`); false when the service was destroyed meanwhile.
+    template<class Fn, class... Args> bool call_event(const Fn& fn, Args&&... args)
+    {
+        if (!fn) return true;
+        Fn                 copy = fn;
+        std::weak_ptr<int> weak = alive_;
+        copy(std::forward<Args>(args)...);
+        return !weak.expired();
+    }
     long long now() const;
 
     ServiceDeps deps_;
@@ -168,8 +182,10 @@ private:
     int                 skipped_rows_{0};
 
     bool                job_running_{false};
-    bool                running_is_pull_{false};
+    JobKind             running_kind_{JobKind::None};
     unsigned long long  running_serial_{0};
+    unsigned long long  running_ticket_{0};
+    unsigned long long  next_ticket_{1};
     std::shared_ptr<std::atomic<bool>> cancel_;
 
     bool               session_signed_{false};
