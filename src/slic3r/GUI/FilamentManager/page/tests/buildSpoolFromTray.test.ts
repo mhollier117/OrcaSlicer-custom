@@ -328,4 +328,56 @@ assert.equal(
   'remain_weight = 0 reads as 0 (firmware-confirmed empty)',
 );
 
+// ---- 5. Custom filament id (P...) may match a user item; other ids may not ----
+
+const customPresets: PresetVendor[] = [
+  {
+    name: 'Overture',
+    types: [
+      {
+        name: 'PETG',
+        series: ['Overture PETG High Speed Tuned'],
+        items: [
+          {
+            name: 'Overture PETG High Speed Tuned',
+            series: 'Overture PETG High Speed Tuned',
+            filament_id: 'P844690c',
+            is_user: true,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: 'Bambu Lab',
+    types: [
+      {
+        name: 'PLA',
+        series: ['Basic'],
+        items: [
+          { series: 'Basic', filament_id: 'GFA00', name: 'Renamed Copy', is_user: true },
+        ],
+      },
+    ],
+  },
+];
+const customTray: AmsTray = {
+  slot_id: '1',
+  is_exists: true,
+  setting_id: 'P844690c',
+  fila_type: 'PETG',
+  sub_brands: '',
+  color: '#112233',
+  weight: '1000',
+  remain: 100,
+  diameter: 1.75,
+};
+const r5 = resolveTrayPreset(customTray, customPresets);
+assert.equal(r5.brandName, 'Overture');
+assert.equal(r5.typeName, 'PETG');
+assert.ok(r5.filamentName.includes('High Speed Tuned'), 'custom filament name resolved');
+const r5b = resolveTrayPreset({ ...customTray, setting_id: 'GFA00', fila_type: 'PLA' }, customPresets);
+assert.equal(r5b.brandName, '', 'system id still ignores a user item');
+assert.ok(!r5b.filamentName.includes('Renamed Copy'));
+
 console.log('buildSpoolFromTray.test ok');

@@ -100,10 +100,15 @@ export interface BuildSpoolFromTrayResult {
 // Strategy mirrors the previous `selectAmsSlot`:
 //   1. Prefer the preset reverse-lookup by setting_id / filament_id. Skip
 //      `is_user` items so AMS RFID never resolves to a user-derived alias
-//      (STUDIO-18110 / STUDIO-18117).
+//      (STUDIO-18110 / STUDIO-18117), except for a custom filament id
+//      (starts with `P`), which belongs to exactly that user item.
 //   2. Fall back to tray.sub_brands for the brand name and tray.fila_type
 //      string matching for the material type, peeling off the longest
 //      candidate prefix so the remainder becomes the series.
+export function isCustomFilamentId(id: string): boolean {
+  return /^P[0-9a-fA-F]{5,}$/.test(id);
+}
+
 export function resolveTrayPreset(
   tray: AmsTray,
   presets: PresetVendor[],
@@ -118,7 +123,7 @@ export function resolveTrayPreset(
     outer: for (const vendor of presets) {
       for (const tp of vendor.types) {
         const hit = tp.items?.find(
-          (it) => !it.is_user && (it.setting_id === settingId || it.filament_id === settingId),
+          (it) => (!it.is_user || isCustomFilamentId(settingId)) && (it.setting_id === settingId || it.filament_id === settingId),
         );
         if (hit) {
           brandName = vendor.name;

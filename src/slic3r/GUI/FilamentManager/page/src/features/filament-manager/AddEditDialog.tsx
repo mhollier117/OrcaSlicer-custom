@@ -25,6 +25,7 @@ import {
 import {
   buildSpoolFromTray,
   getTrayCurrentNetWeight,
+  isCustomFilamentId,
   partitionTraysForBatchCreate,
 } from './buildSpoolFromTray';
 // STUDIO-18385: gate AMS save on duplicate RFID detection so users explicitly
@@ -1732,7 +1733,7 @@ export function AddEditDialog({
       outer: for (const vendor of presets) {
         for (const tp of vendor.types) {
           const hit = tp.items?.find((it) =>
-            !it.is_user && (it.setting_id === settingId || it.filament_id === settingId),
+            (!it.is_user || isCustomFilamentId(settingId)) && (it.setting_id === settingId || it.filament_id === settingId),
           );
           if (hit) {
             brandName  = vendor.name;

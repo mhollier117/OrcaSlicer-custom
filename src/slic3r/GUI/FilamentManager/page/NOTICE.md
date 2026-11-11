@@ -42,6 +42,7 @@ The rest of this repository is AGPL v3 as well. The built bundle in `resources/w
    - `src/routes/__root.tsx`, `src/routes/index.tsx`, `src/routeTree.gen.ts`: as described above.
    - `src/dev/mockBridge.ts`: removed the device-page branches.
 5. "Push Local to Cloud" toolbar button (`src/features/filament-manager/FilamentManagerPage.tsx`): the button, its `pushingAll` state and its click handler are removed, and `pushAllNow` is no longer taken from the bridge hook there. The button pushes printer-linked spool data, which this build does not support yet; `pushAllNow` stays in `useFilamentManagerBridge.ts`.
+6. Custom filaments read from an AMS slot (`src/features/filament-manager/buildSpoolFromTray.ts`, `AddEditDialog.tsx`). The tray-to-preset lookup still skips `is_user` items, except when the slot's filament id is a custom filament id (`P` followed by hex digits, new helper `isCustomFilamentId`), so a slot loaded with a custom filament is imported with that filament's brand, type and name instead of an empty brand; ids of system filaments keep upstream's rule.
 
 ## Updating to a newer Bambu Studio tag
 
