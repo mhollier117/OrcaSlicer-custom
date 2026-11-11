@@ -44,6 +44,11 @@ web view there can starve the app's idle processing; the tab is off by default o
 Every request is answered at once from what the app already knows. Anything that takes a cloud call is answered with
 the current state and followed by reports when the call ends.
 
+Only the page may use the bridge: a message is handled only when the document it came from is the bundled page with
+the current generation, and the tab never navigates to a web address (such a link opens in the default browser).
+Packets carry spool lists and printer names, so they are handed to the web view through the script runner that does
+not log.
+
 ## The cloud calls
 
 The network plugin offers five calls: list (paged), create, update, delete and the catalogue of Bambu's own filaments.
@@ -56,9 +61,12 @@ Three properties of these calls shape the service:
   never guesses which listed spool it created.
 - **Update names its record by an `id` inside the body** and must always carry the filament name.
 
-The list is read 20 spools at a time until a short or empty page, or until the `total` the server may send. A failed
-page fails the whole list. A page that brings no new id ends the loop and marks the result as suspect, so a server
-that ignored the offset cannot cause an endless loop. A reply that is not JSON is a failure, not an empty account.
+The list call takes an offset and a limit, but Bambu's server currently answers with the whole list whatever is asked
+for. The list is therefore asked for 20 spools at a time and a reply with more rows than that is taken as the whole
+list. Should the server start to page, reading continues until a short or empty page, or until the `total` it may
+send. A failed page fails the whole list. A page that brings no new id ends the loop and marks the result as suspect,
+so a server that ignored the offset cannot cause an endless loop. A reply that is not JSON is a failure, not an empty
+account.
 
 ## The service
 
@@ -87,8 +95,12 @@ session changes makes no cloud call at all, so a queued write can never run agai
 Plugin calls block for as long as an HTTP request takes, and the plugin can be unloaded or reloaded while the app
 runs. All plugin calls of this feature are made by one worker thread. `BBLNetworkPlugin::destroy_agent()` drains that
 worker before the agent goes away: no new job starts and the call in flight is waited for. `create_agent()` reopens
-it. A job the worker discards still completes, as unavailable, so the service never waits for a result that will not
-come. The worker is never destroyed: the plugin singleton is torn down during static destruction and must still find it.
+it. The wait is as long as the plugin's own HTTP timeout at most. A job the worker discards still completes, as
+unavailable, so the service never waits for a result that will not come. The worker is never destroyed: the plugin
+singleton is torn down during static destruction and must still find it.
+
+A change of the Bambu sign-in is noticed by the service at its next request and, while the tab is open, by a check
+every two seconds; no hook in the sign-in code is needed.
 
 ## Filament ids
 
