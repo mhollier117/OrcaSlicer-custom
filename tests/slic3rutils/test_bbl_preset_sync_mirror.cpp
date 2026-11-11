@@ -1214,6 +1214,21 @@ TEST_CASE("Candidates are not announced before the first run is confirmed or whe
     CHECK(d.host.candidate_calls[0] == std::vector<Key>{fkey("Other")});
 }
 
+TEST_CASE("reset_candidates_prompt makes the next pass announce the candidates again", "[BblPresetSync]")
+{
+    Env e;
+    e.seed({});
+    e.add_candidate("Cand");
+    e.pass();
+    CHECK(e.host.candidate_calls.size() == 1);
+    e.pass(sync::Trigger::Manual);
+    CHECK(e.host.candidate_calls.size() == 1);
+
+    e.mirror.reset_candidates_prompt();
+    e.pass();
+    CHECK(e.host.candidate_calls.size() == 2);
+}
+
 TEST_CASE("The announced candidates are forgotten on a session change", "[BblPresetSync]")
 {
     Env e;

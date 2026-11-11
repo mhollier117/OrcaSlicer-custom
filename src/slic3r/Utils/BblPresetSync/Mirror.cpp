@@ -710,6 +710,12 @@ void Mirror::confirm_first_run(bool accepted)
     }
 }
 
+void Mirror::reset_candidates_prompt()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_last_candidates.clear();
+}
+
 void Mirror::reset_first_run_prompt()
 {
     std::lock_guard<std::mutex> lock(m_mutex);

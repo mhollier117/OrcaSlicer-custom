@@ -320,6 +320,7 @@ bool BblPresetSyncController::run_conversion_dialog(const sync::FirstRunSummary&
     }
     for (const std::string& name : dlg.unchecked()) m_mirror->set_declined(sync::Key{sync::PresetType::Filament, name});
     if (!not_converted.empty()) {
+        m_mirror->reset_candidates_prompt(); // they are offered again
         MessageDialog msg(m_app.mainframe,
                           format_wxstr(_L("These filaments were not converted and will be offered again: %1%"), join_names(not_converted)),
                           _L("Sync presets with the Bambu cloud"), wxOK);
@@ -421,9 +422,13 @@ void BblPresetSyncController::notify(const std::string& code, const std::string&
 
 template<class T> std::optional<T> BblPresetSyncController::run_on_ui(std::function<T()> fn)
 {
-    auto promise = std::make_shared<std::promise<T>>();
-    auto future  = promise->get_future();
-    m_app.CallAfter([promise, fn = std::move(fn)] {
+    auto promise   = std::make_shared<std::promise<T>>();
+    auto future    = promise->get_future();
+    // Set when the caller stops waiting. The queued closure then does nothing. It is checked only when the closure
+    // starts, so fn must still not rely on objects of the caller's stack: capture by value.
+    auto abandoned = std::make_shared<std::atomic<bool>>(false);
+    m_app.CallAfter([promise, abandoned, fn = std::move(fn)] {
+        if (abandoned->load(std::memory_order_acquire)) return;
         try {
             promise->set_value(fn());
         } catch (...) {
@@ -431,7 +436,10 @@ template<class T> std::optional<T> BblPresetSyncController::run_on_ui(std::funct
         }
     });
     while (future.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready)
-        if (cancelled()) return std::nullopt;
+        if (cancelled()) {
+            abandoned->store(true, std::memory_order_release);
+            return std::nullopt;
+        }
     try {
         return future.get();
     } catch (const std::future_error&) {
@@ -632,8 +640,8 @@ void BblPresetSyncController::k_copy_step()
         bool ok    = true;
         for (const float diameter : printer->diameters) {
             // a. Ask for the whole table of this nozzle.
-            const auto asked = run_on_ui<int>([&]() {
-                MachineObject* m = selected_machine(printer->dev_id);
+            const auto asked = run_on_ui<int>([dev_id = printer->dev_id, diameter]() {
+                MachineObject* m = selected_machine(dev_id);
                 if (m == nullptr) return -2;
                 PACalibExtruderInfo cali;
                 cali.extruder_id            = 0;
@@ -659,9 +667,9 @@ void BblPresetSyncController::k_copy_step()
             };
             Table table;
             for (int waited = 0; waited <= 10000; waited += 300) {
-                const auto polled = run_on_ui<Table>([&]() {
+                const auto polled = run_on_ui<Table>([dev_id = printer->dev_id]() {
                     Table t;
-                    MachineObject* m = selected_machine(printer->dev_id);
+                    MachineObject* m = selected_machine(dev_id);
                     if (m == nullptr) {
                         t.gone = true;
                         return t;
@@ -703,11 +711,11 @@ void BblPresetSyncController::k_copy_step()
             if (plan.to_write.empty()) continue;
             std::string setting_id;
             if (const auto entry = ledger->get(job.key); entry && entry->state == "linked") setting_id = entry->setting_id;
-            const auto written = run_on_ui<int>([&]() {
-                MachineObject* m = selected_machine(printer->dev_id);
+            const auto written = run_on_ui<int>([dev_id = printer->dev_id, diameter, entries = plan.to_write, setting_id]() {
+                MachineObject* m = selected_machine(dev_id);
                 if (m == nullptr) return -2;
                 std::vector<PACalibResult> values;
-                for (const sync::KEntry& e : plan.to_write) {
+                for (const sync::KEntry& e : entries) {
                     PACalibResult r;
                     r.tray_id            = -1;
                     r.cali_idx           = -1;
