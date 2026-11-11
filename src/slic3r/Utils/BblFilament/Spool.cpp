@@ -79,10 +79,13 @@ void apply_color_rule(Spool& s)
 
 constexpr double k_max_weight_g = 999999999.0;
 
-// A weight in grams, bounded before it is rounded (llround of a huge or non-finite double is undefined).
-long long round_g(double v) { return std::llround(std::clamp(v, 0.0, k_max_weight_g)); }
-
 } // namespace
+
+long long bounded_grams(double v)
+{
+    if (!std::isfinite(v)) return 0;
+    return std::llround(std::clamp(v, 0.0, k_max_weight_g));
+}
 
 bool valid_rfid(const std::string& rfid)
 {
@@ -285,9 +288,9 @@ json create_body(const json& page_spool, const FilamentLookup& lookup)
     b["rolls"]      = 1;
 
     const bool      has_total = initial_weight > 0;
-    const long long total     = round_g(initial_weight);
+    const long long total     = bounded_grams(initial_weight);
     if (has_total) b["totalNetWeight"] = total;
-    if (has_net && net_weight >= 0) b["netWeight"] = round_g(net_weight);
+    if (has_net && net_weight >= 0) b["netWeight"] = bounded_grams(net_weight);
     else if (has_total) b["netWeight"] = total;
     if (!note.empty()) b["note"] = note;
     return b;
@@ -326,9 +329,9 @@ std::optional<json> update_body(const Spool& current, const json& patch, const F
         const std::size_t n = b.contains("colors") ? b["colors"].size() : 1;
         b["colorType"]      = normalize_color_type(ct, n);
     }
-    if (read_number(p, "net_weight", num)) b["netWeight"] = std::max<long long>(0, round_g(num));
+    if (read_number(p, "net_weight", num)) b["netWeight"] = std::max<long long>(0, bounded_grams(num));
     if (read_number(p, "initial_weight", num) || read_number(p, "total_net_weight", num))
-        b["totalNetWeight"] = std::max<long long>(0, round_g(num));
+        b["totalNetWeight"] = std::max<long long>(0, bounded_grams(num));
 
     if (b.empty()) return json::object();
 

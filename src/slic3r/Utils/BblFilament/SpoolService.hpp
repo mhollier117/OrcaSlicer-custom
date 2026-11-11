@@ -128,7 +128,8 @@ public:
     void        request_config(bool force);
     const json* cached_config() const; // null until fetched
 
-    // What every request does first: true when the session differed and the state was reset. Starts nothing.
+    // What every request does first: true when the session differed and the state was reset. Starts nothing. False
+    // also when the reset ended in a callback that destroyed the service (a request then returns at once).
     bool refresh_session();
 
     void reset(); // the account, the sign-in state or the plugin changed
@@ -169,7 +170,9 @@ private:
 
     std::vector<Spool> compute_view(std::size_t op_count) const;
     bool               session_matches(const Session& s) const;
-    void               sync_session();
+    enum class SessionCheck { Same, Reset, Gone }; // Gone: a callback of the reset destroyed the service
+    SessionCheck       check_session();
+    bool               sync_session(); // false when the service is gone: touch no member then
     bool               do_reset(bool fire, const Session& s); // false when an event handler destroyed the service
     bool               pristine() const;
 

@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <set>
@@ -276,15 +277,16 @@ TEST_CASE("The cloud's pin holds while the tray agrees and breaks when the filam
 
 TEST_CASE("One row is never matched by two trays", "[BblFilament]")
 {
+    // Two occupied trays with the same RFID are evidence for neither (see the test of two printers below).
     Ctx  c;
     auto p = make_printer();
     p.trays.push_back(make_rfid_tray("0", "UUID1"));
     p.trays.push_back(make_rfid_tray("1", "UUID1"));
     const auto plan = c.plan({p}, {make_row("1", "UUID1")});
-    REQUIRE(plan.mounts.size() == 1);
-    CHECK(plan.mounts[0].slot.slot_id == "0");
+    CHECK(plan.mounts.empty());
+    CHECK(plan.trays[0].spool_id.empty());
     CHECK(plan.trays[1].spool_id.empty());
-    CHECK(plan.registrations.empty()); // the account has that spool
+    CHECK(plan.registrations.empty());
 
     Ctx  d;
     auto q = make_printer();
@@ -998,14 +1000,205 @@ TEST_CASE("An assignment moves a manual row from an excluded printer", "[BblFila
     CHECK(plan.unbinds.empty());
 }
 
-TEST_CASE("An RFID mount omits a measurement that is still being read", "[BblFilament]")
+TEST_CASE("A tray being read is not matched and not registered", "[BblFilament]")
 {
     Ctx c;
     auto t = make_rfid_tray("0", "UUID1");
     t.reading = true;
-    const auto plan = c.plan({with_tray(make_printer(), t)}, {make_row("1", "UUID1")});
+    auto plan = c.plan({with_tray(make_printer(), t)}, {make_row("1", "UUID1")});
+    CHECK(plan.mounts.empty());
+    REQUIRE(plan.trays.size() == 1);
+    CHECK(plan.trays[0].spool_id.empty());
+    // An unknown official spool waits for the read to end too.
+    Ctx d;
+    plan = d.plan({with_tray(make_printer(), t)}, {});
+    CHECK(plan.registrations.empty());
+    t.reading = false;
+    CHECK(d.plan({with_tray(make_printer(), t)}, {}).registrations.size() == 1);
+}
+
+TEST_CASE("An RFID left behind on an empty tray matches nothing", "[BblFilament]")
+{
+    auto stale     = make_rfid_tray("0", "UUID1");
+    stale.occupied = false; // the spool was taken out; a diff of only the exist bits kept its data
+    {
+        Ctx  c;
+        auto plan = c.plan({with_tray(make_printer(), stale)}, {make_row("1", "UUID1")});
+        CHECK(plan.mounts.empty());
+        REQUIRE(plan.trays.size() == 1);
+        CHECK(plan.trays[0].spool_id.empty());
+        Ctx d;
+        CHECK(d.plan({with_tray(make_printer(), stale)}, {}).registrations.empty());
+    }
+    {
+        // The same spool newly reported by an occupied tray of the same printer is mounted there.
+        Ctx  c;
+        auto p = with_tray(make_printer(), stale);
+        p.trays.push_back(make_rfid_tray("1", "UUID1"));
+        const auto plan = c.plan({p}, {mounted_row(make_row("1", "UUID1"), "dev1", "sn0", 0, "0")});
+        REQUIRE(plan.mounts.size() == 1);
+        CHECK(plan.mounts[0].slot == (fil::SlotKey{"dev1", 0, "1"}));
+    }
+    {
+        // ... or of another printer.
+        Ctx  c;
+        auto q      = make_printer("dev2");
+        q.ams_sn[0] = "sn2";
+        q.trays.push_back(make_rfid_tray("3", "UUID1"));
+        const auto plan = c.plan({with_tray(make_printer(), stale), q}, {mounted_row(make_row("1", "UUID1"), "dev1", "sn0", 0, "0")});
+        REQUIRE(plan.mounts.size() == 1);
+        CHECK(plan.mounts[0].slot == (fil::SlotKey{"dev2", 0, "3"}));
+        CHECK(plan.unbinds.empty());
+    }
+}
+
+TEST_CASE("Two occupied trays with the same RFID leave its row alone", "[BblFilament]")
+{
+    Ctx  c;
+    auto p1 = with_tray(make_printer("dev1"), make_rfid_tray("0", "UUID1"));
+    auto p2 = make_printer("dev2");
+    p2.ams_sn[0] = "sn2";
+    p2.trays.push_back(make_rfid_tray("0", "UUID1"));
+    const auto row = mounted_row(make_row("1", "UUID1"), "dev1", "sn0", 0, "3"); // claims a slot no tray reports
+    for (int i = 0; i < 6; ++i) {
+        p1.observations = static_cast<unsigned long long>(i + 1);
+        c.now += 20;
+        c.serial += 1;
+        const auto plan = c.plan({p1, p2}, {row});
+        CHECK_FALSE(plan.has_actions());
+        CHECK_FALSE(plan.want_pull);
+        CHECK_FALSE(plan.notes.empty());
+        REQUIRE(plan.trays.size() == 2);
+        CHECK(plan.trays[0].spool_id.empty());
+        CHECK(plan.trays[1].spool_id.empty());
+        CHECK_FALSE(plan.trays[0].note.empty());
+    }
+    CHECK(c.state.unmatched.empty());
+    // Two unknown official spools with one RFID are not registered either.
+    Ctx d;
+    CHECK(d.plan({p1, p2}, {}).registrations.empty());
+}
+
+TEST_CASE("An unbind streak belongs to the mount it was counted for", "[BblFilament]")
+{
+    Ctx  c;
+    auto p = make_printer();
+    for (const char* slot : {"0", "1"}) {
+        auto t     = make_tray(slot);
+        t.occupied = false;
+        p.trays.push_back(t);
+    }
+    const auto at_a = mounted_row(make_row("2"), "dev1", "sn0", 0, "0");
+    for (int i = 0; i < 4; ++i) {
+        p.observations = static_cast<unsigned long long>(i + 1);
+        c.now += 11;
+        CHECK(c.plan({p}, {at_a}).unbinds.empty());
+    }
+    REQUIRE(c.state.unmatched["2"].count == 4); // observations and seconds enough at A; only a newer list is missing
+
+    // A newer list shows the row at B, where no tray matches either: B starts its own streak.
+    const auto at_b = mounted_row(make_row("2"), "dev1", "sn0", 0, "1");
+    const auto b_list = c.serial + 1;
+    c.serial          = b_list;
+    p.observations    = 5;
+    c.now += 11;
+    CHECK(c.plan({p}, {at_b}).unbinds.empty());
+    CHECK(c.state.unmatched["2"].count == 1);
+    CHECK(c.state.unmatched["2"].slot_id == "1");
+    for (int i = 0; i < 3; ++i) {
+        p.observations += 1;
+        c.now += 11; // three observations and 33 seconds at B, but still the list B's streak began with
+        CHECK(c.plan({p}, {at_b}).unbinds.empty());
+    }
+    c.serial += 1;
+    p.observations += 1;
+    const auto plan = c.plan({p}, {at_b});
+    REQUIRE(plan.unbinds.size() == 1);
+    CHECK(plan.unbinds[0].slot.slot_id == "1");
+}
+
+TEST_CASE("A huge or non-finite row weight is bounded before it is rounded", "[BblFilament]")
+{
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    CHECK(fil::bounded_grams(1e30) == 999999999);
+    CHECK(fil::bounded_grams(-5.0) == 0);
+    CHECK(fil::bounded_grams(nan) == 0);
+    CHECK(fil::bounded_grams(std::numeric_limits<double>::infinity()) == 0);
+    CHECK(fil::bounded_grams(749.6) == 750);
+
+    auto t    = make_tray(); // 50 %, no total of its own: the row's total counts
+    t.total_g = 0;
+    auto row  = make_row("1");
+    row.total_net_weight = 1e30;
+    CHECK(fil::measured_grams(t, row).value() == 500000000);
+    row.total_net_weight = nan;
+    CHECK_FALSE(fil::measured_grams(t, row).has_value());
+
+    row.total_net_weight = 1e30;
+    row.net_weight       = nan;
+    auto item            = fil::ams_item_from_row(row, "sn0", 0, 1, "0", std::nullopt);
+    CHECK(item.total_net_weight == 999999999);
+    CHECK(item.net_weight == 0);
+    row.total_net_weight = nan;
+    row.net_weight       = 1e30;
+    item                 = fil::ams_item_from_row(row, "sn0", 0, 1, "0", std::nullopt);
+    CHECK(item.total_net_weight == 0);
+    CHECK(item.net_weight == 999999999);
+
+    // A weight push compares with the bounded value.
+    Ctx  c;
+    auto mounted       = mounted_row(make_row("1", "UUID1"), "dev1", "sn0", 0, "0");
+    mounted.net_weight = 1e30;
+    const auto plan    = c.plan({with_tray(make_printer(), make_rfid_tray("0", "UUID1"))}, {mounted});
+    REQUIRE(plan.weights.size() == 1);
+    CHECK(plan.weights[0].grams == 500);
+}
+
+TEST_CASE("An assignment outlives the slot's old contents and binds when the assigned filament shows", "[BblFilament]")
+{
+    Ctx  c;
+    const fil::SlotKey S{"dev1", 0, "0"};
+    c.state.assignments[S] = make_assignment("dev1", "0", "2", c.now);
+    auto old        = make_tray("0");
+    old.filament_id = "GFB00";
+    old.color       = "#000000FF";
+    for (int i = 0; i < 3; ++i) {
+        c.now += 1;
+        CHECK(c.plan({with_tray(make_printer(), old)}, {make_row("2")}).mounts.empty());
+        REQUIRE(c.state.assignments.count(S) == 1);
+    }
+    CHECK(c.state.assignments[S].has_before);
+    CHECK(c.state.assignments[S].before_filament_id == "GFB00");
+    const auto plan = c.plan({with_tray(make_printer(), make_tray("0"))}, {make_row("2")});
     REQUIRE(plan.mounts.size() == 1);
-    CHECK_FALSE(plan.mounts[0].grams.has_value());
+    CHECK(plan.mounts[0].spool_id == "2");
+}
+
+TEST_CASE("An assignment ends when its slot shows yet another filament or empties", "[BblFilament]")
+{
+    const fil::SlotKey S{"dev1", 0, "0"};
+    auto               old = make_tray("0");
+    old.filament_id        = "GFB00";
+    old.color              = "#000000FF";
+    const int variant      = GENERATE(0, 1, 2); // a third filament, a third colour, the slot empties
+    Ctx       c;
+    c.state.assignments[S] = make_assignment("dev1", "0", "2", c.now);
+    fil::TrayFacts next    = old;
+    if (variant == 0) {
+        CHECK(c.plan({with_tray(make_printer(), old)}, {make_row("2")}).mounts.empty()); // the old contents first
+        next.filament_id = "GFC00";
+    } else if (variant == 1) {
+        CHECK(c.plan({with_tray(make_printer(), old)}, {make_row("2")}).mounts.empty());
+        next.color = "#FF0000FF";
+    } else {
+        next.occupied = false;
+    }
+    const auto plan = c.plan({with_tray(make_printer(), next)}, {make_row("2")});
+    CHECK(plan.mounts.empty());
+    CHECK(c.state.assignments.empty());
+    CHECK_FALSE(plan.notes.empty());
+    // The assigned filament showing up later binds nothing.
+    CHECK(c.plan({with_tray(make_printer(), make_tray("0"))}, {make_row("2")}).mounts.empty());
 }
 
 TEST_CASE("An all-zero RFID permits an assignment match", "[BblFilament]")
@@ -1462,6 +1655,73 @@ TEST_CASE("Unassign sends one unbind and later ticks do not bind the spool again
         d.run({p});
     }
     CHECK(d.count("sync_") == 1);
+}
+
+TEST_CASE("A planned unbind is sent only while the row has exactly the planned mount and the slot to itself", "[BblFilament]")
+{
+    const int variant = GENERATE(0, 1, 2, 3); // nothing changed; the AMS serial; the AMS type; another row claims the slot
+    DriverRig d;
+    d.rig.cloud->rows.push_back(mounted_json(row_with(1000002), "dev1", "sn0", 0, "0"));
+    d.load();
+    auto t     = make_tray("0");
+    t.occupied = false;
+    auto p     = with_tray(make_printer(), t);
+    bool planned = false;
+    for (int i = 0; i < 8 && !planned; ++i) {
+        p.observations = static_cast<unsigned long long>(i + 1);
+        d.t += 11;
+        d.rig.svc->request_pull(); // a newer list; still running when a round starts, so the round's op waits behind it
+        d.driver->tick({p});
+        planned = !d.driver->last_plan().unbinds.empty();
+        if (!planned) d.rig.settle();
+    }
+    REQUIRE(planned);
+    REQUIRE(d.count("sync_slots") == 0);
+    if (variant == 1) d.rig.cloud->rows[0]["amsSn"] = "sn9";
+    if (variant == 2) d.rig.cloud->rows[0]["amsType"] = 2;
+    if (variant == 3) d.rig.cloud->rows.push_back(mounted_json(row_with(1000003), "dev1", "sn0", 0, "0"));
+    d.rig.settle(); // the pull brings the list of that moment, then the op starts
+    CHECK(d.count("sync_slots") == (variant == 0 ? 1 : 0));
+}
+
+TEST_CASE("Unassign sends its unbind only while the row has the same mount and the slot to itself", "[BblFilament]")
+{
+    const int variant = GENERATE(0, 1, 2, 3); // nothing changed; the AMS serial; the AMS type; another row claims the slot
+    DriverRig d;
+    d.rig.cloud->rows.push_back(mounted_json(row_with(1000002), "dev1", "sn0", 0, "1"));
+    d.load();
+    const auto p = with_tray(make_printer(), make_tray("1"));
+    d.rig.svc->request_pull(); // running: the unbind waits behind it
+    REQUIRE(d.driver->unassign(fil::SlotKey{"dev1", 0, "1"}, {p}).ok);
+    if (variant == 1) d.rig.cloud->rows[0]["amsSn"] = "sn9";
+    if (variant == 2) d.rig.cloud->rows[0]["amsType"] = 2;
+    if (variant == 3) d.rig.cloud->rows.push_back(mounted_json(row_with(1000003), "dev1", "sn0", 0, "1"));
+    d.rig.settle();
+    CHECK(d.count("sync_slots") == (variant == 0 ? 1 : 0));
+}
+
+TEST_CASE("Ops of a round still queued when the driver is reset send nothing", "[BblFilament]")
+{
+    DriverRig d;
+    d.rig.cloud->rows.push_back(rfid_row(1000001, "UUID1"));
+    d.rig.cloud->rows.push_back(row_with(1000002));
+    d.rig.cloud->rows.push_back(row_with(1000003));
+    d.load();
+    auto p = make_printer();
+    p.trays.push_back(make_rfid_tray("0", "UUID1"));
+    p.trays.push_back(make_tray("1"));
+    p.trays.push_back(make_rfid_tray("2", "UUIDN1")); // a new official spool
+    d.driver->assign(make_assignment("dev1", "1", "1000002", 0));
+
+    d.rig.svc->update(json{{"spool_id", "1000003"}, {"note", "x"}}); // runs first: the round's ops wait behind it
+    d.driver->tick({p});
+    REQUIRE(d.driver->last_plan().mounts.size() == 2);
+    REQUIRE(d.driver->last_plan().registrations.size() == 1);
+    d.driver->reset();
+    d.rig.settle();
+    CHECK(d.count("update") == 1);
+    CHECK(d.count("sync_ams") == 0);
+    CHECK(d.count("sync_slots") == 0);
 }
 
 TEST_CASE("Unassign refuses an RFID spool and an empty slot", "[BblFilament]")

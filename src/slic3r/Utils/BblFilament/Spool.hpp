@@ -45,6 +45,9 @@ struct FilamentLookup
 bool                     valid_rfid(const std::string& rfid);                           // non-empty and not all '0'
 std::optional<long long> parse_spool_id(const std::string& id);                         // 1..18 decimal digits, value > 0
 int                      normalize_color_type(int color_type, std::size_t color_count); // 0,1,2 kept; else 1 if count > 1, else 2
+// A weight in grams, bounded before it is rounded (llround of a huge or non-finite double is undefined): a non-finite
+// value counts as 0, and the result is clamped to 0 ... 999999999.
+long long                bounded_grams(double v);
 
 std::optional<Spool> spool_from_cloud(const json& row);                // nullopt when the row is no object or has no usable id
 json                 spool_to_page(const Spool& s);                    // the page's Spool object

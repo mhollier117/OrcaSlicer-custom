@@ -300,8 +300,7 @@ void PrinterTap::on_message(const std::string& dev_id, const std::string& text, 
                 auto it = print->find(key);
                 if (it != print->end()) e.parts[key] = *it;
             }
-            e.facts.has_full      = true;
-            e.facts.observations = 0;
+            e.facts.has_full = true;
         } else {
             for (const char* key : k_parts) {
                 auto it = print->find(key);
@@ -310,8 +309,10 @@ void PrinterTap::on_message(const std::string& dev_id, const std::string& text, 
                 if (b != e.parts.end() && b->is_object() && it->is_object()) merge_into(*b, *it);
                 else e.parts[key] = *it;
             }
-            if (e.facts.has_full) ++e.facts.observations;
         }
+        // Every status message counts, full states too, and the count never goes back until the printer is forgotten:
+        // the linker takes a different number for a new observation.
+        ++e.facts.observations;
         e.facts.last_message_at = now;
         e.dirty                 = true;
     } catch (...) {

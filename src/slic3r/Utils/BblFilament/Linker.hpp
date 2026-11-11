@@ -44,6 +44,11 @@ struct Assignment
     std::string              filament_id; // what the tray must report
     std::vector<std::string> colors;      // at least one
     long long                created_at{0};
+    // What the tray showed the first time it disagreed with the assignment (right after the user confirms, the tray
+    // still reports its old contents for a few messages). Anything else appearing there ends the assignment.
+    bool                     has_before{false};
+    std::string              before_filament_id;
+    std::string              before_color;
 };
 
 // Memory only.
@@ -56,6 +61,11 @@ struct LinkerState
         unsigned long long last_observation{0};
         long long          first_at{0};
         unsigned long long list_serial{0};
+        // The mount it was counted for; a row that claims another mount starts again from one.
+        std::string        dev_id;
+        std::string        ams_sn;
+        int                ams_id{0};
+        std::string        slot_id;
     };
     std::map<std::string, Streak> unmatched; // by spool id
     struct Push

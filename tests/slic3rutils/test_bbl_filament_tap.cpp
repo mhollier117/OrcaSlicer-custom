@@ -149,7 +149,7 @@ TEST_CASE("A full state sets has_full and fills the trays in unit, slot and exte
     REQUIRE(f != nullptr);
     CHECK(f->has_full);
     CHECK(f->last_message_at == 100);
-    CHECK(f->observations == 0);
+    CHECK(f->observations == 1);
     REQUIRE(f->trays.size() == 8);
     const std::vector<std::pair<int, std::string>> order = {{0, "0"}, {0, "1"}, {0, "2"}, {0, "3"}, {1, "0"}, {128, "0"}, {255, "0"}, {254, "0"}};
     for (std::size_t i = 0; i < order.size(); ++i) {
@@ -368,7 +368,7 @@ TEST_CASE("A diff that brings the whole ams array again updates one tray", "[Bbl
     const auto* f = tap.facts("d1");
     REQUIRE(f != nullptr);
     CHECK(f->has_full);
-    CHECK(f->observations == 1);
+    CHECK(f->observations == 2);
     CHECK(f->last_message_at == 160);
     CHECK(find_tray(f, 0, "0")->remain == 55);
     CHECK(find_tray(f, 0, "1")->remain == -1);
@@ -388,7 +388,7 @@ TEST_CASE("A diff without ams leaves the trays alone", "[BblFilament]")
     REQUIRE(f != nullptr);
     CHECK(f->trays.size() == 8);
     CHECK(find_tray(f, 0, "0")->remain == 80);
-    CHECK(f->observations == 2);
+    CHECK(f->observations == 3);
     CHECK(f->last_message_at == 120);
 }
 
@@ -433,7 +433,7 @@ TEST_CASE("A second full state replaces everything", "[BblFilament]")
     fil::PrinterTap tap;
     tap.on_message("d1", full_message(), 100);
     tap.on_message("d1", diff_message(json{{"mc_percent", 1}}), 101);
-    REQUIRE(tap.facts("d1")->observations == 1);
+    REQUIRE(tap.facts("d1")->observations == 2);
     json p = full_print();
     p["ams"]["ams"].erase(p["ams"]["ams"].begin() + 1, p["ams"]["ams"].end()); // only unit 0 is left
     p.erase("vir_slot");
@@ -442,12 +442,31 @@ TEST_CASE("A second full state replaces everything", "[BblFilament]")
     const auto* f = tap.facts("d1");
     REQUIRE(f != nullptr);
     CHECK(f->has_full);
-    CHECK(f->observations == 0);
+    CHECK(f->observations == 3); // the count goes on across full states
     CHECK(f->trays.size() == 4);
     CHECK(find_tray(f, 1, "0") == nullptr);
     CHECK(find_tray(f, 128, "0") == nullptr);
     CHECK(find_tray(f, 255, "0") == nullptr);
     CHECK_FALSE(f->pa_supported.has_value());
+}
+
+TEST_CASE("The observation count grows with full states too and restarts only when the printer is forgotten", "[BblFilament]")
+{
+    fil::PrinterTap tap;
+    // A printer that sends only full states still reports a new number every time.
+    for (unsigned long long i = 1; i <= 3; ++i) {
+        tap.on_message("d1", full_message(), static_cast<long long>(i));
+        CHECK(tap.facts("d1")->observations == i);
+    }
+    tap.on_message("d1", diff_message(json{{"mc_percent", 1}}), 4);
+    CHECK(tap.facts("d1")->observations == 4);
+    tap.forget("d1");
+    tap.on_message("d1", full_message(), 5);
+    CHECK(tap.facts("d1")->observations == 1);
+    tap.on_message("d2", full_message(), 6);
+    tap.clear();
+    tap.on_message("d2", full_message(), 7);
+    CHECK(tap.facts("d2")->observations == 1);
 }
 
 TEST_CASE("A full state without msg counts as full", "[BblFilament]")
@@ -467,7 +486,7 @@ TEST_CASE("A diff before any full state is merged but has_full stays false", "[B
     const auto* f = tap.facts("d1");
     REQUIRE(f != nullptr);
     CHECK_FALSE(f->has_full);
-    CHECK(f->observations == 0);
+    CHECK(f->observations == 1);
     CHECK(f->last_message_at == 50);
     CHECK(f->trays.size() == 6);
     CHECK(find_tray(f, 0, "0")->occupied);
@@ -506,8 +525,8 @@ TEST_CASE("The printer tap keeps two printers apart", "[BblFilament]")
     tap.on_message("d1", diff_message(json{{"mc_percent", 1}}), 30);
     CHECK(find_tray(tap.facts("d1"), 0, "0")->type == "PLA");
     CHECK(find_tray(tap.facts("d2"), 0, "0")->type == "PC");
-    CHECK(tap.facts("d1")->observations == 1);
-    CHECK(tap.facts("d2")->observations == 0);
+    CHECK(tap.facts("d1")->observations == 2);
+    CHECK(tap.facts("d2")->observations == 1);
     CHECK(tap.facts("d1")->last_message_at == 30);
     CHECK(tap.facts("d2")->last_message_at == 20);
 }

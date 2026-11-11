@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include "slic3r/Utils/BblFilament/Spool.hpp"
 #include "slic3r/Utils/BblFilament/SpoolCloud.hpp"
@@ -10,6 +11,7 @@
 
 #include <functional>
 #include <memory>
+#include <new>
 #include <set>
 #include <string>
 #include <vector>
@@ -607,6 +609,79 @@ TEST_CASE("A done callback may destroy the service", "[BblFilament]")
     rig.settle();
     CHECK(rig.svc.get() == nullptr);
     CHECK(rig.cloud->count("list") == 0);
+}
+
+namespace {
+
+// A service in storage the test owns, so that a callback can end it and put a fresh one at the same address. Code that
+// went on using the ended service would reach the fresh one (the same type at the same address), which counts every use.
+struct ReplaceableService
+{
+    alignas(fil::SpoolService) unsigned char bytes[sizeof(fil::SpoolService)];
+    bool live{false};
+
+    fil::SpoolService* get() { return std::launder(reinterpret_cast<fil::SpoolService*>(bytes)); }
+    void               emplace(fil::ServiceDeps deps)
+    {
+        ::new (static_cast<void*>(bytes)) fil::SpoolService(std::move(deps));
+        live = true;
+    }
+    void destroy()
+    {
+        if (!live) return;
+        live = false;
+        get()->~SpoolService();
+    }
+    ~ReplaceableService() { destroy(); }
+};
+
+} // namespace
+
+TEST_CASE("A request that finds a changed session returns at once when a link callback ended the service", "[BblFilament]")
+{
+    const bool via_link = GENERATE(false, true);
+    Rig        rig; // the cloud, the runner and the session
+    rig.svc.reset();
+    int                sentinel_uses = 0;
+    ReplaceableService slot;
+    fil::ServiceDeps   deps;
+    deps.cloud      = rig.cloud;
+    deps.run_async  = [&rig](std::function<void()> job) {
+        rig.worker.push_back(std::move(job));
+        return true;
+    };
+    deps.post_to_ui = [&rig](std::function<void()> f) { rig.ui.push_back(std::move(f)); };
+    deps.session    = [&rig] { return rig.session; };
+    deps.now        = [] { return 1000LL; };
+    slot.emplace(std::move(deps));
+
+    slot.get()->request_pull(); // running: the link op waits behind it
+    slot.get()->link(ams_request([&](const Outcome&) {
+        slot.destroy();
+        fil::ServiceDeps sentinel;
+        sentinel.session   = [&sentinel_uses] {
+            ++sentinel_uses;
+            return fil::Session{true, "u2", 1, false};
+        };
+        sentinel.run_async = [&sentinel_uses](std::function<void()>) {
+            ++sentinel_uses;
+            return false;
+        };
+        slot.emplace(std::move(sentinel));
+    }));
+    REQUIRE(rig.worker.size() == 1);
+
+    rig.session.uid = "u2";
+    if (via_link) {
+        const fil::Accept a = slot.get()->link(ams_request());
+        CHECK_FALSE(a.ok);
+    } else {
+        slot.get()->request_pull();
+    }
+    CHECK(sentinel_uses == 0);
+    rig.settle();
+    CHECK(rig.cloud->count("list") == 0);
+    CHECK(rig.cloud->count("sync_ams") == 0);
 }
 
 TEST_CASE("A done callback may queue another link op", "[BblFilament]")

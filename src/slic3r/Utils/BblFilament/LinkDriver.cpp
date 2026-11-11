@@ -32,6 +32,17 @@ bool claims_slot(const Spool& r, const SlotKey& k)
     return r.in_printer && r.dev_id == k.dev_id && r.ams_id == k.ams_id && r.slot_id == k.slot_id;
 }
 
+// An unbind names the slot, not the spool: it is sent only while the row still has exactly the mount that was planned
+// (printer, AMS serial, AMS id, AMS type and slot) and no other row claims that slot.
+bool unbind_still_wanted(const std::vector<Spool>& rows, const std::string& spool_id, const SlotKey& slot, const std::string& ams_sn, int ams_type)
+{
+    const Spool* row = find_row(rows, spool_id);
+    if (row == nullptr || !claims_slot(*row, slot) || row->ams_sn != ams_sn || row->ams_type != ams_type) return false;
+    for (const Spool& r : rows)
+        if (r.id != spool_id && claims_slot(r, slot)) return false;
+    return true;
+}
+
 const char* mode_text(LinkMode m)
 {
     switch (m) {
@@ -160,10 +171,11 @@ void LinkDriver::start_round(const std::vector<PrinterView>& printers)
             LinkRequest                 req;
             req.kind      = LinkRequest::Kind::AmsSync;
             req.dev_id    = dev;
-            req.build_ams = [entries, measured, keys, dev](const std::vector<Spool>& now_rows, const std::set<std::string>& busy_ids) {
+            req.build_ams = [this, weak, gen, entries, measured, keys, dev](const std::vector<Spool>& now_rows, const std::set<std::string>& busy_ids) {
                 std::vector<AmsItem> items;
                 measured->clear();
                 keys->clear();
+                if (weak.expired() || gen != generation_) return items; // a round of before a reset: dropped without a call
                 for (const AmsEntry& e : entries) {
                     const Spool* row = find_row(now_rows, e.spool_id);
                     if (row == nullptr || busy_ids.count(e.spool_id) > 0 || row->rfid != e.rfid) continue;
@@ -203,7 +215,8 @@ void LinkDriver::start_round(const std::vector<PrinterView>& printers)
                 LinkRequest          req;
                 req.kind      = LinkRequest::Kind::AmsSync;
                 req.dev_id    = dev;
-                req.build_ams = [tray, ams_sn, lookup](const std::vector<Spool>& now_rows, const std::set<std::string>&) {
+                req.build_ams = [this, weak, gen, tray, ams_sn, lookup](const std::vector<Spool>& now_rows, const std::set<std::string>&) {
+                    if (weak.expired() || gen != generation_) return std::vector<AmsItem>();
                     for (const Spool& row : now_rows)
                         if (row.rfid == tray.uuid) return std::vector<AmsItem>(); // the account has it by now
                     return std::vector<AmsItem>{ams_item_from_tray(tray, ams_sn, lookup)};
@@ -233,15 +246,16 @@ void LinkDriver::start_round(const std::vector<PrinterView>& printers)
             LinkRequest                  req;
             req.kind        = LinkRequest::Kind::SlotSync;
             req.dev_id      = dev;
-            req.build_slots = [entries](const std::vector<Spool>& now_rows, const std::set<std::string>& busy_ids) {
+            req.build_slots = [this, weak, gen, entries](const std::vector<Spool>& now_rows, const std::set<std::string>& busy_ids) {
                 std::vector<SlotItem> items;
+                if (weak.expired() || gen != generation_) return items;
                 for (const SlotEntry& e : entries) {
                     const Spool* row = find_row(now_rows, e.spool_id);
                     if (row == nullptr || busy_ids.count(e.spool_id) > 0) continue;
                     if (e.bind) {
                         if (!row->rfid.empty()) continue; // an RFID spool is mounted by an ams sync
                         items.push_back(slot_bind(e.ams_sn, e.slot.ams_id, e.ams_type, e.slot.slot_id, *row));
-                    } else if (claims_slot(*row, e.slot)) {
+                    } else if (unbind_still_wanted(now_rows, e.spool_id, e.slot, e.ams_sn, e.ams_type)) {
                         items.push_back(slot_unbind(e.ams_sn, e.slot.ams_id, e.ams_type, e.slot.slot_id));
                     }
                 }
@@ -339,18 +353,21 @@ Accept LinkDriver::unassign(const SlotKey& slot, const std::vector<PrinterView>&
     if (ams_sn.empty() || ams_type < 0) return {false, FailKind::BadRequest};
 
     state_.assignments.erase(slot);
-    const std::string spool_id = row->id;
-    LinkRequest       req;
+    const std::string        spool_id     = row->id;
+    const std::string        row_ams_sn   = row->ams_sn; // the mount as the row showed it, checked again when the op starts
+    const int                row_ams_type = row->ams_type;
+    std::weak_ptr<int>       weak         = alive_;
+    const unsigned long long gen          = generation_;
+    const std::string        dev          = slot.dev_id;
+    LinkRequest              req;
     req.kind        = LinkRequest::Kind::SlotSync;
     req.dev_id      = slot.dev_id;
-    req.build_slots = [slot, spool_id, ams_sn, ams_type](const std::vector<Spool>& now_rows, const std::set<std::string>&) {
-        const Spool* r = find_row(now_rows, spool_id);
-        if (r == nullptr || !claims_slot(*r, slot)) return std::vector<SlotItem>();
+    req.build_slots = [this, weak, gen, slot, spool_id, row_ams_sn, row_ams_type, ams_sn, ams_type](const std::vector<Spool>& now_rows,
+                                                                                                    const std::set<std::string>&) {
+        if (weak.expired() || gen != generation_) return std::vector<SlotItem>();
+        if (!unbind_still_wanted(now_rows, spool_id, slot, row_ams_sn, row_ams_type)) return std::vector<SlotItem>();
         return std::vector<SlotItem>{slot_unbind(ams_sn, slot.ams_id, ams_type, slot.slot_id)};
     };
-    std::weak_ptr<int>       weak = alive_;
-    const unsigned long long gen  = generation_;
-    const std::string        dev  = slot.dev_id;
     req.done = [this, weak, gen, dev](const LinkOutcome& out) {
         if (weak.expired() || gen != generation_) return;
         if (out.ok) record_slot_results(dev, out);

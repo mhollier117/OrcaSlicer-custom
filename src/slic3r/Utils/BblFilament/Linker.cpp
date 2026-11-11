@@ -74,7 +74,18 @@ std::string where(const PrinterView& p, const TrayFacts& t)
 }
 
 // The total the percent rule of measured_grams uses.
-long long percent_total(const TrayFacts& t, const Spool& r) { return t.total_g > 0 ? t.total_g : std::llround(r.total_net_weight); }
+long long percent_total(const TrayFacts& t, const Spool& r) { return t.total_g > 0 ? t.total_g : bounded_grams(r.total_net_weight); }
+
+// A tray whose RFID is evidence: a spool is there and its tag is not being read. The tap keeps a tray's data when a
+// diff changes only the existence bits, so a spool taken out can leave its RFID behind on an empty tray.
+bool rfid_usable(const TrayFacts& t) { return t.occupied && !t.reading && valid_rfid(t.uuid); }
+
+// Colours of a tray and of what it showed before: both unknown, or the same RGB.
+bool same_colour_or_both_unknown(const std::string& a, const std::string& b)
+{
+    if (a.empty() || b.empty()) return a.empty() && b.empty();
+    return same_rgb(a, b);
+}
 
 // The grams a weight push or an RFID mount sends; nothing when the row keeps its own weight: no valid measurement, or
 // a measurement from the percent while the row's own weight rounds to that percent (a percent cannot overrule a finer
@@ -84,7 +95,7 @@ std::optional<long long> grams_to_send(const TrayFacts& t, const Spool& r)
     const auto g = measured_grams(t, r);
     if (!g || t.remain_g >= 0) return g;
     const long long total = percent_total(t, r);
-    if (total > 0 && std::llround(r.net_weight * 100.0 / static_cast<double>(total)) == t.remain) return std::nullopt;
+    if (total > 0 && std::llround(static_cast<double>(bounded_grams(r.net_weight)) * 100.0 / static_cast<double>(total)) == t.remain) return std::nullopt;
     return g;
 }
 
@@ -133,8 +144,8 @@ AmsItem ams_item_from_row(const Spool& row, const std::string& ams_sn, int ams_i
     i.color_type       = i.colors.size() <= 1 ? 2 : row.color_type;
     i.tray_id_name     = row.tray_id_name;
     i.note             = row.note;
-    i.total_net_weight = std::llround(row.total_net_weight);
-    i.net_weight       = grams ? *grams : std::llround(row.net_weight);
+    i.total_net_weight = bounded_grams(row.total_net_weight);
+    i.net_weight       = grams ? *grams : bounded_grams(row.net_weight);
     i.ams_sn           = ams_sn;
     i.ams_id           = ams_id;
     i.ams_type         = ams_type;
@@ -252,6 +263,31 @@ LinkPlan plan_links(const std::vector<PrinterView>& printers, const std::vector<
     }
     std::stable_sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) { return a.key < b.key; });
 
+    // An assignment ends when its slot contradicts it: the slot emptied (the spool was taken out), or, after the tray
+    // first showed something else (its old contents, still reported right after the user confirmed), yet another
+    // filament or colour appeared there.
+    for (auto it = state.assignments.begin(); it != state.assignments.end();) {
+        Assignment&      a     = it->second;
+        auto             pit   = taking.find(a.slot.dev_id);
+        const TrayFacts* t     = pit == taking.end() ? nullptr : tray_at(*pit->second, a.slot.ams_id, a.slot.slot_id);
+        bool             erase = false;
+        if (t == nullptr || tray_agrees_with_assignment(*t, a)) {
+            // no printer that takes part shows the slot, or the tray agrees: matched below as usual
+        } else if (!t->occupied) {
+            plan.notes.push_back("The slot assigned to spool " + a.spool_id + " is empty: the assignment ended.");
+            erase = true;
+        } else if (!a.has_before) {
+            a.has_before         = true;
+            a.before_filament_id = t->filament_id;
+            a.before_color       = t->color;
+        } else if (t->filament_id != a.before_filament_id || !same_colour_or_both_unknown(t->color, a.before_color)) {
+            plan.notes.push_back("Another filament appeared in the slot assigned to spool " + a.spool_id + ": the assignment ended.");
+            erase = true;
+        }
+        if (erase) it = state.assignments.erase(it);
+        else ++it;
+    }
+
     std::map<std::string, std::size_t> row_by_id;
     for (std::size_t j = 0; j < rows.size(); ++j) row_by_id.emplace(rows[j].id, j);
 
@@ -267,11 +303,24 @@ LinkPlan plan_links(const std::vector<PrinterView>& printers, const std::vector<
         row_used[j]  = true;
     };
 
-    // Pass 1: RFID.
+    // An RFID that two usable trays (on any printers) report is evidence for neither: no tray is matched or registered
+    // by it, and its row keeps what it has.
+    std::map<std::string, int> rfid_trays;
+    for (std::size_t i = 0; i < n; ++i)
+        if (rfid_usable(*entries[i].tray)) ++rfid_trays[entries[i].tray->uuid];
+    std::vector<bool> contested(n, false);
+    for (std::size_t i = 0; i < n; ++i) contested[i] = rfid_usable(*entries[i].tray) && rfid_trays[entries[i].tray->uuid] > 1;
+    for (std::size_t j = 0; j < rows.size(); ++j) {
+        auto it = rows[j].rfid.empty() ? rfid_trays.end() : rfid_trays.find(rows[j].rfid);
+        if (it != rfid_trays.end() && it->second > 1) row_used[j] = true; // matched by nothing, and no unmatched streak
+    }
+
+    // Pass 1: RFID, from a tray that is occupied and not being read.
     for (std::size_t i = 0; i < n; ++i) {
         const TrayFacts& t = *entries[i].tray;
         if (!valid_rfid(t.uuid)) continue;
         rfid_blocked[i] = true;
+        if (!rfid_usable(t) || contested[i]) continue;
         for (std::size_t j = 0; j < rows.size(); ++j) {
             if (rows[j].rfid != t.uuid) continue;
             row_has_rfid_of_tray[i] = true;
@@ -368,7 +417,7 @@ LinkPlan plan_links(const std::vector<PrinterView>& printers, const std::vector<
                 plan.mounts.push_back(m);
             } else if (!R.rfid.empty()) {
                 const auto g = grams_to_send(t, R);
-                if (g && *g != std::llround(R.net_weight)) {
+                if (g && *g != bounded_grams(R.net_weight)) {
                     auto pushed = state.pushed.find(R.rfid);
                     if (p.busy && pushed != state.pushed.end() && now - pushed->second.sent_at < k_busy_push_seconds) {
                         ++plan.skipped_cooldown[p.dev_id];
@@ -385,7 +434,11 @@ LinkPlan plan_links(const std::vector<PrinterView>& printers, const std::vector<
         }
 
         // Unmatched.
-        if (!valid_rfid(t.uuid) || !t.official || row_has_rfid_of_tray[i]) continue;
+        if (contested[i]) {
+            note("Another tray reports the same tag as " + where(p, t) + ": neither is used.");
+            continue;
+        }
+        if (!rfid_usable(t) || !t.official || row_has_rfid_of_tray[i]) continue;
         if (p.lan_only || t.ams_type == 2 || t.external || sn.empty() || !slot_allowed(S)) continue;
         auto reg = state.registrations.find(t.uuid);
         if (reg != state.registrations.end() && (reg->second.done || reg->second.next_at > now)) continue;
@@ -429,10 +482,20 @@ LinkPlan plan_links(const std::vector<PrinterView>& printers, const std::vector<
             continue;
         }
 
+        // A streak belongs to the mount it was counted for: a row that claims another one starts again.
         auto it = state.unmatched.find(R.id);
-        if (it == state.unmatched.end()) {
-            state.unmatched[R.id] = LinkerState::Streak{1, p.observations, now, list_serial};
-            it                    = state.unmatched.find(R.id);
+        if (it == state.unmatched.end() || it->second.dev_id != R.dev_id || it->second.ams_sn != R.ams_sn || it->second.ams_id != R.ams_id ||
+            it->second.slot_id != R.slot_id) {
+            LinkerState::Streak s;
+            s.count            = 1;
+            s.last_observation = p.observations;
+            s.first_at         = now;
+            s.list_serial      = list_serial;
+            s.dev_id           = R.dev_id;
+            s.ams_sn           = R.ams_sn;
+            s.ams_id           = R.ams_id;
+            s.slot_id          = R.slot_id;
+            it                 = state.unmatched.insert_or_assign(R.id, s).first;
         } else if (p.observations != it->second.last_observation) {
             ++it->second.count;
             it->second.last_observation = p.observations;

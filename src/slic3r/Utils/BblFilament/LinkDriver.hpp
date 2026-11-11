@@ -45,7 +45,7 @@ public:
     void            assign(const Assignment& a);                    // replaces an assignment for the same slot
     Accept          unassign(const SlotKey& slot, const std::vector<PrinterView>& printers); // unbind now (manual spools)
     void            sync_now();                                     // forget the round spacing, the busy cooldowns and what was sent lately, once
-    void            reset();                                        // session changed: forget everything
+    void            reset();                                        // session changed: forget everything; ops still queued send nothing
     const LinkPlan& last_plan() const { return last_plan_; }
     json            status_json(const std::vector<PrinterView>& printers) const;
 

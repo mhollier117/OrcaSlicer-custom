@@ -35,7 +35,7 @@ struct PrinterFacts
 {
     bool               has_full{false};      // a full state arrived since the tap last forgot this printer
     long long          last_message_at{0};   // `now` of the last status message
-    unsigned long long observations{0};      // status messages seen since has_full
+    unsigned long long observations{0};      // status messages seen (full states included) since the tap last forgot this printer
     std::vector<TrayFacts> trays;            // AMS trays in unit and slot order, then external spools
     double             nozzle_diameter{0};   // print.nozzle_diameter when reported, else 0
     std::optional<bool> pa_supported;        // from home_flag when reported

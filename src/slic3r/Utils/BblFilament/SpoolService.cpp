@@ -203,16 +203,19 @@ bool SpoolService::do_reset(bool fire, const Session& s)
 
 void SpoolService::reset() { do_reset(true, deps_.session ? deps_.session() : Session{}); }
 
-// Called at the start of every request: a changed account, sign-in state or plugin generation starts a fresh state.
-void SpoolService::sync_session() { refresh_session(); }
-
-bool SpoolService::refresh_session()
+SpoolService::SessionCheck SpoolService::check_session()
 {
     const Session s = deps_.session ? deps_.session() : Session{};
-    if (session_matches(s)) return false;
-    do_reset(!pristine(), s);
-    return true;
+    if (session_matches(s)) return SessionCheck::Same;
+    // The reset calls the `done` callbacks of dropped link ops, and one of them may destroy the service.
+    if (!do_reset(!pristine(), s)) return SessionCheck::Gone;
+    return SessionCheck::Reset;
 }
+
+// Called at the start of every request: a changed account, sign-in state or plugin generation starts a fresh state.
+bool SpoolService::sync_session() { return check_session() != SessionCheck::Gone; }
+
+bool SpoolService::refresh_session() { return check_session() == SessionCheck::Reset; }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // requests
@@ -225,7 +228,7 @@ void SpoolService::queue_op(Op op)
 
 void SpoolService::request_pull()
 {
-    sync_session();
+    if (!sync_session()) return; // the service is gone
     if (!is_signed_in(deps_.session ? deps_.session() : Session{})) return;
     if (pull_wanted_ || (job_running_ && running_kind_ == JobKind::Pull)) return;
     pull_wanted_ = true;
@@ -235,7 +238,7 @@ void SpoolService::request_pull()
 
 Accept SpoolService::add(const json& page_spool, int quantity)
 {
-    sync_session();
+    if (!sync_session()) return {false, FailKind::Unavailable}; // the service is gone
     if (!is_signed_in(deps_.session ? deps_.session() : Session{})) return {false, FailKind::NotSignedIn};
     if (!page_spool.is_object()) return {false, FailKind::BadRequest};
     quantity        = std::clamp(quantity, 1, 99);
@@ -274,7 +277,7 @@ Accept SpoolService::enqueue_update(const json& patch, bool& queued)
 
 Accept SpoolService::update(const json& page_patch)
 {
-    sync_session();
+    if (!sync_session()) return {false, FailKind::Unavailable}; // the service is gone
     if (!is_signed_in(deps_.session ? deps_.session() : Session{})) return {false, FailKind::NotSignedIn};
     bool         queued = false;
     const Accept a      = enqueue_update(page_patch, queued);
@@ -287,7 +290,7 @@ Accept SpoolService::update(const json& page_patch)
 
 Accept SpoolService::batch(const json& creates, const json& updates)
 {
-    sync_session();
+    if (!sync_session()) return {false, FailKind::Unavailable}; // the service is gone
     if (!is_signed_in(deps_.session ? deps_.session() : Session{})) return {false, FailKind::NotSignedIn};
     if (!creates.is_array() || !updates.is_array()) return {false, FailKind::BadRequest};
 
@@ -318,7 +321,7 @@ Accept SpoolService::batch(const json& creates, const json& updates)
 
 Accept SpoolService::remove(const std::vector<std::string>& ids)
 {
-    sync_session();
+    if (!sync_session()) return {false, FailKind::Unavailable}; // the service is gone
     if (!is_signed_in(deps_.session ? deps_.session() : Session{})) return {false, FailKind::NotSignedIn};
     const std::vector<Spool> v = compute_view(ops_.size());
     Op                       op;
@@ -339,7 +342,7 @@ Accept SpoolService::remove(const std::vector<std::string>& ids)
 
 Accept SpoolService::link(LinkRequest request)
 {
-    sync_session();
+    if (!sync_session()) return {false, FailKind::Unavailable}; // the service is gone
     if (!is_signed_in(deps_.session ? deps_.session() : Session{})) return {false, FailKind::NotSignedIn};
     if (request.kind == LinkRequest::Kind::AmsSync && !request.build_ams) return {false, FailKind::BadRequest};
     if (request.kind == LinkRequest::Kind::SlotSync && !request.build_slots) return {false, FailKind::BadRequest};
@@ -354,7 +357,7 @@ Accept SpoolService::link(LinkRequest request)
 
 void SpoolService::request_config(bool force)
 {
-    sync_session();
+    if (!sync_session()) return; // the service is gone
     if (!is_signed_in(deps_.session ? deps_.session() : Session{})) return;
     const bool pending = std::any_of(ops_.begin(), ops_.end(), [](const Op& o) { return o.kind == Op::Kind::Config; });
     if (pending) return;
