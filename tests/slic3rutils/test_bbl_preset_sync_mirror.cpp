@@ -2590,3 +2590,18 @@ TEST_CASE("The mirror no longer notifies about unresolvable presets itself", "[B
     CHECK(e.mirror.ledger()->get(fkey("Remote"))->state == "unresolvable");
     CHECK(e.host.notified("unresolvable") == 0);
 }
+
+TEST_CASE("The mirror reports the loaded Studio keys, the cached bodies and the base store", "[BblPresetSync]")
+{
+    Env e;
+    e.seed({});
+    CHECK(e.mirror.studio_key_count() == 0);
+    CHECK(e.mirror.cached_body_count() == 0);
+    CHECK_FALSE(e.mirror.base_store());
+    e.add_remote("Remote", "P5", 200);
+    e.pass();
+    CHECK(e.mirror.studio_key_count() == Env::studio_key_list().size());
+    CHECK(e.mirror.cached_body_count() == 1);
+    REQUIRE(e.mirror.base_store());
+    CHECK(e.mirror.base_store()->has("P5")); // the pulled body became the base
+}

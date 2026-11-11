@@ -9,6 +9,7 @@
 
 #include <boost/filesystem/path.hpp>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -134,6 +135,9 @@ public:
     void                    forget(const Key& key);           // any thread: the preset is treated as new on the next pass
     Status                  status() const;                   // any thread
     std::shared_ptr<Ledger> ledger() const;                   // current ledger or null
+    std::shared_ptr<BaseStore> base_store() const;            // current base copies or null
+    size_t                  studio_key_count() const;         // keys loaded from the Studio list (0: file missing)
+    size_t                  cached_body_count() const;        // bodies held in the in-memory cache
 
 private:
     struct Backoff
@@ -166,6 +170,7 @@ private:
     std::shared_ptr<BaseStore> m_base;
     StudioKeys              m_studio; // loaded on the first pass; read on the sync thread only
     bool                    m_studio_loaded{false};
+    std::atomic<size_t>     m_studio_count{0};
     struct CachedBody
     {
         long long update_time{0};

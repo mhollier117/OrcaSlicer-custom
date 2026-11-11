@@ -269,6 +269,7 @@ void Mirror::run_pass(Trigger trigger)
     if (!m_studio_loaded) {
         m_studio        = StudioKeys::load(m_host.resources_dir() / "printers" / "bambu_studio_option_keys.json");
         m_studio_loaded = true;
+        m_studio_count  = m_studio.size();
     }
     const KeyTest studio = [this](const std::string& k) { return m_studio.knows(k); };
 
@@ -916,6 +917,23 @@ std::shared_ptr<Ledger> Mirror::ledger() const
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_ledger;
+}
+
+std::shared_ptr<BaseStore> Mirror::base_store() const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_base;
+}
+
+size_t Mirror::studio_key_count() const
+{
+    return m_studio_count.load();
+}
+
+size_t Mirror::cached_body_count() const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_body_cache.size();
 }
 
 } // namespace Slic3r::BblPresetSync

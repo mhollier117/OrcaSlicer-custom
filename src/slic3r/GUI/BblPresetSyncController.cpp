@@ -887,6 +887,8 @@ nlohmann::json BblPresetSyncController::status_json() const
     j["halted"]              = status.halted;
     j["first_run_confirmed"] = status.first_run_confirmed;
     j["linked"]              = status.linked;
+    j["studio_keys"]         = m_mirror->studio_key_count();
+    j["cached_bodies"]       = m_mirror->cached_body_count();
 
     NetworkAgent* agent       = m_app.getAgent();
     j["enabled"]              = self->session().has_value();
@@ -895,8 +897,10 @@ nlohmann::json BblPresetSyncController::status_json() const
 
     json entries = json::array(), conversions = json::array();
     if (const auto ledger = m_mirror->ledger()) {
+        const auto base = m_mirror->base_store();
         for (const auto& [key, e] : ledger->entries())
-            entries.push_back({{"type", sync::type_string(key.type)},
+            entries.push_back({{"has_base", base && !e.setting_id.empty() && base->has(e.setting_id)},
+                               {"type", sync::type_string(key.type)},
                                {"name", key.name},
                                {"state", e.state},
                                {"reason", e.reason},
