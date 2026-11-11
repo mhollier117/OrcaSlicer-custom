@@ -265,6 +265,14 @@ set(SLIC3R_GUI_SOURCES
     GUI/ExtrusionCalibration.hpp
     GUI/Field.cpp
     GUI/Field.hpp
+    GUI/FilamentManager/FmColorCodes.cpp
+    GUI/FilamentManager/FmColorCodes.hpp
+    GUI/FilamentManager/FmDevices.cpp
+    GUI/FilamentManager/FmDevices.hpp
+    GUI/FilamentManager/FmPresets.cpp
+    GUI/FilamentManager/FmPresets.hpp
+    GUI/FilamentManager/FmProtocol.cpp
+    GUI/FilamentManager/FmProtocol.hpp
     GUI/FileArchiveDialog.cpp
     GUI/FileArchiveDialog.hpp
     GUI/format.hpp
