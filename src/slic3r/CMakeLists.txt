@@ -936,6 +936,10 @@ set(SLIC3R_GUI_SOURCES
     Utils/BblPresetSync/Snapshot.cpp
     Utils/BblPresetSync/Snapshot.hpp
     Utils/BblPresetSync/Types.hpp
+    Utils/BblFilament/Spool.cpp
+    Utils/BblFilament/Spool.hpp
+    Utils/BblFilament/SpoolCloud.cpp
+    Utils/BblFilament/SpoolCloud.hpp
     Utils/BBLPrinterAgent.cpp
     Utils/BBLPrinterAgent.hpp
     Utils/BBLNetworkPlugin.cpp
