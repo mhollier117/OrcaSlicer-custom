@@ -27,6 +27,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/AmsMappingPopup.hpp
     GUI/AMSMaterialsSetting.cpp
     GUI/AMSMaterialsSetting.hpp
+    GUI/BblPresetSyncController.cpp
+    GUI/BblPresetSyncController.hpp
     GUI/AMSSetting.cpp
     GUI/AMSSetting.hpp
     GUI/AMSDryControl.cpp

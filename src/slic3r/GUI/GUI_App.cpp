@@ -254,6 +254,7 @@
 #include "slic3r/GUI/ConfigWizard.hpp"
 #include "slic3r/GUI/ConfigWizardTypes.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmosManager.hpp"
+#include "slic3r/GUI/BblPresetSyncController.hpp"
 #include "slic3r/GUI/HttpServer.hpp"
 #include "slic3r/GUI/Mcp/McpOptions.hpp"
 #include "slic3r/GUI/Mcp/McpService.hpp"
@@ -8114,6 +8115,9 @@ void GUI_App::start_sync_user_preset(bool with_progress_dlg)
 
     Bind(EVT_UPDATE_PRESET_BUNDLE,&GUI_App::update_single_bundle,this);
 
+    if (!m_bbl_preset_sync)
+        m_bbl_preset_sync = std::make_unique<BblPresetSyncController>(*this);
+
     m_sync_update_thread = Slic3r::create_thread(
         [this, progressFn, cancelFn, finishFn, t = std::weak_ptr<int>(m_user_sync_token)] {
             // NotificationManager is not thread safe and is destroyed before this thread is joined
@@ -8255,6 +8259,7 @@ void GUI_App::start_sync_user_preset(bool with_progress_dlg)
                         }
 
                         process_delete_presets();
+                        if (m_bbl_preset_sync) m_bbl_preset_sync->tick(t);
                     }
 
                     // sync subscribed bundles, if orca

@@ -2622,6 +2622,10 @@ void PreferencesDialog::create_items()
 
     auto item_user_sync        = create_item_checkbox(_L("Auto sync user presets (Printer/Filament/Process)"), "", "sync_user_preset");
     g_sizer->Add(item_user_sync);
+    auto item_bbl_sync = create_item_checkbox(_L("Sync user presets with the Bambu cloud"),
+                                              _L("Also keeps Bambu-based user presets in your Bambu account, so custom filaments can be chosen on the printer. Needs the option above and both sign-ins."),
+                                              "sync_bbl_user_preset");
+    g_sizer->Add(item_bbl_sync);
 
     if (app_config->get_stealth_mode()) {
         if (m_bambu_cloud_checkbox)      m_bambu_cloud_checkbox->Enable(false);

@@ -103,6 +103,7 @@ class Plater;
 class ParamsPanel;
 class NotificationManager;
 class Downloader;
+class BblPresetSyncController;
 struct GUI_InitParams;
 class ParamsDialog;
 class HMSQuery;
@@ -326,6 +327,7 @@ private:
 	size_t m_instance_hash_int;
 
     std::unique_ptr<Downloader> m_downloader;
+    std::unique_ptr<BblPresetSyncController> m_bbl_preset_sync; // created when the preset sync thread first starts
 
     //BBS
     std::atomic<bool> m_is_closing {false};
@@ -421,6 +423,9 @@ public:
     Slic3r::TaskManager*   getTaskManager() { return m_task_manager; }
     HMSQuery* get_hms_query() { return hms_query; }
     NetworkAgent* getAgent() { return m_agent; }
+    BblPresetSyncController* bbl_preset_sync() { return m_bbl_preset_sync.get(); }
+    // True from the start of a sync thread until its first pull of the user presets is applied.
+    bool user_preset_pull_pending() const { return m_user_preset_pull_pending; }
     // Version that wrote the app config before this run; empty when there was no app config.
     const boost::optional<Semver>& last_config_version() const { return m_last_config_version; }
 

@@ -8,6 +8,7 @@
 #include "ExtrusionCalibration.hpp"
 #include "MsgDialog.hpp"
 #include "GUI_App.hpp"
+#include "BblPresetSyncController.hpp"
 #include "GUI.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
 #include "libslic3r/Preset.hpp"
@@ -803,7 +804,8 @@ sCheckFilamentInfo(PresetBundle*      preset_bundle,
     }
 
     ams_filament_id = fila_preset->filament_id;
-    ams_setting_id  = fila_preset->setting_id;
+    auto* bbl_sync  = wxGetApp().bbl_preset_sync();
+    ams_setting_id  = bbl_sync ? bbl_sync->bbl_setting_id_for(*fila_preset) : fila_preset->setting_id;
     return result;
 }
 

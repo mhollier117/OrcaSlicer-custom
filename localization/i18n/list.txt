@@ -126,6 +126,7 @@ src/slic3r/GUI/Jobs/UpgradeNetworkJob.cpp
 src/slic3r/GUI/AboutDialog.cpp
 src/slic3r/GUI/ActionRegistry.cpp
 src/slic3r/GUI/AMSMaterialsSetting.cpp
+src/slic3r/GUI/BblPresetSyncController.cpp
 src/slic3r/GUI/ExtrusionCalibration.cpp
 src/slic3r/GUI/AmsMappingPopup.cpp
 src/slic3r/GUI/AMSSetting.cpp
