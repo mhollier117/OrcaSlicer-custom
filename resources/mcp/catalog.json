@@ -3558,7 +3558,7 @@
         "readOnlyHint": false,
         "title": "Filament Manager"
       },
-      "description": "The filament spools kept in the user's Bambu account (the Filament Manager tab). Writes (add, update, remove) go to the user's Bambu account. Results arrive asynchronously: poll status until is_syncing is false and read recent for what happened.",
+      "description": "The filament spools kept in the user's Bambu account (the Filament Manager tab). Writes (add, update, remove) go to the user's Bambu account. Results arrive asynchronously: poll status until is_syncing is false and read recent for what happened. Linking keeps the account's record of which spool is in which AMS slot, and how much is left on it, in step with every Bambu printer of the account: link_status shows per printer what the printers report, what each tray matched, what would be sent and why not, and the last round; link_mode sets on, off or dry_run (dry_run plans without sending anything) and optionally limits linking to some slots; assign puts a spool without RFID into a slot, but binds it only when the printer reports that spool's filament and colour in that slot (within two minutes); unassign clears the slot of a spool without RFID now; sync_now runs the next round at once; soft_match reads the cloud's queue of new official spools of one AMS (shown in link_status). Printers are named by their names.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -3570,12 +3570,38 @@
               "pull",
               "add",
               "update",
-              "remove"
+              "remove",
+              "link_status",
+              "link_mode",
+              "assign",
+              "unassign",
+              "sync_now",
+              "soft_match"
             ],
             "type": "string"
           },
+          "ams_id": {
+            "description": "assign, unassign, soft_match: the AMS id (0 to 3 for AMS units, 128 and up for AMS HT).",
+            "type": "integer"
+          },
           "ids": {
             "description": "remove: the spool_id values to delete.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mode": {
+            "description": "link_mode: on, off, or dry_run (plans without sending). Omitted: unchanged.",
+            "enum": [
+              "on",
+              "off",
+              "dry_run"
+            ],
+            "type": "string"
+          },
+          "only": {
+            "description": "link_mode: the only slots linking may touch, each \"<printer name>:<ams id>:<slot id>\"; an empty array lifts the limit. Omitted: unchanged.",
             "items": {
               "type": "string"
             },
@@ -3585,15 +3611,27 @@
             "description": "update: spool_id plus the fields to change, in the page's spool shape.",
             "type": "object"
           },
+          "printer": {
+            "description": "assign, unassign, soft_match: the printer's name (default: the selected printer).",
+            "type": "string"
+          },
           "quantity": {
             "description": "add: how many copies of the spool to create, 1 to 99 (default 1).",
             "maximum": 99,
             "minimum": 1,
             "type": "integer"
           },
+          "slot_id": {
+            "description": "assign, unassign: the slot of that AMS, from 0.",
+            "type": "integer"
+          },
           "spool": {
             "description": "add: the new spool in the page's shape (brand, material_type, series, setting_id, color_code, colors, color_type, initial_weight, net_weight, note, ...).",
             "type": "object"
+          },
+          "spool_id": {
+            "description": "assign: the spool (without RFID) to put into the slot.",
+            "type": "string"
           }
         },
         "required": [

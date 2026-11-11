@@ -21,7 +21,7 @@ The list lives in the Bambu cloud. OrcaSlicer stores no spool data of its own.
 | Service | `Utils/BblFilament/SpoolService` | The list and the rules for changing it |
 | Cloud | `Utils/BblFilament/SpoolCloud` | The five plugin calls, reply classification, paging |
 | Worker and gate | `Utils/BblFilament/SpoolWorker`, `PluginGate` | The one thread that calls the plugin, and its tie to the plugin's lifetime |
-| MCP tool | `GUI/Mcp/McpToolsFilamentManager.cpp` | `filament_manager`: status, list, pull, add, update, remove |
+| MCP tool | `GUI/Mcp/McpToolsFilamentManager.cpp` | `filament_manager`: status, list, pull, add, update, remove; for linking link_status, link_mode, assign, unassign, sync_now, soft_match (printers by name, never by serial) |
 
 `Utils/BblFilament` has no window code and is covered by unit tests with a fake cloud and a hand-driven executor.
 

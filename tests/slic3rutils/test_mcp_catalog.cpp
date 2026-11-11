@@ -92,10 +92,20 @@ TEST_CASE("the filament_manager tool takes an action and a closed set of argumen
     const json& schema = tool->at("inputSchema");
     CHECK(schema.at("required") == json::array({"action"}));
     CHECK(schema.at("additionalProperties") == false);
-    CHECK(schema.at("properties").at("action").at("enum") == json::array({"status", "list", "pull", "add", "update", "remove"}));
+    CHECK(schema.at("properties").at("action").at("enum") == json::array({"status", "list", "pull", "add", "update", "remove", "link_status", "link_mode",
+                                                                          "assign", "unassign", "sync_now", "soft_match"}));
     CHECK(schema.at("properties").at("spool").at("type") == "object");
     CHECK(schema.at("properties").at("patch").at("type") == "object");
     CHECK(schema.at("properties").at("quantity").at("type") == "integer");
     CHECK(schema.at("properties").at("ids").at("items").at("type") == "string");
+    CHECK(schema.at("properties").at("mode").at("enum") == json::array({"on", "off", "dry_run"}));
+    CHECK(schema.at("properties").at("only").at("items").at("type") == "string");
+    CHECK(schema.at("properties").at("spool_id").at("type") == "string");
+    CHECK(schema.at("properties").at("printer").at("type") == "string");
+    CHECK(schema.at("properties").at("ams_id").at("type") == "integer");
+    CHECK(schema.at("properties").at("slot_id").at("type") == "integer");
+    const std::string description = tool->at("description").get<std::string>();
+    CHECK(description.find("dry_run plans without sending") != std::string::npos);
+    CHECK(description.find("binds it only when the printer reports") != std::string::npos);
     CHECK(tool->at("annotations").at("readOnlyHint") == false);
 }
