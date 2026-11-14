@@ -121,6 +121,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION=$(sed -nE 's/^set\(SoftFever_VERSION "([^"]+)"\).*/\1/p' version.inc)
+          REVISION=$(sed -nE 's/^set\(ORCA_CUSTOM_REVISION "([^"]*)"\).*/\1/p' custom_version.inc 2>/dev/null || true)
+          if [ -n "$REVISION" ]; then VERSION="${VERSION}.${REVISION}"; fi
           TAG="v${VERSION}+custom"
           if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "$TAG is already released."

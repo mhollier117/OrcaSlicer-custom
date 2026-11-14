@@ -81,6 +81,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_VERSION VERSION_LESS "3.25")
 endif ()
 
 include("version.inc")
+include("custom_version.inc")
 include(GNUInstallDirs)
 include(CMakeDependentOption)
 

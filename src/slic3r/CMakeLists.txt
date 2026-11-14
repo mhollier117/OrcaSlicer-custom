@@ -880,6 +880,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/CrealityPrintAgent.hpp
     Utils/CrealityHostDiscovery.cpp
     Utils/CrealityHostDiscovery.hpp
+    Utils/CustomVersion.cpp
+    Utils/CustomVersion.hpp
     Utils/Duet.cpp
     Utils/Duet.hpp
     Utils/ElegooLink.cpp

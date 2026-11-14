@@ -17,6 +17,7 @@
 #include "WebViewDialog.hpp"
 #include "slic3r/Utils/BBLCloudServiceAgent.hpp"
 #include "slic3r/Utils/CloudDeleteQueue.hpp"
+#include "slic3r/Utils/CustomVersion.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
 #include "GUI_Init.hpp"
 #include "GUI_ObjectList.hpp"
@@ -6743,11 +6744,14 @@ void GUI_App::check_new_version_sf(bool show_tips, int by_user)
             boost::property_tree::read_json(json_stream, root);
 
             std::regex matcher("[0-9]+\\.[0-9]+(\\.[0-9]+)*(-[A-Za-z0-9]+)?(\\+[A-Za-z0-9]+)?");
-            Semver    current_version = get_version(SoftFever_VERSION, matcher);
+            // Both sides are compared in their four-part form (see CustomVersion.hpp).
+            Semver    current_version = get_version(custom_build_version(), matcher);
             Semver    best_pre(0, 0, 0);
             Semver    best_release(0, 0, 0);
             bool      best_pre_valid = false;
             bool      best_release_valid = false;
+            std::string best_pre_tag;
+            std::string best_release_tag;
             std::string best_pre_url;
             std::string best_release_url;
             std::string best_release_content;
@@ -6762,7 +6766,7 @@ void GUI_App::check_new_version_sf(bool show_tips, int by_user)
                 if (!tag.empty() && tag.front() == 'v')
                     tag.erase(0, 1);
 
-                Semver tag_version = get_version(tag, matcher);
+                Semver tag_version = get_version(four_part_version(tag), matcher);
                 if (!tag_version.valid())
                     return;
 
@@ -6773,6 +6777,7 @@ void GUI_App::check_new_version_sf(bool show_tips, int by_user)
                 if (is_prerelease) {
                     if (!best_pre_valid || best_pre < tag_version) {
                         best_pre        = tag_version;
+                        best_pre_tag    = tag;
                         best_pre_url    = html_url;
                         best_pre_content = body_copy;
                         best_pre_valid  = true;
@@ -6780,6 +6785,7 @@ void GUI_App::check_new_version_sf(bool show_tips, int by_user)
                 } else {
                     if (!best_release_valid || best_release < tag_version) {
                         best_release         = tag_version;
+                        best_release_tag     = tag;
                         best_release_url     = html_url;
                         best_release_content = body_copy;
                         best_release_valid   = true;
@@ -6802,6 +6808,7 @@ void GUI_App::check_new_version_sf(bool show_tips, int by_user)
 
             if (best_pre_valid && best_release_valid && best_pre < best_release) {
                 best_pre        = best_release;
+                best_pre_tag    = best_release_tag;
                 best_pre_url    = best_release_url;
                 best_pre_content = best_release_content;
                 best_pre_valid  = true;
@@ -6824,7 +6831,7 @@ void GUI_App::check_new_version_sf(bool show_tips, int by_user)
             }
 
             version_info.url           = prefer_release ? best_release_url : best_pre_url;
-            version_info.version_str   = prefer_release ? best_release.to_string_sf() : best_pre.to_string_sf();
+            version_info.version_str   = display_version_of_tag(prefer_release ? best_release_tag : best_pre_tag);
             version_info.description   = prefer_release ? best_release_content : best_pre_content;
             version_info.force_upgrade = false;
 

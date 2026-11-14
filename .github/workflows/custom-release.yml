@@ -1,11 +1,13 @@
 name: Custom release
 
 # Builds the Windows installer of this fork and publishes it as a GitHub release tagged
-# v<version>+custom. The upstream-sync workflow starts it after merging a new upstream release;
-# run it by hand to rebuild the current main.
+# v<upstream version>.<revision>+custom. The upstream-sync workflow starts it after merging a new
+# upstream release; run it by hand to rebuild the current main.
 #
-# Orca's update check reads this repository's releases, so the tag carries the upstream version
-# (the +custom build metadata does not change how versions compare).
+# Orca's update check reads this repository's releases, so the tag carries the upstream version from
+# version.inc and, as a fourth number, the revision from custom_version.inc (the +custom build metadata
+# does not change how versions compare). Raise the revision for a release that installed builds must be
+# offered as an update while the upstream version stays the same.
 #
 # Secrets (all optional):
 #   NTFY_URL    ntfy topic URL, e.g. https://ntfy.sh/<topic>; no notifications without it
@@ -125,6 +127,8 @@ jobs:
         run: |
           set -euo pipefail
           VERSION=$(sed -nE 's/^set\(SoftFever_VERSION "([^"]+)"\).*/\1/p' version.inc)
+          REVISION=$(sed -nE 's/^set\(ORCA_CUSTOM_REVISION "([^"]*)"\).*/\1/p' custom_version.inc 2>/dev/null || true)
+          if [ -n "$REVISION" ]; then VERSION="${VERSION}.${REVISION}"; fi
           TAG="v${VERSION}+custom"
           INSTALLER=$(ls build/OrcaSlicer_Windows_Installer_*.exe | head -1)
           SHORT=$(git rev-parse --short HEAD)
