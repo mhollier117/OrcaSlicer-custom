@@ -318,7 +318,10 @@ void AppUpdateDialog::start()
     m_target = m_folder / fs::path(from_u8(m_offer.name).ToStdWstring());
     if (!ec)
         fs::create_directories(m_folder, ec);
-    if (ec || !fs::is_directory(m_folder, ec)) {
+    // A junction or symbolic link could send the deletes and the download elsewhere: only a real folder is used.
+    const DWORD attributes = ec ? INVALID_FILE_ATTRIBUTES : ::GetFileAttributesW(m_folder.wstring().c_str());
+    if (ec || !fs::is_directory(m_folder, ec) || attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
         show_failure(format_wxstr(_L("The download could not be saved in %1%."), from_path(m_folder)));
         return;
     }

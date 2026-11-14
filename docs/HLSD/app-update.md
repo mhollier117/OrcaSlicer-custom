@@ -41,7 +41,9 @@ without wx or network code and are covered by the `[AppUpdate]` tests.
 
 ## The download and its checks
 
-`AppUpdateDialog` (Windows only) works in `<user temp>/OrcaSlicer_update/`. It deletes every other file there,
+`AppUpdateDialog` (Windows only) works in `<user temp>/OrcaSlicer_update/`. When that folder is a reparse point
+(a junction or symbolic link), nothing is deleted or downloaded and the dialog reports that the download could
+not be saved. Otherwise it deletes every other file there,
 then downloads the `.sha256` asset (at most 4 KB). Its first token must be 64 hex digits; a file name after it
 must be the installer's. When the installer is already in the folder from an earlier attempt and passes the
 checks below, it is used as it is; otherwise it is downloaded (size limit: the published size plus 1 MB),
@@ -70,8 +72,11 @@ held file is released and nothing else happens. Otherwise, at the end of `GUI_Ap
 helper processes (below), starts the installer with `ShellExecuteExW` (verb `open`, its normal user interface;
 Windows shows its administrator prompt), and then releases the handle. A failed start can only be logged.
 
-`ShellExecuteExW` returns once the administrator prompt has been answered, and the exit watchdog started by the
-main frame's close (`GUI_App::start_exit_watchdog`) ends the process 30 seconds after the close began.
+`ShellExecuteExW` returns once the administrator prompt has been answered. The exit watchdog started by the main
+frame's close (`GUI_App::start_exit_watchdog`) normally ends the process 30 seconds after the close began. While an
+installer is waiting to be started (a process-wide flag, set once the close went through and cleared after the
+start returned), it waits in one-second steps for up to ten more minutes, then gives the rest of the shutdown
+another 30 seconds.
 
 ## Other OrcaSlicer processes
 
@@ -88,5 +93,8 @@ The checksum proves the integrity of the download against the release: the bytes
 release published, not a truncated, corrupted or swapped file. It does not prove that the release itself is
 trustworthy. The release is trusted through HTTPS to `github.com` (certificates verified on the downloads) and
 through the repository it belongs to: the `.sha256` asset comes from the same release as the installer, so anyone
-who can publish a release in that repository can publish a matching checksum. The update check request itself
-does not verify the server's certificate; it can only point to assets below the repository's download prefix.
+who can publish a release in that repository can publish a matching checksum. The update check request verifies
+the server's certificate whenever it can lead to an in-app install (the built-in URL). When that request fails
+without an HTTP status (a transport or certificate error), it is repeated once without verification and without
+the in-app install, so the prompt still appears and Download opens the release page; an overridden URL is
+requested without verification, as before.

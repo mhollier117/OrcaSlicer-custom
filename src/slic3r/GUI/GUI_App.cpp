@@ -1323,6 +1323,11 @@ void GUI_App::shutdown()
     BOOST_LOG_TRIVIAL(info) << "GUI_App::shutdown exit";
 }
 
+// Set while an update installer is waiting to be started at the end of OnExit() (Install now in the update
+// prompt): the exit watchdog then waits for it. Trivially destructible, so the watchdog may read it during
+// static destruction.
+static std::atomic<bool> s_update_installer_pending{false};
+
 void GUI_App::start_exit_watchdog()
 {
     // Last resort for code that never returns while the app closes (plugins, vendor libraries,
@@ -1336,6 +1341,18 @@ void GUI_App::start_exit_watchdog()
         boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level> logger;
         std::thread([grace, logger]() mutable {
             std::this_thread::sleep_for(grace);
+            // Starting the update installer waits for the Windows administrator prompt: up to ten minutes for
+            // it, then the rest of the shutdown gets another grace period.
+            if (s_update_installer_pending.load()) {
+                constexpr auto installer_limit = std::chrono::minutes(10);
+                std::chrono::seconds waited{0};
+                while (s_update_installer_pending.load() && waited < installer_limit) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    waited += std::chrono::seconds(1);
+                }
+                if (!s_update_installer_pending.load())
+                    std::this_thread::sleep_for(grace);
+            }
             try {
                 BOOST_LOG_SEV(logger, boost::log::trivial::error)
                     << "OrcaSlicer did not finish closing within " << grace.count() << " s; ending the process";
@@ -3068,6 +3085,7 @@ int GUI_App::OnExit()
             BOOST_LOG_TRIVIAL(error) << "Update: the installer did not start";
         m_update_installer.reset();
     }
+    s_update_installer_pending = false;
 #endif
 
     return wxApp::OnExit();
@@ -3085,6 +3103,8 @@ void GUI_App::install_update_on_exit(std::unique_ptr<HeldFile> installer)
         // returns false or leaves the frame alive; a frame that closes is scheduled for destruction.
         MainFrame* frame  = mainframe;
         const bool closed = frame != nullptr && frame->Close(false) && IsScheduledForDestruction(frame);
+        // The exit watchdog started by the close waits while this is set (see start_exit_watchdog()).
+        s_update_installer_pending = closed;
         if (!closed) {
             BOOST_LOG_TRIVIAL(info) << "Update: closing OrcaSlicer was cancelled; the installer is not started";
             m_update_installer.reset();
@@ -6768,18 +6788,32 @@ void GUI_App::check_new_version_sf(bool show_tips, int by_user)
         version_check_url += query_string;
     }
 
+    // One check request. A request that can lead to an in-app install (built-in URL) verifies the server's
+    // certificate; when it fails without an HTTP status (a transport or certificate error), it is repeated once
+    // without verification and without the in-app install, so the prompt still appears and opens the browser.
+    using Request = std::function<void(bool /* verified */)>;
+    auto request  = std::make_shared<Request>();
+    *request = [this, by_user, check_stable_only, version_check_url, query_string, download_prefix,
+                weak_request = std::weak_ptr<Request>(request)](bool verified) {
     auto http = Http::get(version_check_url);
     maybe_attach_updater_signature(http, query_string, version_check_url);
+    if (verified)
+        http.tls_verify(true);
 
     http.header("accept", "application/vnd.github.v3+json")
         .timeout_connect(5)
         .timeout_max(10)
-        .on_error([&](std::string body, std::string error, unsigned http_status) {
+        .on_error([verified, retry = weak_request.lock()](std::string body, std::string error, unsigned http_status) {
           (void)body;
           BOOST_LOG_TRIVIAL(error) << format("Error getting: `%1%`: HTTP %2%, %3%", "check_new_version_sf", http_status,
                                              error);
+          if (verified && http_status == 0 && retry) {
+              BOOST_LOG_TRIVIAL(warning) << "check_new_version_sf: repeating the check without certificate verification";
+              (*retry)(false);
+          }
         })
-        .on_complete([this, by_user, check_stable_only, download_prefix](std::string body, unsigned http_status) {
+        .on_complete([this, by_user, check_stable_only, download_prefix = verified ? download_prefix : std::string()](
+                         std::string body, unsigned http_status) {
           if (http_status != 200)
             return;
           try {
@@ -6929,6 +6963,8 @@ void GUI_App::check_new_version_sf(bool show_tips, int by_user)
         });
 
     http.perform();
+    };
+    (*request)(!download_prefix.empty());
 }
 
 // return true if handled
