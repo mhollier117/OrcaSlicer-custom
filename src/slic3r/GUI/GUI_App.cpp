@@ -3657,9 +3657,15 @@ bool GUI_App::on_init_inner()
                 }
                 if (!skip_this_version
                     || evt.GetInt() != 0) {
+                    // Download installs in the app (AppUpdateDialog): Windows desktop builds with an offered installer.
+#ifdef _WIN32
+                    const bool installs_in_app = !is_running_in_msix() && offered.installer.has_value();
+#else
+                    const bool installs_in_app = false;
+#endif
                     UpdateVersionDialog dialog(this->mainframe);
                     wxString            extmsg = wxString::FromUTF8(offered.description);
-                    dialog.update_version_info(extmsg, offered.version_str);
+                    dialog.update_version_info(extmsg, offered.version_str, installs_in_app);
                     //dialog.update_version_info(version_info.description);
                     if (evt.GetInt() != 0) {
                         dialog.m_button_skip_version->Hide();
@@ -3671,7 +3677,7 @@ bool GUI_App::on_init_inner()
                         if (is_running_in_msix())
                             open_ms_store_product_page();
 #ifdef _WIN32
-                        else if (offered.installer) {
+                        else if (installs_in_app) {
                             // Downloads, verifies and offers to start the installer (docs/HLSD/app-update.md).
                             AppUpdateDialog update_dialog(this->mainframe, *offered.installer, offered.version_str,
                                                           offered.url);

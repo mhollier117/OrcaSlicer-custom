@@ -101,7 +101,9 @@ public:
     bool ShowReleaseNote(std::string content);
     void RunScript(std::string script);
     void on_dpi_changed(const wxRect& suggested_rect) override;
-    void update_version_info(wxString release_note, wxString version);
+    // installs_in_app: Download fetches and verifies the installer in the app (AppUpdateDialog) instead of
+    // opening the release page in the browser.
+    void update_version_info(wxString release_note, wxString version, bool installs_in_app = false);
     std::vector<std::string> splitWithStl(std::string str, std::string pattern);
 
     wxStaticBitmap*   m_brand{nullptr};

@@ -1,5 +1,6 @@
 #include "ReleaseNote.hpp"
 #include "I18N.hpp"
+#include "format.hpp"
 
 #include "bambu_networking.hpp"
 #include "libslic3r/Utils.hpp"
@@ -515,7 +516,7 @@ std::vector<std::string> UpdateVersionDialog::splitWithStl(std::string str,std::
     return result;
 }
 
-void UpdateVersionDialog::update_version_info(wxString release_note, wxString version)
+void UpdateVersionDialog::update_version_info(wxString release_note, wxString version, bool installs_in_app)
 {
     //bbs check whether the web display is used
     bool use_web_link = false;
@@ -544,6 +545,8 @@ void UpdateVersionDialog::update_version_info(wxString release_note, wxString ve
     m_simplebook_release_note->SetSelection(1);
     if (is_running_in_msix())
         m_text_up_info->SetLabel(wxString::Format(_L("New version available: %s. Please update OrcaSlicer from the Microsoft Store."), version));
+    else if (installs_in_app)
+        m_text_up_info->SetLabel(format_wxstr(_L("Version %1% is available. Download fetches the installer, verifies it and offers to install it."), version));
     else
         m_text_up_info->SetLabel(wxString::Format(_L("Click to download new version in default browser: %s"), version));
     auto data_buf_in = release_note.utf8_str();
