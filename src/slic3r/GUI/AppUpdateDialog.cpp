@@ -17,6 +17,7 @@
 #include <istream>
 #include <memory>
 #include <optional>
+#include <random>
 #include <set>
 #include <streambuf>
 #include <string>
@@ -25,7 +26,6 @@
 
 #include <boost/filesystem/operations.hpp>
 #include <boost/log/trivial.hpp>
-#include <boost/nowide/fstream.hpp>
 #include <boost/system/error_code.hpp>
 
 #include <wx/colour.h>
@@ -123,6 +123,42 @@ wxString verdict_message(AppUpdate::Verdict verdict)
 
 wxString megabytes(long long bytes) { return wxString::Format("%.1f", double(bytes) / double(one_mb)); }
 
+// Writes the download to a new file with a unique name next to `target` (<name>.<random hex>.part, created with
+// CREATE_NEW and no sharing, so no existing path is opened or truncated), flushes and closes it, then renames it
+// to `target`. On any failure the staging file is deleted.
+bool save_download(const std::string& body, const fs::path& target)
+{
+    std::random_device random;
+    std::wstring       suffix;
+    static const wchar_t digits[] = L"0123456789abcdef";
+    for (int i = 0; i < 16; ++i)
+        suffix.push_back(digits[random() & 0x0F]);
+    const fs::path part = target.parent_path() / fs::path(target.filename().wstring() + L"." + suffix + L".part");
+
+    HANDLE file = ::CreateFileW(part.wstring().c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        BOOST_LOG_TRIVIAL(error) << "Update: the staging file could not be created, error " << ::GetLastError();
+        return false;
+    }
+    bool        ok      = true;
+    std::size_t written = 0;
+    while (ok && written < body.size()) {
+        const DWORD chunk = DWORD(std::min<std::size_t>(body.size() - written, std::size_t(1) << 24));
+        DWORD       done  = 0;
+        ok = ::WriteFile(file, body.data() + written, chunk, &done, nullptr) && done == chunk;
+        written += done;
+    }
+    ok = ok && ::FlushFileBuffers(file);
+    ok = ::CloseHandle(file) && ok;
+    if (ok)
+        ok = ::MoveFileExW(part.wstring().c_str(), target.wstring().c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+    if (!ok) {
+        BOOST_LOG_TRIVIAL(error) << "Update: the installer could not be saved, error " << ::GetLastError();
+        ::DeleteFileW(part.wstring().c_str());
+    }
+    return ok;
+}
+
 } // namespace
 
 // ---- HeldFile ----
@@ -130,9 +166,20 @@ wxString megabytes(long long bytes) { return wxString::Format("%.1f", double(byt
 HeldFile::HeldFile(const fs::path& path) : m_path(path)
 {
     // Shared for reading only: no other handle may write, rename or delete the file while this one is open.
+    // FILE_FLAG_OPEN_REPARSE_POINT opens a link itself instead of its target: the launch goes by path, so a link
+    // verified through could be re-pointed before it. Only a plain file is accepted.
     HANDLE handle = ::CreateFileW(path.wstring().c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                                  FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
-    m_handle = handle == INVALID_HANDLE_VALUE ? nullptr : handle;
+                                  FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (handle == INVALID_HANDLE_VALUE)
+        return;
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!::GetFileInformationByHandle(handle, &info) ||
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0) {
+        BOOST_LOG_TRIVIAL(warning) << "Update: the downloaded installer is not a plain file";
+        ::CloseHandle(handle);
+        return;
+    }
+    m_handle = handle;
 }
 
 HeldFile::~HeldFile()
@@ -181,6 +228,27 @@ bool HeldFile::launch() const
 
 // ---- other processes of this executable ----
 
+ProcessHandle::~ProcessHandle()
+{
+    if (m_handle != nullptr)
+        ::CloseHandle(static_cast<HANDLE>(m_handle));
+}
+
+ProcessHandle::ProcessHandle(ProcessHandle&& other) noexcept
+    : m_handle(std::exchange(other.m_handle, nullptr)), m_pid(other.m_pid)
+{}
+
+ProcessHandle& ProcessHandle::operator=(ProcessHandle&& other) noexcept
+{
+    if (this != &other) {
+        if (m_handle != nullptr)
+            ::CloseHandle(static_cast<HANDLE>(m_handle));
+        m_handle = std::exchange(other.m_handle, nullptr);
+        m_pid    = other.m_pid;
+    }
+    return *this;
+}
+
 OtherInstances find_other_instances()
 {
     OtherInstances result;
@@ -192,44 +260,64 @@ OtherInstances find_other_instances()
     HANDLE snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE)
         return result;
-    std::set<DWORD>  same_image;
-    PROCESSENTRY32W entry{};
+    // One handle per process of this executable, used for the path check, the classification and the termination:
+    // while it is open, the process id cannot be reused by another process.
+    std::vector<ProcessHandle> same_image;
+    PROCESSENTRY32W            entry{};
     entry.dwSize = sizeof(entry);
     for (BOOL more = ::Process32FirstW(snapshot, &entry); more; more = ::Process32NextW(snapshot, &entry)) {
-        if (entry.th32ProcessID == own_pid)
+        const DWORD pid = entry.th32ProcessID;
+        if (pid == own_pid)
             continue;
-        HANDLE process = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
+        HANDLE process = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | PROCESS_TERMINATE, FALSE, pid);
+        if (process == nullptr)
+            process = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
         if (process == nullptr)
             continue;
+        ProcessHandle      handle(process, pid);
         const std::wstring path = process_image_path(process);
-        ::CloseHandle(process);
-        if (!path.empty() && ::_wcsicmp(path.c_str(), own_path.c_str()) == 0)
-            same_image.insert(entry.th32ProcessID);
+        if (!path.empty() && ::_wcsicmp(path.c_str(), own_path.c_str()) == 0 && ::WaitForSingleObject(process, 0) == WAIT_TIMEOUT)
+            same_image.push_back(std::move(handle));
     }
     ::CloseHandle(snapshot);
     if (same_image.empty())
         return result;
 
-    WindowSearch search{&same_image, {}};
+    std::set<DWORD> pids;
+    for (const ProcessHandle& process : same_image)
+        pids.insert(process.pid());
+    WindowSearch search{&pids, {}};
     ::EnumWindows(collect_visible_window, reinterpret_cast<LPARAM>(&search));
-    result.windows = search.with_window.size();
-    for (DWORD pid : same_image)
-        if (search.with_window.count(pid) == 0)
-            result.helpers.push_back(pid);
+
+    for (ProcessHandle& process : same_image) {
+        // A helper announces itself with its named event (see run_stdio_bridge).
+        HANDLE event = ::OpenEventW(SYNCHRONIZE, FALSE, AppUpdate::helper_event_name(process.pid()).c_str());
+        if (event != nullptr) {
+            ::CloseHandle(event);
+            result.helpers.push_back(std::move(process));
+        } else if (search.with_window.count(process.pid()) != 0)
+            ++result.windows;
+        else
+            ++result.others;
+    }
     return result;
 }
 
 void terminate_update_helpers()
 {
-    for (unsigned long pid : find_other_instances().helpers) {
-        HANDLE process = ::OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
-        if (process == nullptr)
+    for (const ProcessHandle& helper : find_other_instances().helpers) {
+        HANDLE process = static_cast<HANDLE>(helper.get());
+        // Asked first: the helper ends itself when its event is set.
+        if (HANDLE event = ::OpenEventW(EVENT_MODIFY_STATE, FALSE, AppUpdate::helper_event_name(helper.pid()).c_str())) {
+            ::SetEvent(event);
+            ::CloseHandle(event);
+        }
+        if (::WaitForSingleObject(process, 3000) != WAIT_TIMEOUT)
             continue;
         if (::TerminateProcess(process, 1))
             ::WaitForSingleObject(process, 3000);
         else
-            BOOST_LOG_TRIVIAL(warning) << "Update: could not end helper process " << pid << ", error " << ::GetLastError();
-        ::CloseHandle(process);
+            BOOST_LOG_TRIVIAL(warning) << "Update: could not end helper process " << helper.pid() << ", error " << ::GetLastError();
     }
 }
 
@@ -265,8 +353,8 @@ AppUpdateDialog::AppUpdateDialog(wxWindow*                        parent,
     });
     m_failed_buttons->GetButtonFromIndex(1)->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { EndModal(wxID_CANCEL); });
     m_ready_buttons->GetButtonFromIndex(0)->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-        // Another OrcaSlicer window would keep its files in use: the check is repeated until it is closed.
-        if (find_other_instances().windows > 0) {
+        // Another OrcaSlicer window or job would keep its files in use: the check is repeated until none is left.
+        if (find_other_instances().blocking()) {
             show_ready(true);
             return;
         }
@@ -343,6 +431,8 @@ void AppUpdateDialog::download_checksum()
         .timeout_connect(10)
         .timeout_max(60)
         .on_complete([this, alive](std::string body, unsigned) {
+            if (!*alive)
+                return;
             wxGetApp().CallAfter([this, alive, body = std::move(body)] {
                 if (!*alive)
                     return;
@@ -363,6 +453,8 @@ void AppUpdateDialog::download_checksum()
             });
         })
         .on_error([this, alive](std::string, std::string error, unsigned status) {
+            if (!*alive)
+                return;
             BOOST_LOG_TRIVIAL(error) << "Update: the checksum download failed: HTTP " << status << ", " << error;
             wxGetApp().CallAfter([this, alive, error, status] {
                 if (*alive)
@@ -379,7 +471,6 @@ void AppUpdateDialog::download_installer()
 
     auto            alive        = m_alive;
     auto            last_percent = std::make_shared<std::atomic<int>>(-1);
-    const fs::path  part         = m_folder / fs::path(m_target.filename().wstring() + L".part");
     const fs::path  target       = m_target;
     const long long total        = m_offer.size;
 
@@ -400,24 +491,11 @@ void AppUpdateDialog::download_installer()
                     on_progress(now, std::size_t(total));
             });
         })
-        .on_complete([this, alive, part, target](std::string body, unsigned) {
-            // Saved here, off the UI thread: <name>.part first, then renamed to <name>.
-            bool saved = false;
-            {
-                boost::nowide::ofstream out(part.string().c_str(), std::ios::binary | std::ios::trunc);
-                out.write(body.data(), std::streamsize(body.size()));
-                out.close();
-                saved = bool(out);
-            }
-            boost::system::error_code ec;
-            if (saved) {
-                fs::rename(part, target, ec);
-                saved = !ec;
-            }
-            if (!saved) {
-                BOOST_LOG_TRIVIAL(error) << "Update: the installer could not be saved: " << ec.message();
-                fs::remove(part, ec);
-            }
+        .on_complete([this, alive, target](std::string body, unsigned) {
+            if (!*alive)
+                return; // the dialog is gone: nothing is written
+            // Saved here, off the UI thread.
+            const bool saved = save_download(body, target);
             wxGetApp().CallAfter([this, alive, saved] {
                 if (!*alive)
                     return;
@@ -429,6 +507,8 @@ void AppUpdateDialog::download_installer()
             });
         })
         .on_error([this, alive](std::string, std::string error, unsigned status) {
+            if (!*alive)
+                return;
             BOOST_LOG_TRIVIAL(error) << "Update: the installer download failed: HTTP " << status << ", " << error;
             wxGetApp().CallAfter([this, alive, error, status] {
                 if (*alive)
@@ -492,9 +572,9 @@ void AppUpdateDialog::show_ready(bool windows_still_open)
                                      m_version));
     const OtherInstances others = find_other_instances();
     wxString             detail;
-    if (others.windows > 0)
-        detail = windows_still_open ? _L("Other OrcaSlicer windows are still open. Close them first.") :
-                                      _L("Close the other OrcaSlicer windows first.");
+    if (others.blocking())
+        detail = windows_still_open ? _L("OrcaSlicer is still running elsewhere. Close it first.") :
+                                      _L("Other OrcaSlicer windows or jobs are running. Close them first.");
     else if (!others.helpers.empty()) {
         const unsigned int count = unsigned(others.helpers.size());
         detail = format_wxstr(_L_PLURAL("%1% connection of an AI agent to OrcaSlicer will be closed. Reconnect it afterwards.",

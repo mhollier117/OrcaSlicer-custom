@@ -27,6 +27,7 @@ class DialogButtons;
 
 // A file opened for reading and shared for reading only: while it is open, nobody can write, rename or delete it.
 // The verified installer is hashed through this handle and kept open until its process has been started.
+// Only a plain file is accepted: a symbolic link, junction or folder at the path leaves it closed.
 class HeldFile
 {
 public:
@@ -49,16 +50,43 @@ private:
     boost::filesystem::path m_path;
 };
 
-// Other running processes of this executable: those with a visible top-level window are other OrcaSlicer windows,
-// the others are helpers (the --mcp-stdio bridges of AI agent clients, which have no window).
+// A process handle with its id, closed on destruction. While it is open, the id cannot be reused.
+class ProcessHandle
+{
+public:
+    ProcessHandle(void* handle, unsigned long pid) : m_handle(handle), m_pid(pid) {}
+    ~ProcessHandle();
+    ProcessHandle(ProcessHandle&& other) noexcept;
+    ProcessHandle& operator=(ProcessHandle&& other) noexcept;
+    ProcessHandle(const ProcessHandle&)            = delete;
+    ProcessHandle& operator=(const ProcessHandle&) = delete;
+
+    void*         get() const { return m_handle; }
+    unsigned long pid() const { return m_pid; }
+
+private:
+    void*         m_handle{nullptr}; // a Win32 HANDLE
+    unsigned long m_pid{0};
+};
+
+// Other running processes of this executable (same full image path):
+// - helpers: the --mcp-stdio bridges of AI agent clients, which announce themselves with the named event of
+//   AppUpdate::helper_event_name();
+// - windows: not helpers, and own a visible top-level window;
+// - others: neither, such as an instance still starting or a command-line job.
+// Windows and others block the in-app install; only helpers are ever ended.
 struct OtherInstances
 {
-    std::vector<unsigned long> helpers;
+    std::vector<ProcessHandle> helpers;
     std::size_t                windows{0};
+    std::size_t                others{0};
+
+    bool blocking() const { return windows + others > 0; }
 };
 OtherInstances find_other_instances();
 
-// Terminates the helper processes found now, waiting up to 3 s for each. Never touches a process with a window.
+// Ends the helper processes found now: sets each one's event and waits up to 3 s; one still running is terminated
+// through the same handle, with up to 3 s more. Never touches a process that is not a helper.
 void terminate_update_helpers();
 
 class AppUpdateDialog : public DPIDialog

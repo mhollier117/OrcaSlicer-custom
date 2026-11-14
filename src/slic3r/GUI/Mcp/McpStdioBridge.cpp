@@ -6,6 +6,7 @@
 
 #include "McpOptions.hpp"
 #include "libslic3r/Utils.hpp"
+#include "slic3r/Utils/AppUpdate.hpp"
 #include "libslic3r_version.h"
 
 #include <boost/asio/connect.hpp>
@@ -42,6 +43,7 @@
 #include <exception>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <thread>
 
 #ifdef _WIN32
@@ -327,6 +329,27 @@ void write_line(const std::string& s)
     boost::nowide::cout.flush();
 }
 
+#ifdef _WIN32
+// Tells an OrcaSlicer window's update prompt that this process is a helper, and lets it end the helper before the
+// installer runs (docs/HLSD/app-update.md). The event is held for the life of the process; once it is set, the
+// process ends at once: the bridge holds no state. Without the event the bridge still works.
+void listen_for_update_stop()
+{
+    const std::wstring name  = Slic3r::AppUpdate::helper_event_name(::GetCurrentProcessId());
+    HANDLE             event = ::CreateEventW(nullptr, TRUE /* manual reset */, FALSE, name.c_str());
+    if (event == nullptr)
+        return;
+    try {
+        std::thread([event] {
+            if (::WaitForSingleObject(event, INFINITE) == WAIT_OBJECT_0)
+                ::TerminateProcess(::GetCurrentProcess(), 0);
+        }).detach();
+    } catch (const std::system_error&) {
+        // No thread: the helper can still be terminated from outside.
+    }
+}
+#endif
+
 } // namespace
 
 std::map<std::string, std::string> bridge_headers(const json& message, const std::string& negotiated_version)
@@ -362,6 +385,7 @@ int run_stdio_bridge(int argc, char** argv)
 #ifdef _WIN32
     _setmode(_fileno(stdin), _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
+    listen_for_update_stop();
 #else
     std::signal(SIGPIPE, SIG_IGN);
 #endif

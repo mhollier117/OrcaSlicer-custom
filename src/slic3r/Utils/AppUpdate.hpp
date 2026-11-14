@@ -36,7 +36,8 @@ std::string download_prefix_for(const std::string& check_url);
 // ("_x64.exe" or "_arm64.exe") and contains "Installer", with a size from 1 MB to 1 GB, plus the asset named
 // <that name>.sha256; both URLs must start with `prefix` and `prefix` must not be empty. Otherwise nullopt.
 // A URL whose remainder could leave the prefix (a ".." segment, a backslash, an encoded dot, slash or backslash)
-// does not count as starting with it, and the name must be a plain file name.
+// does not count as starting with it, and the name must be a plain file name. An installer digest that starts
+// with "sha256:" must be followed by exactly 64 hex digits; an empty digest or one of another algorithm is none.
 std::optional<InstallerOffer> choose_installer(const std::vector<ReleaseAsset>& assets, const std::string& arch_suffix,
                                                const std::string& prefix);
 
@@ -47,6 +48,10 @@ std::optional<std::string> parse_sha256_file(const std::string& text, const std:
 // SHA-256 of a stream / of a file, lower-case hex; nullopt when it cannot be read. Reads in chunks.
 std::optional<std::string> sha256_hex(std::istream& in);
 std::optional<std::string> sha256_hex(const std::string& path_utf8);
+
+// The name of the event an `--mcp-stdio` helper process creates (Windows): L"Local\OrcaSlicerMcpStdio.<pid>".
+// A process for which it exists is a helper; setting it ends that helper.
+std::wstring helper_event_name(unsigned long pid);
 
 enum class Verdict { Ok, WrongSize, WrongDigest, Unreadable };
 

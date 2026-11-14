@@ -106,8 +106,12 @@ std::optional<InstallerOffer> choose_installer(const std::vector<ReleaseAsset>& 
     offer.sha256_url = checksum->url;
     offer.size       = installer->size;
     const std::string digest_tag = "sha256:";
-    if (installer->digest.compare(0, digest_tag.size(), digest_tag) == 0)
-        offer.digest_hex = sha256_text(installer->digest.substr(digest_tag.size())).value_or(std::string());
+    if (installer->digest.compare(0, digest_tag.size(), digest_tag) == 0) {
+        const auto hex = sha256_text(installer->digest.substr(digest_tag.size()));
+        if (!hex)
+            return std::nullopt; // a SHA-256 digest that cannot be checked is not the same as none
+        offer.digest_hex = *hex;
+    }
     return offer;
 }
 
@@ -171,6 +175,11 @@ std::optional<std::string> sha256_hex(const std::string& path_utf8)
     if (!file)
         return std::nullopt;
     return sha256_hex(file);
+}
+
+std::wstring helper_event_name(unsigned long pid)
+{
+    return L"Local\\OrcaSlicerMcpStdio." + std::to_wstring(pid);
 }
 
 Verdict judge(long long actual_size, const std::optional<std::string>& actual_hex, long long expected_size,

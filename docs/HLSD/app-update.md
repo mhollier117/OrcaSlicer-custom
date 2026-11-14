@@ -16,6 +16,11 @@ the best stable release and the best pre-release are kept, together with their r
 `assets` (name, `browser_download_url`, `size`, and `digest` when GitHub gives one). "Check for stable updates
 only" picks between the two.
 
+The request runs on `Http`'s own thread. It builds a complete `VersionInfo` there and hands it to the UI thread
+(`CallAfter`), where `GUI_App::version_info` is replaced and `EVT_SLIC3R_VERSION_ONLINE` is sent. The handler copies
+`version_info` once at its start and uses only that copy for the prompt, the browser fallback and
+`AppUpdateDialog`, so a check that completes while the prompt is open cannot change what is shown or installed.
+
 ## Version comparison
 
 Tags look like `v2.5.0.2+custom`: the upstream version plus this fork's revision as a fourth number. The version
@@ -34,7 +39,9 @@ parser folds a fourth number into the patch, so both sides are compared in their
   architecture suffix (`_x64.exe` or `_arm64.exe`, as CPack names the installers), with a size from 1 MB to
   1 GB, plus an asset named `<installer name>.sha256` (`AppUpdate::choose_installer`);
 - both asset URLs lie below the download prefix: a URL whose remainder could climb out of it (a `..` segment, a
-  backslash, an encoded dot, slash or backslash) does not count, and the installer name must be a plain file name.
+  backslash, an encoded dot, slash or backslash) does not count, and the installer name must be a plain file name;
+- a `digest` of the installer asset that starts with `sha256:` is followed by exactly 64 hex digits (an empty
+  digest, or one of another algorithm, counts as none).
 
 The pure parts (prefix, asset choice, checksum file, hashing, verdict) live in `src/slic3r/Utils/AppUpdate.*`
 without wx or network code and are covered by the `[AppUpdate]` tests.
@@ -47,9 +54,12 @@ not be saved. Otherwise it deletes every other file there,
 then downloads the `.sha256` asset (at most 4 KB). Its first token must be 64 hex digits; a file name after it
 must be the installer's. When the installer is already in the folder from an earlier attempt and passes the
 checks below, it is used as it is; otherwise it is downloaded (size limit: the published size plus 1 MB),
-written to `<name>.part` and renamed to `<name>`. Both downloads run on `Http`'s own thread with TLS
+written to a new staging file with a unique name (`<name>.<random hex>.part`, created with `CREATE_NEW` and no
+sharing, so no existing path is opened or truncated), flushed, closed and renamed to `<name>`; on any failure the
+staging file is deleted, and leftovers go with the next start-up cleanup of the folder. Both downloads run on `Http`'s own thread with TLS
 certificate verification enabled; results reach the dialog through `CallAfter` guarded by a shared alive flag,
-and closing the dialog cancels the request.
+and closing the dialog cancels the request. A callback that finds the dialog gone returns at once: it writes
+nothing and posts nothing.
 
 The file then must have the size given in the release JSON, its SHA-256 must equal the `.sha256` asset, and,
 when the release JSON gives a `sha256:<hex>` digest for the installer, it must equal that too. A file that fails
@@ -60,8 +70,11 @@ any check is deleted and never started; the dialog says which check failed and o
 The installer runs elevated. Between the check and the start, another process could replace the file in the
 user's temp folder. So the dialog opens the file once, shared for reading only (no write and no delete sharing),
 hashes it through that handle, and keeps the handle (`HeldFile`) open until the installer process has been
-started. Nobody can write, rename or delete the file in between. Later closes the dialog, releases the handle and
-keeps the file for the next attempt.
+started. Nobody can write, rename or delete the file in between. The launch goes by path, so the file must be a
+plain file: it is opened with `FILE_FLAG_OPEN_REPARSE_POINT` and accepted only when the handle shows neither
+`FILE_ATTRIBUTE_REPARSE_POINT` nor `FILE_ATTRIBUTE_DIRECTORY`. A symbolic link at that name, which could be verified
+through and re-pointed before the launch, fails the check like any other: it is deleted and never started. Later
+closes the dialog, releases the handle and keeps the file for the next attempt.
 
 ## Closing OrcaSlicer and starting the installer
 
@@ -81,11 +94,20 @@ another 30 seconds.
 ## Other OrcaSlicer processes
 
 Other processes running the same executable (same full image path, compared without regard to case) would keep
-the installed files in use. A process with a visible top-level window is another OrcaSlicer window; the update
-prompt asks for those to be closed first, and Install now repeats the check until none is left. The others are
-helpers: the `--mcp-stdio` bridges that AI agent clients start, which have no window. The prompt says how many
-agent connections will be closed; only those helpers are ever terminated, and only on the Install now path at
-exit (`TerminateProcess`, then up to 3 s of waiting for each).
+the installed files in use. `find_other_instances` opens one handle per such process and uses it for the path
+check, the classification and any termination, so a reused process id is never hit. A process is
+
+- a **helper** when it says so: an `--mcp-stdio` bridge (`run_stdio_bridge`) creates the named manual-reset event
+  `Local\OrcaSlicerMcpStdio.<process id>` (`AppUpdate::helper_event_name`) at start, keeps it for its lifetime and
+  ends itself at once when it is set (the bridge holds no state);
+- a **window** when it is not a helper and owns a visible top-level window;
+- an **other** when it is neither: an instance still starting, or a command-line job such as `--slice`.
+
+Windows and others block the in-app install: the prompt asks for them to be closed first, and Install now repeats
+the check until none is left. The prompt says how many agent connections will be closed. Only helpers are ever
+ended, and only on the Install now path at exit: their event is set, and one still running after 3 s is terminated
+through the same handle, with up to 3 s more. The launch goes ahead even when a helper could not be ended or another
+instance appeared meanwhile: the installer makes its own check and asks the user (below).
 
 ## The installer and running copies
 

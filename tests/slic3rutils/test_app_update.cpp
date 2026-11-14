@@ -1,8 +1,11 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstddef>
+#include <ios>
+#include <istream>
 #include <optional>
 #include <sstream>
+#include <streambuf>
 #include <string>
 #include <vector>
 
@@ -31,6 +34,19 @@ std::vector<ReleaseAsset> release()
     return {asset(installer, 90 * mb, "sha256:" + std::string(64, 'C')), asset(installer + ".sha256", 110),
             asset("OrcaSlicer_Windows_Installer_V9.8.7_arm64.exe", 90 * mb)};
 }
+
+// Gives some bytes, then fails the way a broken disk read does: the stream turns the exception into badbit.
+class FailingBuf : public std::streambuf
+{
+public:
+    FailingBuf() { setg(m_data, m_data, m_data + sizeof(m_data)); }
+
+protected:
+    int_type underflow() override { throw std::ios_base::failure("read failed"); }
+
+private:
+    char m_data[100] = {};
+};
 
 std::string to_hex(const unsigned char* digest, std::size_t length)
 {
@@ -143,6 +159,57 @@ TEST_CASE("A release digest in another form leaves the digest empty", "[AppUpdat
     CHECK(offer->digest_hex.empty());
 }
 
+TEST_CASE("A malformed SHA-256 release digest withdraws the offer", "[AppUpdate]")
+{
+    std::vector<ReleaseAsset> assets = release();
+    assets[0].digest                 = "sha256:" + std::string(63, 'a');
+    CHECK_FALSE(choose_installer(assets, "_x64.exe", prefix).has_value());
+    assets[0].digest = "sha256:" + std::string(63, 'a') + "z";
+    CHECK_FALSE(choose_installer(assets, "_x64.exe", prefix).has_value());
+    assets[0].digest = "sha256:";
+    CHECK_FALSE(choose_installer(assets, "_x64.exe", prefix).has_value());
+    assets[0].digest = "";
+    CHECK(choose_installer(assets, "_x64.exe", prefix).has_value());
+}
+
+TEST_CASE("An installer name or URL that could leave its folder withdraws the offer", "[AppUpdate]")
+{
+    SECTION("a name with a path separator")
+    {
+        for (const std::string name : {"sub/" + installer, "sub\\" + installer}) {
+            std::vector<ReleaseAsset> assets = {asset(name, 90 * mb), asset(name + ".sha256", 110)};
+            CHECK_FALSE(choose_installer(assets, "_x64.exe", prefix).has_value());
+        }
+    }
+    SECTION("a URL with a dot-dot segment or an encoded separator")
+    {
+        for (const std::string tail : {"v1/../" + installer, "v1%2F" + installer, "v1%5c" + installer}) {
+            std::vector<ReleaseAsset> assets = release();
+            assets[0].url                    = prefix + tail;
+            CHECK_FALSE(choose_installer(assets, "_x64.exe", prefix).has_value());
+        }
+    }
+}
+
+TEST_CASE("Installer sizes from 1 MB to 1 GB are accepted", "[AppUpdate]")
+{
+    std::vector<ReleaseAsset> assets = release();
+    assets[0].size                   = mb;
+    CHECK(choose_installer(assets, "_x64.exe", prefix).has_value());
+    assets[0].size = mb - 1;
+    CHECK_FALSE(choose_installer(assets, "_x64.exe", prefix).has_value());
+    assets[0].size = 1024 * mb;
+    CHECK(choose_installer(assets, "_x64.exe", prefix).has_value());
+    assets[0].size = 1024 * mb + 1;
+    CHECK_FALSE(choose_installer(assets, "_x64.exe", prefix).has_value());
+}
+
+TEST_CASE("The helper event name carries the process id", "[AppUpdate]")
+{
+    CHECK(helper_event_name(4242) == L"Local\\OrcaSlicerMcpStdio.4242");
+    CHECK(helper_event_name(7) == L"Local\\OrcaSlicerMcpStdio.7");
+}
+
 TEST_CASE("A checksum file gives its digest", "[AppUpdate]")
 {
     CHECK(parse_sha256_file(hex_a + "  " + installer + "\n", installer) == hex_a);
@@ -178,6 +245,13 @@ TEST_CASE("The SHA-256 of a stream is its lower-case hex digest", "[AppUpdate]")
     CHECK(sha256_hex(stream) == to_hex(digest, SHA256_DIGEST_LENGTH));
 }
 
+TEST_CASE("A stream that fails while being read has no SHA-256", "[AppUpdate]")
+{
+    FailingBuf   buffer;
+    std::istream in(&buffer);
+    CHECK_FALSE(sha256_hex(in).has_value());
+}
+
 TEST_CASE("A download is judged by its size and digests", "[AppUpdate]")
 {
     CHECK(judge(90 * mb, hex_a, 90 * mb, hex_a, hex_a) == Verdict::Ok);
@@ -187,4 +261,5 @@ TEST_CASE("A download is judged by its size and digests", "[AppUpdate]")
     CHECK(judge(90 * mb, hex_a, 90 * mb, hex_a, hex_b) == Verdict::WrongDigest);
     CHECK(judge(90 * mb, std::nullopt, 90 * mb, hex_a, "") == Verdict::Unreadable);
     CHECK(judge(90 * mb, std::string(64, 'A'), 90 * mb, hex_a, std::string(64, 'A')) == Verdict::Ok);
+    CHECK(judge(90 * mb, hex_a, 90 * mb, "", "") == Verdict::WrongDigest);
 }

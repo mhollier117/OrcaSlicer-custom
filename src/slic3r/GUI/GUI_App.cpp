@@ -3630,6 +3630,9 @@ bool GUI_App::on_init_inner()
         preset_updater = new PresetUpdater();
         Bind(EVT_SLIC3R_VERSION_ONLINE, [this](const wxCommandEvent& evt) {
             if (this->plater_ != nullptr) {
+                // One copy for the whole prompt: a check that completes meanwhile cannot change what is shown,
+                // opened or installed.
+                const VersionInfo offered = version_info;
                 // this->plater_->get_notification_manager()->push_notification(NotificationType::NewAppAvailable);
                 //BBS show msg box to download new version
                /* wxString tips = wxString::Format(_L("Click to download new version in default browser: %s"), version_info.version_str);
@@ -3644,8 +3647,8 @@ bool GUI_App::on_init_inner()
                 std::string skip_version_str = this->app_config->get("app", "skip_version");
                 bool skip_this_version = false;
                 if (!skip_version_str.empty()) {
-                    BOOST_LOG_TRIVIAL(info) << "new version = " << version_info.version_str << ", skip version = " << skip_version_str;
-                    if (version_info.version_str <= skip_version_str) {
+                    BOOST_LOG_TRIVIAL(info) << "new version = " << offered.version_str << ", skip version = " << skip_version_str;
+                    if (offered.version_str <= skip_version_str) {
                         skip_this_version = true;
                     } else {
                         app_config->set("skip_version", "");
@@ -3655,8 +3658,8 @@ bool GUI_App::on_init_inner()
                 if (!skip_this_version
                     || evt.GetInt() != 0) {
                     UpdateVersionDialog dialog(this->mainframe);
-                    wxString            extmsg = wxString::FromUTF8(version_info.description);
-                    dialog.update_version_info(extmsg, version_info.version_str);
+                    wxString            extmsg = wxString::FromUTF8(offered.description);
+                    dialog.update_version_info(extmsg, offered.version_str);
                     //dialog.update_version_info(version_info.description);
                     if (evt.GetInt() != 0) {
                         dialog.m_button_skip_version->Hide();
@@ -3668,17 +3671,17 @@ bool GUI_App::on_init_inner()
                         if (is_running_in_msix())
                             open_ms_store_product_page();
 #ifdef _WIN32
-                        else if (version_info.installer) {
+                        else if (offered.installer) {
                             // Downloads, verifies and offers to start the installer (docs/HLSD/app-update.md).
-                            AppUpdateDialog update_dialog(this->mainframe, *version_info.installer, version_info.version_str,
-                                                          version_info.url);
+                            AppUpdateDialog update_dialog(this->mainframe, *offered.installer, offered.version_str,
+                                                          offered.url);
                             if (update_dialog.ShowModal() == wxID_OK)
                                 if (std::unique_ptr<HeldFile> installer = update_dialog.take_installer())
                                     install_update_on_exit(std::move(installer));
                         }
 #endif
                         else
-                            wxLaunchDefaultBrowser(version_info.url);
+                            wxLaunchDefaultBrowser(offered.url);
                         break;
                     case wxID_NO:
                         break;
@@ -6935,11 +6938,13 @@ void GUI_App::check_new_version_sf(bool show_tips, int by_user)
                 return;
             }
 
-            version_info.url           = prefer_release ? best_release_url : best_pre_url;
-            version_info.version_str   = display_version_of_tag(prefer_release ? best_release_tag : best_pre_tag);
-            version_info.description   = prefer_release ? best_release_content : best_pre_content;
-            version_info.force_upgrade = false;
-            version_info.installer.reset();
+            // Built here, on the HTTP thread, and handed to the UI thread whole: only there is version_info
+            // replaced, so an open prompt never sees a half-written or a newer offer.
+            VersionInfo info;
+            info.url           = prefer_release ? best_release_url : best_pre_url;
+            info.version_str   = display_version_of_tag(prefer_release ? best_release_tag : best_pre_tag);
+            info.description   = prefer_release ? best_release_content : best_pre_content;
+            info.force_upgrade = false;
 #if defined(_WIN32)
             // In-app install: Windows desktop builds that checked the built-in GitHub releases URL. The
             // installer and its checksum must come from that repository's release downloads.
@@ -6949,16 +6954,20 @@ void GUI_App::check_new_version_sf(bool show_tips, int by_user)
     #else
                 const std::string arch_suffix = "_x64.exe";
     #endif
-                version_info.installer = AppUpdate::choose_installer(prefer_release ? best_release_assets : best_pre_assets,
-                                                                     arch_suffix, download_prefix);
+                info.installer = AppUpdate::choose_installer(prefer_release ? best_release_assets : best_pre_assets,
+                                                             arch_suffix, download_prefix);
             }
 #else
             (void)download_prefix;
 #endif
 
-            wxCommandEvent* evt = new wxCommandEvent(EVT_SLIC3R_VERSION_ONLINE);
-            evt->SetString((prefer_release ? best_release : best_pre).to_string());
-            GUI::wxGetApp().QueueEvent(evt);
+            const std::string chosen = (prefer_release ? best_release : best_pre).to_string();
+            GUI::wxGetApp().CallAfter([this, info = std::move(info), chosen] {
+                version_info = info;
+                wxCommandEvent* evt = new wxCommandEvent(EVT_SLIC3R_VERSION_ONLINE);
+                evt->SetString(chosen);
+                GUI::wxGetApp().QueueEvent(evt);
+            });
           } catch (...) {}
         });
 
