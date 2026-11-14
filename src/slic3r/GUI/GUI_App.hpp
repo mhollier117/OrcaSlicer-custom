@@ -16,6 +16,7 @@
 #include "libslic3r/Technologies.hpp"
 #include "libslic3r/Semver.hpp"
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include "ConfigWizardTypes.hpp"
@@ -26,6 +27,7 @@
 #include "slic3r/GUI/Mcp/McpServicePtr.hpp"
 #include "slic3r/Utils/CloudDeleteQueue.hpp"
 #include "slic3r/Utils/CloudProvider.hpp"
+#include "slic3r/Utils/AppUpdate.hpp"
 #include "libslic3r/Point.hpp"
 
 #include <vector>
@@ -120,6 +122,9 @@ class HttpServer;
 class ImGuiWrapper;
 class OpenGLManager;
 class UpgradeNetworkJob;
+#ifdef _WIN32
+class HeldFile;
+#endif
 
 typedef std::function<void(int status, int percent, bool& cancel)> InstallProgressFn;
 
@@ -199,6 +204,9 @@ public:
     std::string version_name;
     std::string description;
     std::string url;
+    // The installer the update prompt can download and start itself (see AppUpdateDialog); empty when it
+    // only opens `url`.
+    std::optional<AppUpdate::InstallerOffer> installer;
     bool        force_upgrade{ false };
     int      ver_items[VERSION_LEN];  // AA.BB.CC.DD
     VersionInfo() {
@@ -355,6 +363,9 @@ private:
     ZUserLogin*     login_dlg { nullptr };
 
     VersionInfo version_info;
+#ifdef _WIN32
+    std::unique_ptr<HeldFile> m_update_installer; // set by install_update_on_exit(), started in OnExit()
+#endif
     VersionInfo privacy_version_info;
     static std::string version_display;
     HMSQuery    *hms_query { nullptr };
@@ -620,6 +631,12 @@ public:
     void            check_update(bool show_tips, int by_user);
     void            check_new_version(bool show_tips = false, int by_user = 0);
     void            check_new_version_sf(bool show_tips = false, int by_user = 0);
+#ifdef _WIN32
+    // Install now in AppUpdateDialog: keeps the verified installer open, closes the main frame through its
+    // normal close path once the modal loops have unwound, and starts the installer at the end of OnExit().
+    // When the close is cancelled, the installer is released and nothing else happens.
+    void            install_update_on_exit(std::unique_ptr<HeldFile> installer);
+#endif
     // Offers to migrate user filament presets made against an older release that lost printers their parent
     // listed then. At startup it asks on every start that finds such presets, unless the user chose not to be
     // reminded; while the user presets sync with the cloud, it waits until they have been pulled. by_user also

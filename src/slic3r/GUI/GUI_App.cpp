@@ -17,8 +17,12 @@
 #include "WebViewDialog.hpp"
 #include "slic3r/Utils/BBLCloudServiceAgent.hpp"
 #include "slic3r/Utils/CloudDeleteQueue.hpp"
+#include "slic3r/Utils/AppUpdate.hpp"
 #include "slic3r/Utils/CustomVersion.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
+#ifdef _WIN32
+#include "slic3r/GUI/AppUpdateDialog.hpp"
+#endif
 #include "GUI_Init.hpp"
 #include "GUI_ObjectList.hpp"
 #include "slic3r/GUI/UserManager.hpp"
@@ -3053,8 +3057,41 @@ int GUI_App::OnExit()
         BOOST_LOG_TRIVIAL(error) << "Failed to clean up encrypt bbl network log file";
     }
 
+#ifdef _WIN32
+    // Install now in the update prompt: the main frame has closed. The agents' helper processes are ended so
+    // they do not keep the installed files in use, then the installer starts; the file stays held until then.
+    if (m_update_installer) {
+        terminate_update_helpers();
+        if (m_update_installer->launch())
+            BOOST_LOG_TRIVIAL(info) << "Update: the installer was started";
+        else
+            BOOST_LOG_TRIVIAL(error) << "Update: the installer did not start";
+        m_update_installer.reset();
+    }
+#endif
+
     return wxApp::OnExit();
 }
+
+#ifdef _WIN32
+void GUI_App::install_update_on_exit(std::unique_ptr<HeldFile> installer)
+{
+    m_update_installer = std::move(installer);
+    // Once the update prompt's handler and its modal loops have unwound.
+    CallAfter([this] {
+        if (!m_update_installer)
+            return;
+        // Close() runs the frame's normal close handler, which asks about unsaved work. A cancelled close
+        // returns false or leaves the frame alive; a frame that closes is scheduled for destruction.
+        MainFrame* frame  = mainframe;
+        const bool closed = frame != nullptr && frame->Close(false) && IsScheduledForDestruction(frame);
+        if (!closed) {
+            BOOST_LOG_TRIVIAL(info) << "Update: closing OrcaSlicer was cancelled; the installer is not started";
+            m_update_installer.reset();
+        }
+    });
+}
+#endif
 
 void GUI_App::CleanUp()
 {
@@ -3610,6 +3647,16 @@ bool GUI_App::on_init_inner()
                         // Store builds get updates from the Microsoft Store, not the GitHub release page.
                         if (is_running_in_msix())
                             open_ms_store_product_page();
+#ifdef _WIN32
+                        else if (version_info.installer) {
+                            // Downloads, verifies and offers to start the installer (docs/HLSD/app-update.md).
+                            AppUpdateDialog update_dialog(this->mainframe, *version_info.installer, version_info.version_str,
+                                                          version_info.url);
+                            if (update_dialog.ShowModal() == wxID_OK)
+                                if (std::unique_ptr<HeldFile> installer = update_dialog.take_installer())
+                                    install_update_on_exit(std::move(installer));
+                        }
+#endif
                         else
                             wxLaunchDefaultBrowser(version_info.url);
                         break;
@@ -6695,6 +6742,10 @@ void GUI_App::check_new_version_sf(bool show_tips, int by_user)
     AppConfig* app_config = wxGetApp().app_config;
     bool       check_stable_only = app_config->get_bool("check_stable_update_only");
     auto version_check_url = app_config->version_check_url();
+    // The installer can be downloaded in the app only when the check used the built-in URL, not an override.
+    const std::string download_prefix = version_check_url == AppConfig::default_version_check_url() ?
+                                            AppUpdate::download_prefix_for(version_check_url) :
+                                            std::string();
 
     UpdaterQuery query{
         detect_updater_iid(app_config),
@@ -6728,7 +6779,7 @@ void GUI_App::check_new_version_sf(bool show_tips, int by_user)
           BOOST_LOG_TRIVIAL(error) << format("Error getting: `%1%`: HTTP %2%, %3%", "check_new_version_sf", http_status,
                                              error);
         })
-        .on_complete([this, by_user, check_stable_only](std::string body, unsigned http_status) {
+        .on_complete([this, by_user, check_stable_only, download_prefix](std::string body, unsigned http_status) {
           if (http_status != 200)
             return;
           try {
@@ -6756,6 +6807,23 @@ void GUI_App::check_new_version_sf(bool show_tips, int by_user)
             std::string best_release_url;
             std::string best_release_content;
             std::string best_pre_content;
+            std::vector<AppUpdate::ReleaseAsset> best_release_assets;
+            std::vector<AppUpdate::ReleaseAsset> best_pre_assets;
+
+            auto release_assets = [](const boost::property_tree::ptree& node) {
+                std::vector<AppUpdate::ReleaseAsset> assets;
+                if (auto list = node.get_child_optional("assets")) {
+                    for (const auto& item : *list) {
+                        AppUpdate::ReleaseAsset asset;
+                        asset.name   = item.second.get<std::string>("name", "");
+                        asset.url    = item.second.get<std::string>("browser_download_url", "");
+                        asset.digest = item.second.get<std::string>("digest", "");
+                        asset.size   = item.second.get<long long>("size", 0);
+                        assets.push_back(std::move(asset));
+                    }
+                }
+                return assets;
+            };
 
             auto consider_release = [&](const boost::property_tree::ptree& node) {
                 auto tag_opt = node.get_optional<std::string>("tag_name");
@@ -6780,6 +6848,7 @@ void GUI_App::check_new_version_sf(bool show_tips, int by_user)
                         best_pre_tag    = tag;
                         best_pre_url    = html_url;
                         best_pre_content = body_copy;
+                        best_pre_assets = release_assets(node);
                         best_pre_valid  = true;
                     }
                 } else {
@@ -6788,6 +6857,7 @@ void GUI_App::check_new_version_sf(bool show_tips, int by_user)
                         best_release_tag     = tag;
                         best_release_url     = html_url;
                         best_release_content = body_copy;
+                        best_release_assets  = release_assets(node);
                         best_release_valid   = true;
                     }
                 }
@@ -6811,6 +6881,7 @@ void GUI_App::check_new_version_sf(bool show_tips, int by_user)
                 best_pre_tag    = best_release_tag;
                 best_pre_url    = best_release_url;
                 best_pre_content = best_release_content;
+                best_pre_assets = best_release_assets;
                 best_pre_valid  = true;
             }
 
@@ -6834,6 +6905,22 @@ void GUI_App::check_new_version_sf(bool show_tips, int by_user)
             version_info.version_str   = display_version_of_tag(prefer_release ? best_release_tag : best_pre_tag);
             version_info.description   = prefer_release ? best_release_content : best_pre_content;
             version_info.force_upgrade = false;
+            version_info.installer.reset();
+#if defined(_WIN32)
+            // In-app install: Windows desktop builds that checked the built-in GitHub releases URL. The
+            // installer and its checksum must come from that repository's release downloads.
+            if (!is_running_in_msix()) {
+    #if defined(_M_ARM64)
+                const std::string arch_suffix = "_arm64.exe";
+    #else
+                const std::string arch_suffix = "_x64.exe";
+    #endif
+                version_info.installer = AppUpdate::choose_installer(prefer_release ? best_release_assets : best_pre_assets,
+                                                                     arch_suffix, download_prefix);
+            }
+#else
+            (void)download_prefix;
+#endif
 
             wxCommandEvent* evt = new wxCommandEvent(EVT_SLIC3R_VERSION_ONLINE);
             evt->SetString((prefer_release ? best_release : best_pre).to_string());

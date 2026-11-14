@@ -125,6 +125,7 @@ src/slic3r/GUI/Jobs/SLAImportJob.cpp
 src/slic3r/GUI/Jobs/UpgradeNetworkJob.cpp
 src/slic3r/GUI/AboutDialog.cpp
 src/slic3r/GUI/ActionRegistry.cpp
+src/slic3r/GUI/AppUpdateDialog.cpp
 src/slic3r/GUI/AMSMaterialsSetting.cpp
 src/slic3r/GUI/BblPresetSyncController.cpp
 src/slic3r/GUI/ExtrusionCalibration.cpp
@@ -286,6 +287,7 @@ src/slic3r/GUI/CrealityDiscoveryDialog.cpp
 src/slic3r/GUI/TroubleshootDialog.cpp
 src/slic3r/Utils/3DPrinterOS.cpp
 src/slic3r/Utils/AstroBox.cpp
+src/slic3r/Utils/AppUpdate.cpp
 src/slic3r/Utils/Duet.cpp
 src/slic3r/Utils/UltiMaker.cpp
 src/slic3r/Utils/FlashAir.cpp

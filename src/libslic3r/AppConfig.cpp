@@ -1976,6 +1976,11 @@ std::string AppConfig::version_check_url() const
     return from_settings.empty() ? VERSION_CHECK_URL : from_settings;
 }
 
+const std::string& AppConfig::default_version_check_url()
+{
+    return VERSION_CHECK_URL;
+}
+
 std::string AppConfig::profile_update_url() const
 {
     std::string orca_updater_url = get(CONFIG_ORCA_UPDATER_URL);

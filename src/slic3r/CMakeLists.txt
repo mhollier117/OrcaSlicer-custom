@@ -856,6 +856,8 @@ set(SLIC3R_GUI_SOURCES
     pchheader.hpp
     Utils/ASCIIFolding.cpp
     Utils/ASCIIFolding.hpp
+    Utils/AppUpdate.cpp
+    Utils/AppUpdate.hpp
     Utils/AsioUtils.hpp
     Utils/AstroBox.cpp
     Utils/AstroBox.hpp
@@ -1057,6 +1059,8 @@ add_subdirectory(GUI/DeviceTab)
 
 if (WIN32)
     list(APPEND SLIC3R_GUI_SOURCES
+            GUI/AppUpdateDialog.cpp
+            GUI/AppUpdateDialog.hpp
             GUI/dark_mode/dark_mode.hpp
             GUI/dark_mode/IatHook.hpp
             GUI/dark_mode/UAHMenuBar.hpp
