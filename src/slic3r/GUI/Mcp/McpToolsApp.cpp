@@ -100,7 +100,7 @@ json app_state(McpService& service)
                {"platform", platform_name()},
                {"display_backend", display_backend()},
                {"ready", service.ready()},
-               {"dialogs", service.modals().snapshot()},
+               {"dialogs", service.modals().refreshed()},
                {"closed_menus", service.inspector().closed_menus()},
                {"auto_answer_rules", service.modals().rules_json()},
                {"mcp", service.describe()},

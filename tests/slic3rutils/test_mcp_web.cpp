@@ -28,7 +28,9 @@
 #include <wx/gdicmn.h>
 #include <wx/init.h>
 #include <wx/msgdlg.h>
+#include <wx/panel.h>
 #include <wx/sharedptr.h>
+#include <wx/stattext.h>
 #include <wx/string.h>
 #include <wx/vector.h>
 #include <wx/webview.h>
@@ -339,6 +341,38 @@ TEST_CASE("a dialog with a web view is described as a web dialog", "[Mcp]")
         // Hidden, the dialog's web view is found only when hidden ones are asked for.
         CHECK(web_view_in(&web_dialog, true) == nullptr);
         CHECK(web_view_in(&web_dialog, false) != nullptr);
+    }
+}
+
+TEST_CASE("a dialog's description lists only the text and buttons it shows now", "[Mcp]")
+{
+    if (!have_display())
+        SKIP("This test needs a display (for example, xvfb-run).");
+    wxInitializer init;
+    REQUIRE(init.IsOk());
+    {
+        // Rows that are swapped while the dialog is open, as the update dialog's stages are.
+        wxDialog dialog(nullptr, wxID_ANY, "Example update");
+        auto*    first_text = new wxStaticText(&dialog, wxID_ANY, "Example is loading.");
+        auto*    first_row  = new wxPanel(&dialog);
+        new wxButton(first_row, wxID_CANCEL, "Stop example");
+        auto* later_text = new wxStaticText(&dialog, wxID_ANY, "Example is ready.");
+        auto* later_row  = new wxPanel(&dialog);
+        new wxButton(later_row, wxID_OK, "Use example");
+        later_text->Hide();
+        later_row->Hide();
+
+        json described = describe_dialog(&dialog);
+        CHECK(described["message"] == "Example is loading.");
+        CHECK(described["buttons"] == json::array({{{"id", wxID_CANCEL}, {"label", "Stop example"}}}));
+
+        first_text->Hide();
+        first_row->Hide();
+        later_text->Show();
+        later_row->Show();
+        described = describe_dialog(&dialog);
+        CHECK(described["message"] == "Example is ready.");
+        CHECK(described["buttons"] == json::array({{{"id", wxID_OK}, {"label", "Use example"}}}));
     }
 }
 

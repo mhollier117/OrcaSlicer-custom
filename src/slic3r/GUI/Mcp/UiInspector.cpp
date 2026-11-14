@@ -2409,7 +2409,7 @@ json UiInspector::snapshot(const SnapshotOptions& o)
     json out{{"tree", format_snapshot(nodes, omitted)}, {"nodes", nodes.size()}};
     if (omitted > 0)
         out["omitted"] = omitted;
-    json dialogs = m_service.modals().snapshot();
+    json dialogs = m_service.modals().refreshed();
     if (!dialogs.empty())
         out["dialogs"] = std::move(dialogs);
     return out;

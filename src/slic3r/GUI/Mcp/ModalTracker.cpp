@@ -495,6 +495,16 @@ bool ModalTracker::any_open() const
     return !m_snapshot.empty();
 }
 
+json ModalTracker::refreshed()
+{
+    try {
+        publish();
+    } catch (...) {
+        // The stored copy stays as it was.
+    }
+    return snapshot();
+}
+
 void ModalTracker::publish()
 {
     json snap = json::array();

@@ -66,6 +66,9 @@ public:
     // Any thread.
     nlohmann::json snapshot() const;
     bool           any_open() const;
+    // The same, rebuilt from the live dialogs (a dialog that hides and shows its rows reads as it is
+    // now, not as it was when it opened) and stored back for other threads' snapshot(). UI thread only.
+    nlohmann::json refreshed();
 
     // What runs right before a rule presses a button, its wx one or its page's: as before any other
     // click, the presses ui_mouse downs left on pages end first. UI thread only.
