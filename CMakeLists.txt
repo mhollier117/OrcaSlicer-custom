@@ -1442,6 +1442,22 @@ if (WIN32)
   Push $R3
   Push $R4
   Push $R5
+
+  ; One installer at a time: two copies writing into the same folder block each other on its files. The mutex
+  ; handle is not closed; it lives until this installer process ends.
+  System::Call 'kernel32::CreateMutex(p 0, i 0, t "OrcaSlicerSetup.Installing") p .R1 ?e'
+  Pop $R0
+  StrCmp $R0 "183" 0 orca_close_single
+  Pop $R5
+  Pop $R4
+  Pop $R3
+  Pop $R2
+  Pop $R1
+  Pop $R0
+  MessageBox MB_OK|MB_ICONEXCLAMATION "OrcaSlicer Setup is already running in another window.$\n$\nFinish or close that one first." /SD IDOK
+  Abort
+orca_close_single:
+
   InitPluginsDir
   File "/oname=$PLUGINSDIR\installer_close_running.ps1" "@_orca_close_script@"
   StrCpy $R0 "$PLUGINSDIR\installer_close_running.ps1"

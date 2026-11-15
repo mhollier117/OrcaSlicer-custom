@@ -125,6 +125,9 @@ on as before.
 The order is: check, then remove the previous version by running its uninstaller silently in place, then write the
 new files. CPack's own "uninstall before install" is off because it runs in `.onInit`, before any hook. The
 uninstaller (`orca_close_running_uninstall.nsh`) does the same check for its folder before it deletes any file.
+Before all of this, the installer takes the named mutex `OrcaSlicerSetup.Installing` and holds it until it ends;
+a second installer started meanwhile finds it taken, says that Setup is already running and aborts, so two copies
+never write into the same folder at once.
 
 ## What the checksum proves
 
