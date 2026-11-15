@@ -1484,8 +1484,14 @@ orca_close_check:
   StrCmp $R3 "0" orca_close_checked
   StrCmp $R3 "error" orca_close_checked
   StrCmp $R3 "timeout" orca_close_checked
-  MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "OrcaSlicer is running.$\n$\nClose every OrcaSlicer window, then click Retry." /SD IDCANCEL IDRETRY orca_close_check
+  MessageBox MB_YESNOCANCEL|MB_ICONEXCLAMATION "OrcaSlicer is running.$\n$\nClose it now?$\n$\nYes: OrcaSlicer is asked to close. If it has unsaved work, it asks you first.$\nNo: check again (after closing it yourself).$\nCancel: stop the installation." /SD IDCANCEL IDYES orca_close_ask IDNO orca_close_check
   Abort
+orca_close_ask:
+  ; A normal close request to its windows, never a termination; then the check runs again.
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$R0" "$R2" -CloseWindows'
+  Pop $R3
+  Pop $R5
+  Goto orca_close_check
 orca_close_checked:
   StrCmp $R4 "1" orca_close_done
   StrCpy $R4 1
@@ -1528,8 +1534,14 @@ orca_close_un_check:
   StrCmp $R1 "0" orca_close_un_done
   StrCmp $R1 "error" orca_close_un_done
   StrCmp $R1 "timeout" orca_close_un_done
-  MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "OrcaSlicer is running.$\n$\nClose every OrcaSlicer window, then click Retry." /SD IDCANCEL IDRETRY orca_close_un_check
+  MessageBox MB_YESNOCANCEL|MB_ICONEXCLAMATION "OrcaSlicer is running.$\n$\nClose it now?$\n$\nYes: OrcaSlicer is asked to close. If it has unsaved work, it asks you first.$\nNo: check again (after closing it yourself).$\nCancel: stop the removal." /SD IDCANCEL IDYES orca_close_un_ask IDNO orca_close_un_check
   Abort
+orca_close_un_ask:
+  ; A normal close request to its windows, never a termination; then the check runs again.
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$R0" "$INSTDIR" -CloseWindows'
+  Pop $R1
+  Pop $R2
+  Goto orca_close_un_check
 orca_close_un_done:
   Pop $R2
   Pop $R1
